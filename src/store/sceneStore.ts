@@ -27,7 +27,8 @@ export type ShapeType =
   | "rhombus"
   | "octahedron"
   | "pyramid"
-  | "vesica";
+  | "vesica"
+  | "image";
 export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract" | "sIntersect";
 
 export type ShapeLayer = {
@@ -41,6 +42,8 @@ export type ShapeLayer = {
   params: [number, number, number, number];
   op: OpType; // ignored when index 0 in parent items
   smoothK: number;
+  /** Only for shapeType "image": baked 2D SDF as a PNG data URL (see utils/imageSdf.ts). */
+  image?: { sdf: string };
 };
 
 export type ObjectGroup = {
@@ -74,6 +77,8 @@ export const MAX_PICK_OBJECTS = 255;
 export const MAX_PICK_INSTRUCTIONS = 1024;
 /** Max nested group transform stack depth in shader. */
 export const MAX_TRANSFORM_DEPTH = 16;
+/** Distinct image SDF textures per scene (layers of the GPU texture array). */
+export const MAX_IMAGES = 8;
 
 const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
   sphere: [0.5, 0, 0, 0],
@@ -98,6 +103,7 @@ const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
   octahedron: [0.5, 0, 0, 0],
   pyramid: [0.7, 0.7, 0, 0], // base width, height
   vesica: [0.5, 0.25, 0, 0], // radius, offset
+  image: [0.5, 0.1, 0, 0], // half size, half thickness, bold, invert (0/1)
 };
 
 const TYPE_LABEL: Record<ShapeType, string> = {
@@ -123,6 +129,7 @@ const TYPE_LABEL: Record<ShapeType, string> = {
   octahedron: "Octahedron",
   pyramid: "Pyramid",
   vesica: "Vesica",
+  image: "Image",
 };
 
 export const ALL_SHAPE_TYPES = Object.keys(TYPE_LABEL) as ShapeType[];
@@ -163,6 +170,23 @@ export function countInstructions(items: SceneItem[]): number {
 
 export function wouldExceedCap(root: SceneRoot, extra: number): boolean {
   return countInstructions(root.items) + extra > MAX_INSTRUCTIONS;
+}
+
+/** Distinct baked image SDFs in the tree (duplicates share one GPU slot). */
+export function collectImageSdfs(items: SceneItem[], out = new Set<string>()): Set<string> {
+  for (const item of items) {
+    if (item.kind === "layer") {
+      if (item.image) out.add(item.image.sdf);
+    } else {
+      collectImageSdfs(item.items, out);
+    }
+  }
+  return out;
+}
+
+export function wouldExceedImages(root: SceneRoot, sdf: string): boolean {
+  const used = collectImageSdfs(root.items);
+  return !used.has(sdf) && used.size >= MAX_IMAGES;
 }
 
 function isObjectGroup(container: SceneContainer): container is ObjectGroup {
@@ -356,7 +380,11 @@ interface SceneState {
   counters: Record<ShapeType, number>;
   groupCounter: number;
 
-  addShapeToContainer: (containerId: string, shapeType: ShapeType) => boolean;
+  addShapeToContainer: (
+    containerId: string,
+    shapeType: ShapeType,
+    image?: ShapeLayer["image"],
+  ) => boolean;
   addGroupToContainer: (containerId: string) => boolean;
   removeItem: (containerId: string, itemId: string) => void;
   updateLayer: (
@@ -397,13 +425,15 @@ export const useSceneStore = create<SceneState>()(
       counters: { ...zeroCounters(), ..._saved.counters },
       groupCounter: _saved.groupCounter ?? 0,
 
-      addShapeToContainer: (containerId, shapeType) => {
+      addShapeToContainer: (containerId, shapeType, image) => {
         const state = get();
         const container = findContainer(state.root, containerId);
         if (!container) return false;
 
         const extra = extraInstructionsForNewShape(container);
         if (wouldExceedCap(state.root, extra)) return false;
+        if ((shapeType === "image") !== !!image) return false;
+        if (image && wouldExceedImages(state.root, image.sdf)) return false;
 
         const count = state.counters[shapeType] + 1;
         const newLayer: ShapeLayer = {
@@ -417,6 +447,7 @@ export const useSceneStore = create<SceneState>()(
           params: [...DEFAULT_PARAMS[shapeType]],
           op: "union",
           smoothK: 0.1,
+          ...(image ? { image } : {}),
         };
 
         set({

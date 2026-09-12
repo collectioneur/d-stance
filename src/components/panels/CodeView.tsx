@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSceneStore } from "../../store/sceneStore";
 import { generateSdfCode, type CodeLang } from "../../utils/generateSdfCode";
+import { IMAGE_SDF_PREFIX } from "../../utils/imageSdf";
+
+// Baked image PNGs are tens of KB per line: show an ellipsis, copy the real thing.
+const DATA_URL_RE = new RegExp(`${IMAGE_SDF_PREFIX}[A-Za-z0-9+/=]+`, "g");
+const elide = (code: string) => code.replace(DATA_URL_RE, `${IMAGE_SDF_PREFIX}…`);
 
 const LANGS: { id: CodeLang; label: string; shiki: string }[] = [
   { id: "typegpu", label: "TypeGPU", shiki: "typescript" },
@@ -43,6 +48,7 @@ export default function CodeView() {
 
   const generated = useMemo(() => generateSdfCode(root, selectedItemId), [root, selectedItemId]);
   const code = generated[lang];
+  const shown = useMemo(() => elide(code), [code]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,7 +56,7 @@ export default function CodeView() {
     getHighlighter().then(
       (hl) => {
         if (!cancelled)
-          setHtml(hl.codeToHtml(code, { lang: shikiLang, theme: "github-dark-default" }));
+          setHtml(hl.codeToHtml(shown, { lang: shikiLang, theme: "github-dark-default" }));
       },
       () => {
         if (!cancelled) setHtml(null);
@@ -59,7 +65,7 @@ export default function CodeView() {
     return () => {
       cancelled = true;
     };
-  }, [code, lang]);
+  }, [shown, lang]);
 
   useEffect(() => {
     if (!copied) return;
@@ -123,7 +129,7 @@ export default function CodeView() {
         {html ? (
           <div className="code-pre" dangerouslySetInnerHTML={{ __html: html }} />
         ) : (
-          <pre className="code-pre">{code}</pre>
+          <pre className="code-pre">{shown}</pre>
         )}
       </div>
     </div>

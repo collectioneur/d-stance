@@ -18,9 +18,11 @@ import {
 } from "./shader";
 import {
   useSceneStore,
+  collectImageSdfs,
   findItem,
   getAncestorGroups,
   temporalStore,
+  MAX_IMAGES,
   type ObjectGroup,
   type OpType,
   type SceneItem,
@@ -61,6 +63,7 @@ import {
   type ScaleDragState,
 } from "./gizmo";
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
+import { IMAGE_SDF_EMPTY_HALF, IMAGE_SDF_RES, decodeSdfPng } from "../utils/imageSdf";
 
 type GizmoGpuPickResult = {
   axis: GizmoHandle | null;
@@ -110,6 +113,38 @@ const SHAPE_BOUND_EPS = 1e-3;
 
 const EMPTY_OBJECT_INFO: ObjectInfoData = { start: 0, count: 0 };
 
+/**
+ * Image SDF data URL → texture array layer. Rebuilt by syncImageSlots before
+ * every pack so PUSH_SHAPE params can reference the layer. Module-level
+ * because the packers are module-level; there is one GPU root per app.
+ */
+const imageSlots = new Map<string, number>();
+
+/** Drops unused slots, assigns free ones to new images. Returns the new pairs. */
+function syncImageSlots(sceneRoot: SceneRoot): [string, number][] {
+  const used = collectImageSdfs(sceneRoot.items);
+  for (const sdf of imageSlots.keys()) if (!used.has(sdf)) imageSlots.delete(sdf);
+  const taken = new Set(imageSlots.values());
+  const added: [string, number][] = [];
+  for (const sdf of used) {
+    if (imageSlots.has(sdf)) continue;
+    let slot = 0;
+    while (slot < MAX_IMAGES && taken.has(slot)) slot++;
+    if (slot >= MAX_IMAGES) break; // over cap (hostile hash): extra images render slot 0
+    taken.add(slot);
+    imageSlots.set(sdf, slot);
+    added.push([sdf, slot]);
+  }
+  return added;
+}
+
+/** GPU params for an image layer: [halfSize, halfThickness, bold, invert·100 + layer]. */
+function packImageParams(layer: ShapeLayer): [number, number, number, number] {
+  const [size, h, bold, invert] = layer.params;
+  const slot = layer.image ? (imageSlots.get(layer.image.sdf) ?? 0) : 0;
+  return [size, h, bold, (invert > 0.5 ? 100 : 0) + slot];
+}
+
 function pushShapeInstruction(
   layer: ShapeLayer,
   ctx: BakeCtx,
@@ -123,17 +158,13 @@ function pushShapeInstruction(
   for (const group of ancestors) {
     radius *= maxAbsScale(group);
   }
+  const params = layer.shapeType === "image" ? packImageParams(layer) : layer.params;
   out.push({
     opcode: OPCODE_PUSH_SHAPE,
     shapeType: SHAPE_TYPE_INT[layer.shapeType],
     opType: 0,
     smoothK: 0,
-    params: d.vec4f(
-      layer.params[0],
-      layer.params[1],
-      layer.params[2],
-      layer.params[3],
-    ),
+    params: d.vec4f(params[0], params[1], params[2], params[3]),
     row0: d.vec3f(baked.row0[0], baked.row0[1], baked.row0[2]),
     factor: baked.factor,
     row1: d.vec3f(baked.row1[0], baked.row1[1], baked.row1[2]),
@@ -179,6 +210,10 @@ function shapeBoundRadius(layer: ShapeLayer): number {
       break;
     case "box":
       r = Math.hypot(a, b, c);
+      break;
+    case "image":
+      // 2D field is clamped to the [-a, a]² square, so bold can't escape it.
+      r = Math.hypot(a, a, b);
       break;
     case "roundedBox":
     case "boxFrame":
@@ -696,7 +731,38 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         pickObjectInfoBuffer,
         pickUniforms,
         qualityUniforms,
+        imageSdfTexture,
       } = createShader(root);
+
+      // CPU mirror of the image SDF texture array (f16 bit patterns); "far
+      // outside" so an empty or still-decoding slot renders as nothing.
+      const imageTexels = new Uint16Array(IMAGE_SDF_RES * IMAGE_SDF_RES * MAX_IMAGES).fill(
+        IMAGE_SDF_EMPTY_HALF,
+      );
+      imageSdfTexture.write(imageTexels);
+      imageSlots.clear();
+
+      function uploadImageSlots(sceneRoot: SceneRoot) {
+        const added = syncImageSlots(sceneRoot);
+        if (added.length === 0) return;
+        const layerTexels = IMAGE_SDF_RES * IMAGE_SDF_RES;
+        for (const [, slot] of added) {
+          imageTexels.fill(IMAGE_SDF_EMPTY_HALF, slot * layerTexels, (slot + 1) * layerTexels);
+        }
+        imageSdfTexture.write(imageTexels);
+        for (const [sdf, slot] of added) {
+          decodeSdfPng(sdf).then(
+            (texels) => {
+              if (cancelled || imageSlots.get(sdf) !== slot) return;
+              imageTexels.set(texels, slot * layerTexels);
+              imageSdfTexture.write(imageTexels);
+            },
+            () => {
+              /* undecodable PNG (hostile hash): slot stays empty */
+            },
+          );
+        }
+      }
 
       const pickFormat = navigator.gpu.getPreferredCanvasFormat();
       let pickTexture = root.device.createTexture({
@@ -1464,6 +1530,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         rootSelected: boolean,
         renderMode: RenderMode,
       ) {
+        uploadImageSlots(sceneRoot);
         const { instructions, objectInfos, objectCount } = buildGpuData(sceneRoot);
         instructionsBuffer.write(instructions);
         objectInfoBuffer.write(objectInfos);

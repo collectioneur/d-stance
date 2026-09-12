@@ -11,6 +11,7 @@ import {
   Globe,
   Hexagon,
   IceCreamCone,
+  ImagePlus,
   Link,
   Moon,
   Pill,
@@ -30,6 +31,7 @@ import {
   type ShapeType,
 } from "../store/sceneStore";
 import { showToast } from "./toast";
+import { isImageFile } from "./decodeImage";
 
 export const SHAPE_ICONS: Record<ShapeType, LucideIcon> = {
   sphere: Circle,
@@ -54,6 +56,7 @@ export const SHAPE_ICONS: Record<ShapeType, LucideIcon> = {
   octahedron: Gem,
   pyramid: Pyramid,
   vesica: Egg,
+  image: ImagePlus,
 };
 
 function shapeEntry(type: ShapeType) {
@@ -136,4 +139,37 @@ export const COMMANDS: Command[] = [
     keywords: ["group", "container", "folder", "nest"],
     run: addGroup,
   },
+  {
+    id: "add-image",
+    label: "Add Image (logo → SDF)",
+    icon: ImagePlus,
+    keywords: ["image", "logo", "picture", "png", "import", "extrude"],
+    run: () => pickImageFile(),
+  },
 ];
+
+/** Opens the OS file picker; the chosen image goes to the import dialog. */
+export function pickImageFile() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*,.svg";
+  input.onchange = () => {
+    const file = input.files?.[0];
+    if (file) openImageImport(file);
+  };
+  input.click();
+}
+
+let imageImportListener: ((file: File) => void) | null = null;
+
+export function setImageImportListener(fn: ((file: File) => void) | null) {
+  imageImportListener = fn;
+}
+
+export function openImageImport(file: File) {
+  if (!isImageFile(file)) {
+    showToast("Not an image file");
+    return;
+  }
+  imageImportListener?.(file);
+}

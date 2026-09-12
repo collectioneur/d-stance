@@ -61,6 +61,8 @@ Packed by `useGpu.ts`, consumed by `shader.ts`. Both sides must stay in lockstep
 
 Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake.ts`) into `row0/1/2`, `offset`, `factor`.
 
+Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` are shared by `imageSdf.ts`, `shader.ts` (`sdImage`) and `generateSdfCode.ts` (`sdImageField`); change one, change all. GPU `params.w` packs `invert·100 + layer` (`packImageParams` in `useGpu.ts`); the layer's own `params[3]` is the plain invert flag. Slots are assigned per distinct `image.sdf` string by `syncImageSlots` before every pack.
+
 ### 3. Bake math
 
 `bake.ts` must reproduce the old GPU transform exactly. Image changes if the order changes.
@@ -80,7 +82,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 4`. Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`.
+`SCHEMA_VERSION = 5` (v4 still accepted: strict subset). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.
@@ -98,6 +100,7 @@ Losing a scene is data loss. Treat persist mistakes like a security bug.
 | `MAX_GPU_OBJECTS` | 8 | `objectInfo` slots; scene render uses root slot `[0]` |
 | `MAX_PICK_OBJECTS` | 255 | Pick IDs fit in one byte (`1–255`) |
 | `MAX_PICK_INSTRUCTIONS` | 1024 | Separate pick CSG buffer |
+| `MAX_IMAGES` | 8 | Distinct image SDFs per scene (texture array layers) |
 
 UI toasts exist for cap / cycle / depth. Do not raise a cap in one file and leave the others.
 
@@ -140,5 +143,6 @@ Pitfalls:
 3. GPU files (`shader.ts`, `bake.ts`, `useGpu.ts`): `npm run inspect:gpu` (Chromium/WebGPU compiles the raymarch pipeline). `tsc` does not compile WGSL. MCP tool: `typegpu_inspector` → `inspect_typegpu` on `src/gpu/shader.inspect.ts`. Then confirm the canvas is not black.
 4. UI: exercise the changed flow in the browser (click/type/drag). Check the other surfaces that read the same store (tree, inspector, gizmo, code export, hash after reload).
 5. New persist field: load an old `v: 4` blob and a blob missing the field.
+6. Image import: `src/utils/imageSdf.ts` runs `assertImageSdf()` on import (EDT + u8 round trip). Exercise paste/drop → dialog → add, then reload from hash.
 
 Code, commits, and PR text stay normal prose. Do not commit unless asked.

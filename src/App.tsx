@@ -5,11 +5,14 @@ import LeftPanel from "./components/panels/LeftPanel";
 import RightPanel from "./components/panels/RightPanel";
 import GizmoPanel from "./components/panels/GizmoPanel";
 import CommandPalette from "./components/CommandPalette";
+import ImageImportDialog from "./components/ImageImportDialog";
 import RenderModePanel from "./components/panels/RenderModePanel";
 import QualityPanel from "./components/panels/QualityPanel";
 import { undoScene, redoScene } from "./store/sceneStore";
 import { useGizmoStore } from "./store/gizmoStore";
 import { usePersistence } from "./store/persistence";
+import { openImageImport } from "./utils/commands";
+import { isImageFile } from "./utils/decodeImage";
 import { setToastListener } from "./utils/toast";
 
 export default function App() {
@@ -61,6 +64,40 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Paste or drop an image anywhere → import dialog. Tree DnD carries no
+  // files, so its drops fall through untouched.
+  useEffect(() => {
+    const imageOf = (files: FileList | undefined | null) =>
+      Array.from(files ?? []).find(isImageFile);
+    const onPaste = (e: ClipboardEvent) => {
+      const tag = (document.activeElement as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const file = imageOf(e.clipboardData?.files);
+      if (file) {
+        e.preventDefault();
+        openImageImport(file);
+      }
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      const file = imageOf(e.dataTransfer?.files);
+      if (file) {
+        e.preventDefault();
+        openImageImport(file);
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("paste", onPaste);
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
+
   if (!navigator.gpu) {
     return (
       <div className="no-webgpu">
@@ -84,6 +121,7 @@ export default function App() {
       <RightPanel />
       <GizmoPanel />
       <CommandPalette />
+      <ImageImportDialog />
       {toast && (
         <div
           style={{

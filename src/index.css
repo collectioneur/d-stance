@@ -1214,6 +1214,230 @@ canvas {
   font-style: italic;
 }
 
+/* ─── Image import dialog ────────────────────────────────────── */
+
+.image-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.image-dialog {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur-panel);
+  -webkit-backdrop-filter: var(--blur-panel);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+
+.image-dialog-title {
+  font-size: var(--text-md);
+  color: var(--text-1);
+}
+
+.image-dialog-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 220px;
+  border: 1px solid var(--border-3);
+  border-radius: var(--radius-md);
+  background: var(--scale-0);
+  overflow: hidden;
+}
+
+.image-dialog-preview canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.image-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 20px;
+}
+
+.image-dialog-row span {
+  width: 72px;
+  color: var(--text-3);
+}
+
+/* ─── Themed form controls (match the quality slider) ────────── */
+
+/* Continuous range styled like .quality-track; set --frac (0..1) from JS
+   so the filled part lines up with the thumb centre. */
+.ui-range {
+  --frac: 0;
+  --fill: calc(6px + (100% - 12px) * var(--frac));
+  flex: 1;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.ui-range:focus-visible {
+  outline: none;
+}
+
+.ui-range:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ui-range::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-strong) var(--fill),
+    var(--border-1) var(--fill)
+  );
+}
+
+.ui-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent-text);
+  border: 2px solid var(--accent-strong);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.ui-range::-moz-range-track {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--border-1);
+}
+
+.ui-range::-moz-range-progress {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent-strong);
+}
+
+.ui-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent-text);
+  border: 2px solid var(--accent-strong);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+.ui-check {
+  position: relative;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.ui-check:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent-border);
+}
+
+.ui-check:checked {
+  background: var(--accent-mid);
+  border-color: var(--accent-border);
+}
+
+.ui-check:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 3px;
+  height: 7px;
+  border: solid var(--accent-text);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.ui-check:focus-visible {
+  outline: 1px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+.ui-check:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.image-dialog-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-4);
+}
+
+.image-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.image-dialog-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.image-dialog-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.image-dialog-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.image-dialog-btn--primary {
+  background: var(--accent-mid);
+  color: var(--accent-text);
+}
+
 /* ─── No WebGPU fallback ─────────────────────────────────────── */
 
 .no-webgpu {

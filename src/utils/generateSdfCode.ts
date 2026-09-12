@@ -7,6 +7,7 @@ import {
   type ShapeLayer,
   type ShapeType,
 } from "../store/sceneStore";
+import { IMAGE_SDF_RES, IMAGE_SDF_STEP_PX } from "./imageSdf";
 
 export type CodeLang = "typegpu" | "wgsl" | "glsl";
 
@@ -56,6 +57,8 @@ interface ShapeRhs {
   /** min(scale) * min(accScl) conservative distance factor. */
   factor: number;
   params: [number, number, number, number];
+  /** Index into Ir.images for shape "image"; -1 when the layer has no baked SDF. */
+  imageIndex: number;
 }
 interface VarRhs {
   kind: "var";
@@ -74,6 +77,8 @@ interface Ir {
   usedShapes: Set<ShapeType>;
   usesRotation: boolean;
   usesSmin: boolean;
+  /** Distinct baked image SDF data URLs, in order of first use. */
+  images: string[];
 }
 
 const SMOOTH_OPS = new Set<OpType>(["sUnion", "sSubtract", "sIntersect"]);
@@ -98,6 +103,7 @@ function findItemIn(items: SceneItem[], itemId: string): SceneItem | null {
 function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   const stmts: Stmt[] = [];
   const usedShapes = new Set<ShapeType>();
+  const images: string[] = [];
   let usesRotation = false;
   let usesSmin = false;
   let accN = 0;
@@ -107,6 +113,11 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     usedShapes.add(layer.shapeType);
     const rot = isZero(layer.rotation) ? null : toRad(layer.rotation);
     if (rot) usesRotation = true;
+    let imageIndex = -1;
+    if (layer.shapeType === "image" && layer.image) {
+      imageIndex = images.indexOf(layer.image.sdf);
+      if (imageIndex < 0) imageIndex = images.push(layer.image.sdf) - 1;
+    }
     return {
       kind: "shape",
       shape: layer.shapeType,
@@ -117,6 +128,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       scale: isOne(layer.scale) ? null : layer.scale,
       factor: minV(layer.scale) * minV(accScl),
       params: layer.params,
+      imageIndex,
     };
   }
 
@@ -167,8 +179,14 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     result = walkItems(root.items, "p", [1, 1, 1]);
   }
 
-  return { stmts, result, usedShapes, usesRotation, usesSmin };
+  return { stmts, result, usedShapes, usesRotation, usesSmin, images };
 }
+
+// Image SDF texel → distance. Must match sdImage in src/gpu/shader.ts.
+// t = STEP · (r·255 − 128.5 + g) reassembles the coarse (R) + residual (G)
+// bytes into d_px / RES; distance = t · 2s.
+const IMG_STEP = `(${fmt(IMAGE_SDF_STEP_PX)} / ${fmt(IMAGE_SDF_RES)})`; // exact, unlike a 6-digit literal
+const IMG_NOTE = `${IMAGE_SDF_RES}×${IMAGE_SDF_RES} baked signed-distance PNG, 16-bit split over .r (coarse) + .g (residual); linear filtering, clamp to edge`;
 
 // ── Helper sources ────────────────────────────────────────────────────────────
 
@@ -384,6 +402,23 @@ const sdRhombus = (p: d.v3f, la: number, lb: number, h: number, ra: number): num
   if ((q.y - b) * dd > q.x * b) { result = std.length(q - d.vec2f(0.0, b)); }
   return result;
 };`,
+  image: `// t = normalized distance from the texture (d_px / RES); outside the square
+// √(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
+const sdImageField = (p: d.v3f, t: number, s: number, h: number, bold: number, invert: number): number => {
+  "use gpu";
+  const dTex = t * (2.0 * s);
+  const b = std.abs(d.vec2f(p.x, p.y)) - d.vec2f(s);
+  const dBox = std.length(std.max(b, d.vec2f(0.0))) + std.min(std.max(b.x, b.y), 0.0);
+  let d2 = dTex - bold;
+  if (invert > 0.5) {
+    d2 = std.max(-d2, dBox);
+  } else if (dBox > 0.0) {
+    const dEdge = std.max(dTex, 0.0);
+    d2 = std.sqrt(dBox * dBox + dEdge * dEdge) - bold;
+  }
+  const w = d.vec2f(d2, std.abs(p.z) - h);
+  return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0)));
+};`,
 };
 
 const WGSL_HELPERS: Record<ShapeType, string> = {
@@ -563,6 +598,22 @@ fn sdRhombus(p: vec3f, la: f32, lb: f32, h: f32, ra: f32) -> f32 {
   if ((q.y - b) * dd > q.x * b) { return length(q - vec2f(0.0, b)); }
   return length(q - vec2f(-dd, 0.0)) - r;
 }`,
+  image: `// t = normalized distance from the texture (d_px / RES); outside the square
+// sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
+fn sdImageField(p: vec3f, t: f32, s: f32, h: f32, bold: f32, invert: f32) -> f32 {
+  let dTex = t * (2.0 * s);
+  let b = abs(p.xy) - vec2f(s);
+  let dBox = length(max(b, vec2f(0.0))) + min(max(b.x, b.y), 0.0);
+  var d2 = dTex - bold;
+  if (invert > 0.5) {
+    d2 = max(-d2, dBox);
+  } else if (dBox > 0.0) {
+    let dEdge = max(dTex, 0.0);
+    d2 = sqrt(dBox * dBox + dEdge * dEdge) - bold;
+  }
+  let w = vec2f(d2, abs(p.z) - h);
+  return min(max(w.x, w.y), 0.0) + length(max(w, vec2f(0.0)));
+}`,
 };
 
 const GLSL_HELPERS: Record<ShapeType, string> = {
@@ -741,7 +792,64 @@ float sdRhombus(vec3 p, float la, float lb, float h, float ra) {
   if ((q.y - b) * dd > q.x * b) { return length(q - vec2(0.0, b)); }
   return length(q - vec2(-dd, 0.0)) - r;
 }`,
+  image: `// t = normalized distance from the texture (d_px / RES); outside the square
+// sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
+float sdImageField(vec3 p, float t, float s, float h, float bold, float invert) {
+  float dTex = t * (2.0 * s);
+  vec2 b = abs(p.xy) - vec2(s);
+  float dBox = length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0);
+  float d2 = dTex - bold;
+  if (invert > 0.5) {
+    d2 = max(-d2, dBox);
+  } else if (dBox > 0.0) {
+    float dEdge = max(dTex, 0.0);
+    d2 = sqrt(dBox * dBox + dEdge * dEdge) - bold;
+  }
+  vec2 w = vec2(d2, abs(p.z) - h);
+  return min(max(w.x, w.y), 0.0) + length(max(w, vec2(0.0)));
+}`,
 };
+
+// Per-image texture binding + sampling wrapper. `i` = image index.
+const TG_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
+// Load once: imageTex${i}.write(await createImageBitmap(await (await fetch(IMAGE_${i})).blob()));
+const IMAGE_${i} = "${url}";
+const imageTex${i} = root.createTexture({ size: [${IMAGE_SDF_RES}, ${IMAGE_SDF_RES}], format: "rgba8unorm" }).$usage("sampled", "render");
+const imageTex${i}View = imageTex${i}.createView(d.texture2d(d.f32));
+const sdImageTex${i} = (p: d.v3f, s: number, h: number, bold: number, invert: number): number => {
+  "use gpu";
+  const uv = d.vec2f(p.x, p.y) * (0.5 / s) + d.vec2f(0.5); // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
+  const rg = std.textureSampleLevel(imageTex${i}View.$, imageSampler.$, uv, 0);
+  const t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
+  return sdImageField(p, t, s, h, bold, invert);
+};`;
+
+const TG_IMAGE_SAMPLER = `const imageSampler = root.createSampler({
+  magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
+});`;
+
+const WGSL_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
+// ${url}
+@group(0) @binding(${i + 1}) var imageTex${i}: texture_2d<f32>;
+fn sdImageTex${i}(p: vec3f, s: f32, h: f32, bold: f32, invert: f32) -> f32 {
+  let uv = p.xy / s * 0.5 + 0.5; // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
+  let rg = textureSampleLevel(imageTex${i}, imageSampler, uv, 0.0).xy;
+  let t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
+  return sdImageField(p, t, s, h, bold, invert);
+}`;
+
+const WGSL_IMAGE_SAMPLER = `// Linear, clamp-to-edge.
+@group(0) @binding(0) var imageSampler: sampler;`;
+
+const GLSL_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
+// ${url}
+uniform sampler2D imageTex${i};
+float sdImageTex${i}(vec3 p, float s, float h, float bold, float invert) {
+  vec2 uv = p.xy / s * 0.5 + 0.5; // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
+  vec2 rg = textureLod(imageTex${i}, uv, 0.0).rg;
+  float t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
+  return sdImageField(p, t, s, h, bold, invert);
+}`;
 
 const TG_ROT = `const applyInvRotXYZ = (lp: d.v3f, rot: d.v3f): d.v3f => {
   "use gpu";
@@ -800,7 +908,13 @@ interface Syntax {
   assignStmt(name: string, expr: string): string;
   fnOpen(fn: string): string;
   fnClose: string;
-  helpers: { shapes: Record<ShapeType, string>; rot: string; smin: string };
+  helpers: {
+    shapes: Record<ShapeType, string>;
+    rot: string;
+    smin: string;
+    imageSampler: string;
+    image: (i: number, url: string) => string;
+  };
 }
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_.]*$/;
@@ -860,6 +974,12 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
       break;
     case "octahedron":
       call = `sdOctahedron(${lp}, ${fmt(p0)})`;
+      break;
+    case "image":
+      call =
+        rhs.imageIndex < 0
+          ? fmt(1e10) // layer without a baked SDF contributes nothing
+          : `sdImageTex${rhs.imageIndex}(${lp}, ${fmt(p0)}, ${fmt(p1)}, ${fmt(p2)}, ${fmt(p3 > 0.5 ? 1 : 0)})`;
       break;
     case "cylinder":
     case "capsule":
@@ -927,6 +1047,8 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   for (const shape of ALL_SHAPE_TYPES) {
     if (ir.usedShapes.has(shape)) helpers.push(syn.helpers.shapes[shape]);
   }
+  if (ir.images.length > 0 && syn.helpers.imageSampler) helpers.push(syn.helpers.imageSampler);
+  ir.images.forEach((url, i) => helpers.push(syn.helpers.image(i, url)));
   if (ir.usesRotation) helpers.push(syn.helpers.rot);
   if (ir.usesSmin) helpers.push(syn.helpers.smin);
 
@@ -944,7 +1066,7 @@ const TG_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `const ${fn} = (p: d.v3f): number => {\n  "use gpu";`,
   fnClose: "};",
-  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN },
+  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
 };
 
 const WGSL_SYNTAX: Syntax = {
@@ -958,7 +1080,7 @@ const WGSL_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `fn ${fn}(p: vec3f) -> f32 {`,
   fnClose: "}",
-  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN },
+  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
 };
 
 const GLSL_SYNTAX: Syntax = {
@@ -972,7 +1094,7 @@ const GLSL_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `float ${fn}(vec3 p) {`,
   fnClose: "}",
-  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN },
+  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, imageSampler: "", image: GLSL_IMAGE },
 };
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -982,6 +1104,7 @@ const RESERVED = new Set([
   "smin",
   "applyInvRotXYZ",
   "ndot2",
+  "sdImageField",
 ]);
 
 function sdfFnName(nodeName: string): string {
@@ -993,7 +1116,7 @@ function sdfFnName(nodeName: string): string {
     .map((w) => w[0].toUpperCase() + w.slice(1))
     .join("");
   let fn = `sd${base || "Model"}`;
-  if (RESERVED.has(fn)) fn += "Model";
+  if (RESERVED.has(fn) || /^sdImageTex\d+$/.test(fn)) fn += "Model";
   return fn;
 }
 

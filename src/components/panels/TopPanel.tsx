@@ -1,8 +1,8 @@
 import { useState, useRef } from "react";
 import { useStore } from "zustand";
-import { Check, Link2, Plus, Redo2, Undo2 } from "lucide-react";
+import { Check, ImagePlus, Link2, Plus, Redo2, Undo2 } from "lucide-react";
 import { temporalStore, undoScene, redoScene } from "../../store/sceneStore";
-import { SHAPES, addShape } from "../../utils/commands";
+import { SHAPES, addShape, pickImageFile } from "../../utils/commands";
 import { openPalette } from "../CommandPalette";
 
 const isMac = navigator.platform.startsWith("Mac");
@@ -71,6 +71,13 @@ export default function TopPanel() {
             <span className="shape-btn-key">{i + 1}</span>
           </button>
         ))}
+        <button
+          className="shape-btn shape-btn--icon"
+          onClick={pickImageFile}
+          title="Add image as SDF (or paste / drop an image)"
+        >
+          <ImagePlus size={15} />
+        </button>
         <button
           className="shape-btn shape-btn--icon"
           onClick={openPalette}

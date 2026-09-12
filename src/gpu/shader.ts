@@ -2,10 +2,12 @@ import { tgpu, d, std } from "typegpu";
 import { fullScreenTriangle } from "typegpu/common";
 import {
   MAX_GPU_OBJECTS,
+  MAX_IMAGES,
   MAX_INSTRUCTIONS,
   MAX_PICK_INSTRUCTIONS,
   MAX_PICK_OBJECTS,
 } from "../store/sceneStore";
+import { IMAGE_SDF_RES } from "../utils/imageSdf";
 
 type TgpuRoot = Awaited<ReturnType<typeof tgpu.init>>;
 
@@ -42,6 +44,7 @@ export const SHAPE_TYPE_INT = {
   octahedron: 19,
   pyramid: 20,
   vesica: 21,
+  image: 22,
 } as const;
 
 export const OP_TYPE_INT = {
@@ -267,6 +270,23 @@ export function createShader(root: TgpuRoot) {
     d.arrayOf(ObjectInfo, MAX_PICK_OBJECTS),
     Array.from({ length: MAX_PICK_OBJECTS }, () => ({ ...emptyObjectInfo })),
   );
+
+  // Baked 2D SDFs of imported images, one array layer per distinct image.
+  // r16float texel t (= d_px / RES) ⇒ distance = t · (2 · halfSize).
+  // Written by useGpu.ts as one RES×RES×MAX_IMAGES f16 block.
+  const imageSdfTexture = root
+    .createTexture({
+      size: [IMAGE_SDF_RES, IMAGE_SDF_RES, MAX_IMAGES],
+      format: "r16float",
+    })
+    .$usage("sampled");
+  const imageSdfView = imageSdfTexture.createView(d.texture2dArray(d.f32));
+  const imageSdfSampler = root.createSampler({
+    magFilter: "linear",
+    minFilter: "linear",
+    addressModeU: "clamp-to-edge",
+    addressModeV: "clamp-to-edge",
+  });
 
   // ── SDF primitives ────────────────────────────────────────────────────────
 
@@ -649,6 +669,41 @@ export function createShader(root: TgpuRoot) {
     );
   };
 
+  // Extruded image SDF. Local square [-s, s]² maps to the texture. Inside the
+  // square the texel is the distance; outside, clamp-to-edge gives the
+  // distance dEdge at the nearest edge point q, and since the content lies
+  // inside the square, |p − c|² ≥ |p − q|² + |q − c|², so √(dBox² + dEdge²)
+  // is a tight lower bound that is continuous across the edge.
+  // bold thickens the silhouette; invert = 1 turns it into a plate with the
+  // silhouette cut out. Sampling must be textureSampleLevel: this runs in
+  // non-uniform control flow inside the instruction loop.
+  const sdImage = (
+    p: d.v3f,
+    s: number,
+    h: number,
+    bold: number,
+    invert: number,
+    layer: number,
+  ): number => {
+    "use gpu";
+    // Viewport camera sits at −Z with screen-up = world −Y, so image row 0
+    // (top) maps to −Y and the logo reads upright from the default view.
+    const uv = d.vec2f(p.x, p.y) * (0.5 / s) + d.vec2f(0.5);
+    const t = std.textureSampleLevel(imageSdfView.$, imageSdfSampler.$, uv, d.u32(layer), 0).x;
+    const dTex = t * (2.0 * s);
+    const b = std.abs(d.vec2f(p.x, p.y)) - d.vec2f(s);
+    const dBox = std.length(std.max(b, d.vec2f(0.0))) + std.min(std.max(b.x, b.y), 0.0);
+    let d2 = dTex - bold;
+    if (invert > 0.5) {
+      d2 = std.max(-d2, dBox);
+    } else if (dBox > 0.0) {
+      const dEdge = std.max(dTex, 0.0);
+      d2 = std.sqrt(dBox * dBox + dEdge * dEdge) - bold;
+    }
+    const w = d.vec2f(d2, std.abs(p.z) - h);
+    return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0)));
+  };
+
   const evalShape = (lp: d.v3f, shapeType: number, params: d.v4f): number => {
     "use gpu";
     let result = d.f32(1e10);
@@ -696,6 +751,14 @@ export function createShader(root: TgpuRoot) {
       result = sdPyramid(lp, params.x, params.y);
     } else if (shapeType === d.u32(21)) {
       result = sdVesica(lp, params.x, params.y);
+    } else if (shapeType === d.u32(22)) {
+      // params: x = half size, y = half thickness, z = bold, w = packed
+      // (invert flag in the integer part ≥ 100, texture layer below it) —
+      // see packImageParams in useGpu.ts.
+      let invert = d.f32(0.0);
+      if (params.w >= 100.0) invert = d.f32(1.0);
+      const layer = params.w - invert * 100.0;
+      result = sdImage(lp, params.x, params.y, params.z, invert, layer);
     }
     return result;
   };
@@ -1733,5 +1796,6 @@ export function createShader(root: TgpuRoot) {
     pickObjectInfoBuffer,
     pickUniforms,
     qualityUniforms,
+    imageSdfTexture,
   };
 }

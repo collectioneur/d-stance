@@ -158,6 +158,11 @@ const SIZE_FIELDS: Record<string, SizeField[]> = {
     { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
     { label: "Offset", paramIndex: 1, min: 0.005, step: 0.05 },
   ],
+  image: [
+    { label: "Size", paramIndex: 0, min: 0.01, step: 0.05 },
+    { label: "Thickness", paramIndex: 1, min: 0.005, step: 0.02 },
+    { label: "Bold", paramIndex: 2, min: -10, step: 0.005 },
+  ],
 };
 
 const OP_OPTIONS: { value: OpType; label: string; icon: string }[] = [
@@ -390,10 +395,25 @@ function LayerProperties({
           min={f.min}
           max={f.max}
           step={f.step}
-          decimals={2}
+          decimals={f.step < 0.01 ? 3 : 2}
           onChange={(v) => setParam(f.paramIndex, v)}
         />
       ))}
+      {layer.shapeType === "image" && (
+        <div className="prop-row">
+          <label className="prop-label" htmlFor={`invert-${layer.id}`}>
+            Invert
+          </label>
+          <input
+            id={`invert-${layer.id}`}
+            className="ui-check"
+            type="checkbox"
+            checked={layer.params[3] > 0.5}
+            onChange={(e) => setParam(3, e.target.checked ? 1 : 0)}
+            title="Plate with the silhouette cut out"
+          />
+        </div>
+      )}
     </div>
   );
 }

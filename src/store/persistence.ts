@@ -7,8 +7,12 @@ import {
   useSceneStore,
 } from "./sceneStore";
 import { temporalStore } from "./sceneStore";
+import { isImageSdfDataUrl } from "../utils/imageSdf";
 
-const SCHEMA_VERSION = 4;
+/** v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image". */
+const SCHEMA_VERSION = 5;
+/** v4 is a strict subset of v5 (no image layers), so it loads as-is. */
+const ACCEPTED_VERSIONS = new Set([4, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -18,16 +22,33 @@ export type PersistedScene = {
   groupCounter: number;
 };
 
+type LooseItem = {
+  kind: string;
+  shapeType?: unknown;
+  scale?: unknown;
+  image?: unknown;
+  items?: unknown;
+};
+
 /**
  * Additive migration: layers persisted before the scale feature lack the
  * `scale` field. Fill defaults and sanitize (trust boundary — hash/LS data is
  * user-editable; a zero component would divide by zero in the shader).
+ * Image layers must carry a well-formed baked SDF; otherwise the layer is
+ * dropped rather than rendered from garbage.
  */
 function normalizePersisted(s: PersistedScene): PersistedScene {
-  const fixItems = (
-    items: { kind: string; scale?: unknown; items?: unknown }[],
-  ) => {
+  const hasValidImage = (item: LooseItem) =>
+    typeof item.image === "object" &&
+    item.image !== null &&
+    isImageSdfDataUrl((item.image as { sdf?: unknown }).sdf);
+
+  const fixItems = (itemsIn: LooseItem[]): LooseItem[] => {
+    const items = itemsIn.filter(
+      (item) => item.kind !== "layer" || item.shapeType !== "image" || hasValidImage(item),
+    );
     for (const item of items) {
+      if (item.kind === "layer" && item.shapeType !== "image") delete item.image;
       const valid =
         Array.isArray(item.scale) &&
         item.scale.length === 3 &&
@@ -40,11 +61,14 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
         );
       }
       if (item.kind === "group" && Array.isArray(item.items)) {
-        fixItems(item.items as { kind: string }[]);
+        item.items = fixItems(item.items as LooseItem[]);
       }
     }
+    return items;
   };
-  if (Array.isArray(s.root?.items)) fixItems(s.root.items);
+  if (Array.isArray(s.root?.items)) {
+    s.root.items = fixItems(s.root.items as LooseItem[]) as SceneRoot["items"];
+  }
   return s;
 }
 
@@ -62,7 +86,7 @@ function decodeHash(raw: string): PersistedScene | null {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    if (parsed?.v !== SCHEMA_VERSION) return null;
+    if (!ACCEPTED_VERSIONS.has(parsed?.v)) return null;
     return normalizePersisted(parsed as PersistedScene);
   } catch {
     return null;
@@ -74,7 +98,7 @@ function loadFromStorage(): PersistedScene | null {
     const raw = localStorage.getItem(LS_KEY);
     if (raw) {
       const fromLS = JSON.parse(raw) as PersistedScene;
-      if (fromLS?.v === SCHEMA_VERSION) return normalizePersisted(fromLS);
+      if (ACCEPTED_VERSIONS.has(fromLS?.v)) return normalizePersisted(fromLS);
     }
   } catch {
     // ignore
