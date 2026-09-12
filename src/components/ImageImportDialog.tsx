@@ -6,6 +6,7 @@ import {
   buildMask,
   maskPreview,
   type ImageAnalysis,
+  type ImageCrop,
 } from "../utils/imageSdf";
 import { setImageImportListener } from "../utils/commands";
 import { decodeImageFile } from "../utils/decodeImage";
@@ -13,6 +14,10 @@ import { showToast } from "../utils/toast";
 
 const THRESHOLD_MIN = 0.02;
 const THRESHOLD_MAX = 0.98;
+/** Hit radius for crop edges/corners, in CSS px. */
+const CROP_HANDLE_PX = 8;
+/** Smallest crop side, as a fraction of the image; below this a drag counts as a click. */
+const CROP_MIN = 0.01;
 
 /** Mounted once in App; opened via openImageImport(file) from commands.ts. */
 export default function ImageImportDialog() {
@@ -25,13 +30,58 @@ export default function ImageImportDialog() {
   return <ImportBody key={file.name + file.size} file={file} onClose={() => setFile(null)} />;
 }
 
+// ── Crop interaction ──────────────────────────────────────────────────────────
+
+/** -1 / 0 / 1 per axis: which edge (if any) a pointer is grabbing. */
+type Grip = { hx: -1 | 0 | 1; hy: -1 | 0 | 1; inside: boolean };
+
+type Drag =
+  | { mode: "new"; sx: number; sy: number }
+  | { mode: "move"; sx: number; sy: number; start: ImageCrop }
+  | { mode: "resize"; grip: Grip; start: ImageCrop };
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+function gripAt(crop: ImageCrop | null, x: number, y: number, tolX: number, tolY: number): Grip {
+  if (!crop) return { hx: 0, hy: 0, inside: false };
+  const nearX = x >= crop.x0 - tolX && x <= crop.x1 + tolX;
+  const nearY = y >= crop.y0 - tolY && y <= crop.y1 + tolY;
+  let hx: -1 | 0 | 1 = 0;
+  let hy: -1 | 0 | 1 = 0;
+  if (nearY) {
+    if (Math.abs(x - crop.x0) <= tolX) hx = -1;
+    else if (Math.abs(x - crop.x1) <= tolX) hx = 1;
+  }
+  if (nearX) {
+    if (Math.abs(y - crop.y0) <= tolY) hy = -1;
+    else if (Math.abs(y - crop.y1) <= tolY) hy = 1;
+  }
+  const inside = x > crop.x0 && x < crop.x1 && y > crop.y0 && y < crop.y1;
+  return { hx, hy, inside };
+}
+
+function cursorFor(g: Grip): string {
+  if (g.hx && g.hy) return g.hx === g.hy ? "nwse-resize" : "nesw-resize";
+  if (g.hx) return "ew-resize";
+  if (g.hy) return "ns-resize";
+  return g.inside ? "move" : "crosshair";
+}
+
+// ── Dialog body ───────────────────────────────────────────────────────────────
+
 function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [threshold, setThreshold] = useState(0.5);
   const [invert, setInvert] = useState(false);
+  const [crop, setCrop] = useState<ImageCrop | null>(null);
   const [busy, setBusy] = useState(false);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [cursor, setCursor] = useState("crosshair");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<Drag | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -60,6 +110,18 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
     };
   }, [file, onClose]);
 
+  // Preview box size → letterboxed stage size (we position the crop overlay
+  // ourselves, so object-fit is not enough).
+  useEffect(() => {
+    const el = previewRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      setBox({ w: entry.contentRect.width, h: entry.contentRect.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   useEffect(() => {
     const c = canvasRef.current;
     if (!analysis || !c) return;
@@ -83,9 +145,9 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
     setBusy(true);
     // Yield one tick so the button repaints before the synchronous bake.
     setTimeout(() => {
-      const sdf = bakeImageSdf(bitmap, analysis, threshold, invert);
+      const sdf = bakeImageSdf(bitmap, analysis, threshold, invert, crop);
       if (!sdf) {
-        showToast("Nothing detected — adjust the threshold");
+        showToast(crop ? "Nothing detected inside the crop" : "Nothing detected — adjust the threshold");
         setBusy(false);
         return;
       }
@@ -102,7 +164,78 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
     }, 0);
   }
 
+  // ── Crop pointer handling (all hit-testing on the stage, in image fractions) ──
+
+  function pointerNorm(e: React.PointerEvent): { x: number; y: number; tolX: number; tolY: number } {
+    const r = stageRef.current!.getBoundingClientRect();
+    return {
+      x: clamp01((e.clientX - r.left) / r.width),
+      y: clamp01((e.clientY - r.top) / r.height),
+      tolX: CROP_HANDLE_PX / r.width,
+      tolY: CROP_HANDLE_PX / r.height,
+    };
+  }
+
+  function onStageDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0 || !analysis) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = pointerNorm(e);
+    const g = gripAt(crop, p.x, p.y, p.tolX, p.tolY);
+    if (crop && (g.hx || g.hy)) dragRef.current = { mode: "resize", grip: g, start: crop };
+    else if (crop && g.inside) dragRef.current = { mode: "move", sx: p.x, sy: p.y, start: crop };
+    else dragRef.current = { mode: "new", sx: p.x, sy: p.y };
+  }
+
+  function onStageMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!analysis) return;
+    const p = pointerNorm(e);
+    const drag = dragRef.current;
+    if (!drag) {
+      setCursor(cursorFor(gripAt(crop, p.x, p.y, p.tolX, p.tolY)));
+      return;
+    }
+    if (drag.mode === "new") {
+      setCrop({
+        x0: Math.min(drag.sx, p.x),
+        y0: Math.min(drag.sy, p.y),
+        x1: Math.max(drag.sx, p.x),
+        y1: Math.max(drag.sy, p.y),
+      });
+    } else if (drag.mode === "move") {
+      const w = drag.start.x1 - drag.start.x0;
+      const h = drag.start.y1 - drag.start.y0;
+      const x0 = Math.min(1 - w, Math.max(0, drag.start.x0 + (p.x - drag.sx)));
+      const y0 = Math.min(1 - h, Math.max(0, drag.start.y0 + (p.y - drag.sy)));
+      setCrop({ x0, y0, x1: x0 + w, y1: y0 + h });
+    } else {
+      const { grip, start } = drag;
+      const c = { ...start };
+      if (grip.hx === -1) c.x0 = Math.min(p.x, start.x1 - CROP_MIN);
+      if (grip.hx === 1) c.x1 = Math.max(p.x, start.x0 + CROP_MIN);
+      if (grip.hy === -1) c.y0 = Math.min(p.y, start.y1 - CROP_MIN);
+      if (grip.hy === 1) c.y1 = Math.max(p.y, start.y0 + CROP_MIN);
+      setCrop(c);
+    }
+  }
+
+  function onStageUp(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    // A plain click (no meaningful rectangle) clears the crop.
+    if (drag.mode === "new" && crop && (crop.x1 - crop.x0 < CROP_MIN || crop.y1 - crop.y0 < CROP_MIN)) {
+      setCrop(null);
+    }
+  }
+
   const thresholdFrac = (threshold - THRESHOLD_MIN) / (THRESHOLD_MAX - THRESHOLD_MIN);
+  const fit = analysis && box.w > 0 ? Math.min(box.w / analysis.width, box.h / analysis.height) : 0;
+  const stageW = analysis ? analysis.width * fit : 0;
+  const stageH = analysis ? analysis.height * fit : 0;
 
   return (
     <div className="image-dialog-overlay" onClick={onClose}>
@@ -113,9 +246,37 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="image-dialog-title">Import image as SDF</div>
-        <div className="image-dialog-preview">
+        <div className="image-dialog-preview" ref={previewRef}>
           {analysis ? (
-            <canvas ref={canvasRef} />
+            <div
+              ref={stageRef}
+              className="image-crop-stage"
+              style={{ width: stageW, height: stageH, cursor }}
+              onPointerDown={onStageDown}
+              onPointerMove={onStageMove}
+              onPointerUp={onStageUp}
+              onPointerCancel={onStageUp}
+              onPointerLeave={() => !dragRef.current && setCursor("crosshair")}
+            >
+              <canvas ref={canvasRef} />
+              {crop && (
+                <div
+                  className="image-crop-box"
+                  style={{
+                    left: `${crop.x0 * 100}%`,
+                    top: `${crop.y0 * 100}%`,
+                    width: `${(crop.x1 - crop.x0) * 100}%`,
+                    height: `${(crop.y1 - crop.y0) * 100}%`,
+                  }}
+                  aria-hidden
+                >
+                  <i className="image-crop-handle" data-corner="nw" />
+                  <i className="image-crop-handle" data-corner="ne" />
+                  <i className="image-crop-handle" data-corner="sw" />
+                  <i className="image-crop-handle" data-corner="se" />
+                </div>
+              )}
+            </div>
           ) : (
             <span className="image-dialog-hint">Analyzing…</span>
           )}
@@ -145,7 +306,18 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
           />
         </label>
         <p className="image-dialog-hint">
-          Light area becomes the shape. {analysis?.hasAlpha ? "Using alpha channel." : "Using brightness."}
+          Light area becomes the shape. {analysis?.hasAlpha ? "Using alpha channel." : "Using brightness."}{" "}
+          {crop ? (
+            <>
+              Cropped —{" "}
+              <button type="button" className="image-dialog-link" onClick={() => setCrop(null)}>
+                reset
+              </button>
+              .
+            </>
+          ) : (
+            "Drag on the preview to crop."
+          )}
         </p>
         <div className="image-dialog-actions">
           <button className="image-dialog-btn" onClick={onClose}>

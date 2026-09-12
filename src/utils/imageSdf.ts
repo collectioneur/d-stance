@@ -102,12 +102,17 @@ export function otsu(score: Float32Array): number {
   return ((firstT + lastT) / 2 + 0.5) / 255;
 }
 
+/** Crop rectangle as fractions of the source image, x0 < x1, y0 < y1 in [0, 1]. */
+export type ImageCrop = { x0: number; y0: number; x1: number; y1: number };
+
 function drawToCanvas(
   bitmap: ImageBitmap,
   w: number,
   h: number,
   fill: string | null,
   src?: [number, number, number, number],
+  /** Destination-space clip; everything outside stays `fill` (background). */
+  clip?: [number, number, number, number],
 ): ImageData {
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
@@ -117,6 +122,11 @@ function drawToCanvas(
   }
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
+  if (clip) {
+    ctx.beginPath();
+    ctx.rect(clip[0], clip[1], clip[2], clip[3]);
+    ctx.clip();
+  }
   if (src) ctx.drawImage(bitmap, src[0], src[1], src[2], src[3], 0, 0, w, h);
   else ctx.drawImage(bitmap, 0, 0, w, h);
   return ctx.getImageData(0, 0, w, h);
@@ -313,21 +323,29 @@ export function floatToHalf(v: number): number {
 /**
  * Full bake. Returns a PNG data URL, or null when the mask is empty.
  * `threshold` / `invert` normally come from analyzeImage (user-adjustable).
+ * `crop` limits the shape to a sub-rectangle of the image; outside it the
+ * source reads as background.
  */
 export function bakeImageSdf(
   bitmap: ImageBitmap,
   analysis: ImageAnalysis,
   threshold: number,
   invert: boolean,
+  crop: ImageCrop | null = null,
 ): string | null {
   const { width, height } = analysis;
   const mask = buildMask(analysis.score, threshold, invert);
+  // Search window for the content bbox, in analysis pixels.
+  const wx0 = crop ? Math.max(0, Math.floor(crop.x0 * width)) : 0;
+  const wy0 = crop ? Math.max(0, Math.floor(crop.y0 * height)) : 0;
+  const wx1 = crop ? Math.min(width, Math.ceil(crop.x1 * width)) : width;
+  const wy1 = crop ? Math.min(height, Math.ceil(crop.y1 * height)) : height;
   let x0 = width;
   let y0 = height;
   let x1 = -1;
   let y1 = -1;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let y = wy0; y < wy1; y++) {
+    for (let x = wx0; x < wx1; x++) {
       if (!mask[y * width + x]) continue;
       if (x < x0) x0 = x;
       if (x > x1) x1 = x;
@@ -350,7 +368,19 @@ export function bakeImageSdf(
   // Out-of-image area must read as background: transparent for alpha
   // sources, otherwise the background luminance implied by `invert`.
   const fill = analysis.hasAlpha ? null : invert ? "#fff" : "#000";
-  const { data } = drawToCanvas(bitmap, S, S, fill, [cx - side / 2, cy - side / 2, side, side]);
+  const ox = cx - side / 2;
+  const oy = cy - side / 2;
+  // Crop → destination px of the S×S raster (source px minus origin, scaled).
+  const k = S / side;
+  const clip: [number, number, number, number] | undefined = crop
+    ? [
+        (crop.x0 * bitmap.width - ox) * k,
+        (crop.y0 * bitmap.height - oy) * k,
+        (crop.x1 - crop.x0) * bitmap.width * k,
+        (crop.y1 - crop.y0) * bitmap.height * k,
+      ]
+    : undefined;
+  const { data } = drawToCanvas(bitmap, S, S, fill, [ox, oy, side, side], clip);
   const hiMask = buildMask(scoreOf(data, analysis.hasAlpha), threshold, invert);
   const sdf = sdfFromMask(hiMask, S, S);
   return rgbaToPng(downsampleEncode(sdf, S));

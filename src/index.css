@@ -895,23 +895,27 @@ canvas {
   margin-bottom: 2px;
 }
 
+/* Two columns: fixed label column + controls sharing one left edge. */
 .prop-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-2);
+  min-height: 28px;
 }
 
 .prop-label {
-  width: auto;
   font-size: var(--text-sm);
   color: var(--text-3);
-  flex-shrink: 0;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .prop-input {
-  flex: none;
-  width: 104px;
+  width: 100%;
+  min-width: 0;
   background: var(--bg-input);
   border: 1px solid var(--border-2);
   border-radius: 5px;
@@ -1191,7 +1195,7 @@ canvas {
 
 /* Select input inside right panel */
 .prop-select {
-  width: 132px;
+  width: 100%;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(255,255,255,0.3)'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
@@ -1259,12 +1263,74 @@ canvas {
   overflow: hidden;
 }
 
-.image-dialog-preview canvas {
+/* Letterboxed image area; sized from JS so the crop overlay maps 1:1. */
+.image-crop-stage {
+  position: relative;
+  flex: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.image-crop-stage canvas {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
   image-rendering: auto;
+  pointer-events: none;
+}
+
+.image-crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--accent-text);
+  /* Dim everything outside the crop. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.image-crop-handle {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  background: var(--accent-text);
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-radius: 1px;
+}
+
+.image-crop-handle[data-corner="nw"] {
+  top: -4px;
+  left: -4px;
+}
+
+.image-crop-handle[data-corner="ne"] {
+  top: -4px;
+  right: -4px;
+}
+
+.image-crop-handle[data-corner="sw"] {
+  bottom: -4px;
+  left: -4px;
+}
+
+.image-crop-handle[data-corner="se"] {
+  bottom: -4px;
+  right: -4px;
+}
+
+.image-dialog-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.image-dialog-link:hover {
+  color: var(--text-1);
 }
 
 .image-dialog-row {
