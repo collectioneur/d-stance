@@ -61,7 +61,7 @@ Packed by `useGpu.ts`, consumed by `shader.ts`. Both sides must stay in lockstep
 
 Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake.ts`) into `row0/1/2`, `offset`, `factor`.
 
-Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` are shared by `imageSdf.ts`, `shader.ts` (`sdImage`) and `generateSdfCode.ts` (`sdImageField`); change one, change all. GPU `params.w` packs `invert·100 + layer` (`packImageParams` in `useGpu.ts`); the layer's own `params[3]` is the plain invert flag. Slots are assigned per distinct `image.sdf` string by `syncImageSlots` before every pack.
+Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` are shared by `imageSdf.ts`, `shader.ts` (`sdImage`) and `generateSdfCode.ts` (`sdImageField`); change one, change all. GPU `params.w` packs `round·1000/IMAGE_ROUND_STEP + invert·100 + layer` (`packImageParams` in `useGpu.ts`); the layer's own `params[3]` is the plain invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`). Slots are assigned per distinct `image.sdf` string by `syncImageSlots` before every pack.
 
 ### 3. Bake math
 
@@ -82,7 +82,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 5` (v4 still accepted: strict subset). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 6` (v4/v5 still accepted: strict subsets; v6 adds optional `image.round`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.

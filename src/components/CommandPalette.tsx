@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Command } from "cmdk";
-import { COMMANDS, SHAPES, addShape } from "../utils/commands";
+import { COMMANDS, SHAPES, addShape, pickImageFile } from "../utils/commands";
 
 let externalSetOpen: ((open: boolean) => void) | null = null;
 
@@ -9,7 +9,8 @@ export function openPalette() {
   externalSetOpen?.(true);
 }
 
-const DIGIT_CODES = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"];
+// 1–6 = toolbar shapes, 7 = image import (see IMAGE_HOTKEY in commands.ts).
+const DIGIT_CODES = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6", "Digit7"];
 
 export default function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -43,6 +44,9 @@ export default function CommandPalette() {
         if (idx >= 0 && idx < SHAPES.length) {
           e.preventDefault();
           addShape(SHAPES[idx].type);
+        } else if (idx === SHAPES.length) {
+          e.preventDefault();
+          pickImageFile();
         }
       }
     };

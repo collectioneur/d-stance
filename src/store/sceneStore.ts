@@ -42,8 +42,11 @@ export type ShapeLayer = {
   params: [number, number, number, number];
   op: OpType; // ignored when index 0 in parent items
   smoothK: number;
-  /** Only for shapeType "image": baked 2D SDF as a PNG data URL (see utils/imageSdf.ts). */
-  image?: { sdf: string };
+  /**
+   * Only for shapeType "image": baked 2D SDF as a PNG data URL (see
+   * utils/imageSdf.ts) and the edge rounding radius (local units, ≥ 0).
+   */
+  image?: { sdf: string; round?: number };
 };
 
 export type ObjectGroup = {
@@ -79,6 +82,8 @@ export const MAX_PICK_INSTRUCTIONS = 1024;
 export const MAX_TRANSFORM_DEPTH = 16;
 /** Distinct image SDF textures per scene (layers of the GPU texture array). */
 export const MAX_IMAGES = 8;
+/** Upper bound for `image.round`; the GPU packs it into params.w (see packImageParams). */
+export const IMAGE_ROUND_MAX = 10;
 
 const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
   sphere: [0.5, 0, 0, 0],
@@ -393,7 +398,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image"
       >
     >,
   ) => void;

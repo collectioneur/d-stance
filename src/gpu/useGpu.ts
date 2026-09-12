@@ -22,6 +22,7 @@ import {
   findItem,
   getAncestorGroups,
   temporalStore,
+  IMAGE_ROUND_MAX,
   MAX_IMAGES,
   type ObjectGroup,
   type OpType,
@@ -138,11 +139,21 @@ function syncImageSlots(sceneRoot: SceneRoot): [string, number][] {
   return added;
 }
 
-/** GPU params for an image layer: [halfSize, halfThickness, bold, invert·100 + layer]. */
+/** Resolution of the edge-rounding radius packed into params.w (local units). */
+const IMAGE_ROUND_STEP = 0.001;
+
+/**
+ * GPU params for an image layer:
+ * [halfSize, halfThickness, bold, round/STEP·1000 + invert·100 + layer].
+ * All three packed parts are small integers (≤ 10⁷ with IMAGE_ROUND_MAX = 10),
+ * so the f32 is exact and the shader can split it with floor/subtract.
+ */
 function packImageParams(layer: ShapeLayer): [number, number, number, number] {
   const [size, h, bold, invert] = layer.params;
   const slot = layer.image ? (imageSlots.get(layer.image.sdf) ?? 0) : 0;
-  return [size, h, bold, (invert > 0.5 ? 100 : 0) + slot];
+  const round = Math.min(IMAGE_ROUND_MAX, Math.max(0, layer.image?.round ?? 0));
+  const roundQ = Math.round(round / IMAGE_ROUND_STEP);
+  return [size, h, bold, roundQ * 1000 + (invert > 0.5 ? 100 : 0) + slot];
 }
 
 function pushShapeInstruction(

@@ -59,6 +59,8 @@ interface ShapeRhs {
   params: [number, number, number, number];
   /** Index into Ir.images for shape "image"; -1 when the layer has no baked SDF. */
   imageIndex: number;
+  /** Edge rounding radius for shape "image" (local units). */
+  imageRound: number;
 }
 interface VarRhs {
   kind: "var";
@@ -129,6 +131,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       factor: minV(layer.scale) * minV(accScl),
       params: layer.params,
       imageIndex,
+      imageRound: Math.max(0, layer.image?.round ?? 0),
     };
   }
 
@@ -404,7 +407,8 @@ const sdRhombus = (p: d.v3f, la: number, lb: number, h: number, ra: number): num
 };`,
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // √(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
-const sdImageField = (p: d.v3f, t: number, s: number, h: number, bold: number, invert: number): number => {
+// rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
+const sdImageField = (p: d.v3f, t: number, s: number, h: number, bold: number, rnd: number, invert: number): number => {
   "use gpu";
   const dTex = t * (2.0 * s);
   const b = std.abs(d.vec2f(p.x, p.y)) - d.vec2f(s);
@@ -416,8 +420,9 @@ const sdImageField = (p: d.v3f, t: number, s: number, h: number, bold: number, i
     const dEdge = std.max(dTex, 0.0);
     d2 = std.sqrt(dBox * dBox + dEdge * dEdge) - bold;
   }
-  const w = d.vec2f(d2, std.abs(p.z) - h);
-  return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0)));
+  const r = std.min(rnd, h);
+  const w = d.vec2f(d2 + r, std.abs(p.z) - (h - r));
+  return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0))) - r;
 };`,
 };
 
@@ -600,7 +605,8 @@ fn sdRhombus(p: vec3f, la: f32, lb: f32, h: f32, ra: f32) -> f32 {
 }`,
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
-fn sdImageField(p: vec3f, t: f32, s: f32, h: f32, bold: f32, invert: f32) -> f32 {
+// rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
+fn sdImageField(p: vec3f, t: f32, s: f32, h: f32, bold: f32, rnd: f32, invert: f32) -> f32 {
   let dTex = t * (2.0 * s);
   let b = abs(p.xy) - vec2f(s);
   let dBox = length(max(b, vec2f(0.0))) + min(max(b.x, b.y), 0.0);
@@ -611,8 +617,9 @@ fn sdImageField(p: vec3f, t: f32, s: f32, h: f32, bold: f32, invert: f32) -> f32
     let dEdge = max(dTex, 0.0);
     d2 = sqrt(dBox * dBox + dEdge * dEdge) - bold;
   }
-  let w = vec2f(d2, abs(p.z) - h);
-  return min(max(w.x, w.y), 0.0) + length(max(w, vec2f(0.0)));
+  let r = min(rnd, h);
+  let w = vec2f(d2 + r, abs(p.z) - (h - r));
+  return min(max(w.x, w.y), 0.0) + length(max(w, vec2f(0.0))) - r;
 }`,
 };
 
@@ -794,7 +801,8 @@ float sdRhombus(vec3 p, float la, float lb, float h, float ra) {
 }`,
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
-float sdImageField(vec3 p, float t, float s, float h, float bold, float invert) {
+// rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
+float sdImageField(vec3 p, float t, float s, float h, float bold, float rnd, float invert) {
   float dTex = t * (2.0 * s);
   vec2 b = abs(p.xy) - vec2(s);
   float dBox = length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0);
@@ -805,8 +813,9 @@ float sdImageField(vec3 p, float t, float s, float h, float bold, float invert) 
     float dEdge = max(dTex, 0.0);
     d2 = sqrt(dBox * dBox + dEdge * dEdge) - bold;
   }
-  vec2 w = vec2(d2, abs(p.z) - h);
-  return min(max(w.x, w.y), 0.0) + length(max(w, vec2(0.0)));
+  float r = min(rnd, h);
+  vec2 w = vec2(d2 + r, abs(p.z) - (h - r));
+  return min(max(w.x, w.y), 0.0) + length(max(w, vec2(0.0))) - r;
 }`,
 };
 
@@ -816,12 +825,12 @@ const TG_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
 const IMAGE_${i} = "${url}";
 const imageTex${i} = root.createTexture({ size: [${IMAGE_SDF_RES}, ${IMAGE_SDF_RES}], format: "rgba8unorm" }).$usage("sampled", "render");
 const imageTex${i}View = imageTex${i}.createView(d.texture2d(d.f32));
-const sdImageTex${i} = (p: d.v3f, s: number, h: number, bold: number, invert: number): number => {
+const sdImageTex${i} = (p: d.v3f, s: number, h: number, bold: number, rnd: number, invert: number): number => {
   "use gpu";
   const uv = d.vec2f(p.x, p.y) * (0.5 / s) + d.vec2f(0.5); // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
   const rg = std.textureSampleLevel(imageTex${i}View.$, imageSampler.$, uv, 0);
   const t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
-  return sdImageField(p, t, s, h, bold, invert);
+  return sdImageField(p, t, s, h, bold, rnd, invert);
 };`;
 
 const TG_IMAGE_SAMPLER = `const imageSampler = root.createSampler({
@@ -831,11 +840,11 @@ const TG_IMAGE_SAMPLER = `const imageSampler = root.createSampler({
 const WGSL_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
 // ${url}
 @group(0) @binding(${i + 1}) var imageTex${i}: texture_2d<f32>;
-fn sdImageTex${i}(p: vec3f, s: f32, h: f32, bold: f32, invert: f32) -> f32 {
+fn sdImageTex${i}(p: vec3f, s: f32, h: f32, bold: f32, rnd: f32, invert: f32) -> f32 {
   let uv = p.xy / s * 0.5 + 0.5; // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
   let rg = textureSampleLevel(imageTex${i}, imageSampler, uv, 0.0).xy;
   let t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
-  return sdImageField(p, t, s, h, bold, invert);
+  return sdImageField(p, t, s, h, bold, rnd, invert);
 }`;
 
 const WGSL_IMAGE_SAMPLER = `// Linear, clamp-to-edge.
@@ -844,11 +853,11 @@ const WGSL_IMAGE_SAMPLER = `// Linear, clamp-to-edge.
 const GLSL_IMAGE = (i: number, url: string) => `// Image ${i}: ${IMG_NOTE}.
 // ${url}
 uniform sampler2D imageTex${i};
-float sdImageTex${i}(vec3 p, float s, float h, float bold, float invert) {
+float sdImageTex${i}(vec3 p, float s, float h, float bold, float rnd, float invert) {
   vec2 uv = p.xy / s * 0.5 + 0.5; // row 0 = −Y (d-stance viewport is Y-down); flip uv.y for Y-up cameras
   vec2 rg = textureLod(imageTex${i}, uv, 0.0).rg;
   float t = (rg.x * 255.0 - 128.5 + rg.y) * ${IMG_STEP};
-  return sdImageField(p, t, s, h, bold, invert);
+  return sdImageField(p, t, s, h, bold, rnd, invert);
 }`;
 
 const TG_ROT = `const applyInvRotXYZ = (lp: d.v3f, rot: d.v3f): d.v3f => {
@@ -979,7 +988,7 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
       call =
         rhs.imageIndex < 0
           ? fmt(1e10) // layer without a baked SDF contributes nothing
-          : `sdImageTex${rhs.imageIndex}(${lp}, ${fmt(p0)}, ${fmt(p1)}, ${fmt(p2)}, ${fmt(p3 > 0.5 ? 1 : 0)})`;
+          : `sdImageTex${rhs.imageIndex}(${lp}, ${fmt(p0)}, ${fmt(p1)}, ${fmt(p2)}, ${fmt(rhs.imageRound)}, ${fmt(p3 > 0.5 ? 1 : 0)})`;
       break;
     case "cylinder":
     case "capsule":

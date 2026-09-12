@@ -3,6 +3,7 @@ import {
   useSceneStore,
   temporalStore,
   findItem,
+  IMAGE_ROUND_MAX,
   type ObjectGroup,
   type OpType,
   type ShapeLayer,
@@ -399,6 +400,19 @@ function LayerProperties({
           onChange={(v) => setParam(f.paramIndex, v)}
         />
       ))}
+      {layer.shapeType === "image" && layer.image && (
+        <NumericInput
+          label="Round"
+          value={layer.image.round ?? 0}
+          min={0}
+          max={IMAGE_ROUND_MAX}
+          step={0.005}
+          decimals={3}
+          onChange={(v) =>
+            updateLayer(containerId, layer.id, { image: { ...layer.image!, round: v } })
+          }
+        />
+      )}
       {layer.shapeType === "image" && (
         <div className="prop-row">
           <label className="prop-label" htmlFor={`invert-${layer.id}`}>

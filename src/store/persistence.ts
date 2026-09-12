@@ -9,10 +9,13 @@ import {
 import { temporalStore } from "./sceneStore";
 import { isImageSdfDataUrl } from "../utils/imageSdf";
 
-/** v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image". */
-const SCHEMA_VERSION = 5;
-/** v4 is a strict subset of v5 (no image layers), so it loads as-is. */
-const ACCEPTED_VERSIONS = new Set([4, SCHEMA_VERSION]);
+/**
+ * v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image".
+ * v6: `image.round` (edge rounding radius, optional, default 0).
+ */
+const SCHEMA_VERSION = 6;
+/** v4/v5 are strict subsets of v6 (no image layers / no `image.round`), so they load as-is. */
+const ACCEPTED_VERSIONS = new Set([4, 5, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -49,6 +52,14 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
     );
     for (const item of items) {
       if (item.kind === "layer" && item.shapeType !== "image") delete item.image;
+      if (item.kind === "layer" && item.shapeType === "image") {
+        // `round` is optional; anything that is not a finite non-negative number → 0.
+        const img = item.image as { sdf: string; round?: unknown };
+        const r = img.round;
+        if (r !== undefined && !(typeof r === "number" && Number.isFinite(r) && r >= 0)) {
+          delete img.round;
+        }
+      }
       const valid =
         Array.isArray(item.scale) &&
         item.scale.length === 3 &&

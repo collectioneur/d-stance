@@ -68,6 +68,9 @@ export const SHAPES: { type: ShapeType; label: string; icon: LucideIcon }[] = (
   ["box", "sphere", "torus", "cylinder", "capsule", "cone"] as ShapeType[]
 ).map(shapeEntry);
 
+/** Image import sits right after the toolbar shapes: hotkey 7. */
+export const IMAGE_HOTKEY = String(SHAPES.length + 1);
+
 /** Remaining shapes — command palette only. */
 export const EXTRA_SHAPES: typeof SHAPES = (
   [
@@ -125,6 +128,14 @@ export const COMMANDS: Command[] = [
     hotkey: String(i + 1),
     run: () => addShape(type),
   })),
+  {
+    id: "add-image",
+    label: "Add Image (logo to SDF)",
+    icon: ImagePlus,
+    hotkey: IMAGE_HOTKEY,
+    keywords: ["image", "logo", "picture", "png", "svg", "import", "extrude"],
+    run: () => pickImageFile(),
+  },
   ...EXTRA_SHAPES.map(({ type, label, icon }) => ({
     id: `add-${type}`,
     label: `Add ${label}`,
@@ -138,13 +149,6 @@ export const COMMANDS: Command[] = [
     icon: Boxes,
     keywords: ["group", "container", "folder", "nest"],
     run: addGroup,
-  },
-  {
-    id: "add-image",
-    label: "Add Image (logo → SDF)",
-    icon: ImagePlus,
-    keywords: ["image", "logo", "picture", "png", "import", "extrude"],
-    run: () => pickImageFile(),
   },
 ];
 

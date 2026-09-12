@@ -675,13 +675,17 @@ export function createShader(root: TgpuRoot) {
   // inside the square, |p − c|² ≥ |p − q|² + |q − c|², so √(dBox² + dEdge²)
   // is a tight lower bound that is continuous across the edge.
   // bold thickens the silhouette; invert = 1 turns it into a plate with the
-  // silhouette cut out. Sampling must be textureSampleLevel: this runs in
-  // non-uniform control flow inside the instruction loop.
+  // silhouette cut out; rnd rounds every edge (2D corners and the extrusion
+  // rims) by eroding the 2D field and the half-thickness by rnd, then
+  // inflating the extruded solid back by rnd. Sampling must be
+  // textureSampleLevel: this runs in non-uniform control flow inside the
+  // instruction loop.
   const sdImage = (
     p: d.v3f,
     s: number,
     h: number,
     bold: number,
+    rnd: number,
     invert: number,
     layer: number,
   ): number => {
@@ -700,8 +704,9 @@ export function createShader(root: TgpuRoot) {
       const dEdge = std.max(dTex, 0.0);
       d2 = std.sqrt(dBox * dBox + dEdge * dEdge) - bold;
     }
-    const w = d.vec2f(d2, std.abs(p.z) - h);
-    return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0)));
+    const r = std.min(rnd, h);
+    const w = d.vec2f(d2 + r, std.abs(p.z) - (h - r));
+    return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0))) - r;
   };
 
   const evalShape = (lp: d.v3f, shapeType: number, params: d.v4f): number => {
@@ -753,12 +758,14 @@ export function createShader(root: TgpuRoot) {
       result = sdVesica(lp, params.x, params.y);
     } else if (shapeType === d.u32(22)) {
       // params: x = half size, y = half thickness, z = bold, w = packed
-      // (invert flag in the integer part ≥ 100, texture layer below it) —
-      // see packImageParams in useGpu.ts.
+      // round·1000/STEP + invert·100 + layer (all exact integers) — see
+      // packImageParams in useGpu.ts.
+      const roundQ = std.floor(params.w / 1000.0);
+      const rem = params.w - roundQ * 1000.0;
       let invert = d.f32(0.0);
-      if (params.w >= 100.0) invert = d.f32(1.0);
-      const layer = params.w - invert * 100.0;
-      result = sdImage(lp, params.x, params.y, params.z, invert, layer);
+      if (rem >= 100.0) invert = d.f32(1.0);
+      const layer = rem - invert * 100.0;
+      result = sdImage(lp, params.x, params.y, params.z, roundQ * 0.001, invert, layer);
     }
     return result;
   };
