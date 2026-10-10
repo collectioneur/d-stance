@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import Canvas from "./components/Canvas";
 import TopPanel from "./components/panels/TopPanel";
 import LeftPanel from "./components/panels/LeftPanel";
@@ -21,8 +21,36 @@ import {
 import { isImageFile } from "./utils/decodeImage";
 import { setToastListener } from "./utils/toast";
 
+/** Gap kept between the top-right render pill and the centered top bar, px. */
+const RENDER_PILL_GAP = 8;
+/** Matches --space-3, the pill's distance from the window edge. */
+const EDGE_MARGIN = 12;
+
+/**
+ * True when the top-right render pill would run into the centered top bar —
+ * then it docks bottom-center instead. Measured, so it follows width changes.
+ */
+function useRenderPillDocked(pillRef: RefObject<HTMLDivElement | null>): boolean {
+  const [docked, setDocked] = useState(false);
+  useLayoutEffect(() => {
+    const update = () => {
+      const pill = pillRef.current;
+      const topBar = document.querySelector<HTMLElement>(".panel-top");
+      if (!pill || !topBar) return;
+      const needed = topBar.offsetWidth + 2 * (pill.offsetWidth + RENDER_PILL_GAP + EDGE_MARGIN);
+      setDocked(window.innerWidth < needed);
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [pillRef]);
+  return docked;
+}
+
 export default function App() {
   usePersistence();
+  const renderPillRef = useRef<HTMLDivElement>(null);
+  const renderPillDocked = useRenderPillDocked(renderPillRef);
   const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
@@ -148,7 +176,11 @@ export default function App() {
     <>
       <Canvas />
       <TopPanel />
-      <div className="floating-pill floating-pill--top-right">
+      {/* Must stay before GizmoPanel: CSS lifts the gizmo bar above it when docked. */}
+      <div
+        ref={renderPillRef}
+        className={`floating-pill ${renderPillDocked ? "floating-pill--bottom" : "floating-pill--top-right"}`}
+      >
         <QualityPanel />
         <div className="top-panel-divider" aria-hidden />
         <RenderModePanel />

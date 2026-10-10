@@ -55,13 +55,7 @@ function SceneNode({
     return found?.container.id ?? root.id;
   }, [root, data.id]);
 
-  if (node.isEditing && !preview) {
-    return (
-      <div ref={dragHandle} style={style} className="scene-item scene-item--editing">
-        <NodeRenameInput node={node} />
-      </div>
-    );
-  }
+  const isEditing = node.isEditing && !preview;
 
   const itemClass = [
     "scene-item",
@@ -75,7 +69,8 @@ function SceneNode({
 
   return (
     <div
-      ref={preview ? undefined : dragHandle}
+      // No drag handle while renaming: selecting text in the field must not drag the row.
+      ref={preview || isEditing ? undefined : dragHandle}
       style={style}
       className={itemClass}
       onClick={
@@ -93,6 +88,15 @@ function SceneNode({
               } else {
                 node.select();
               }
+            }
+      }
+      onDoubleClick={
+        preview
+          ? undefined
+          : (e) => {
+              // Collapse / remove buttons keep their own meaning.
+              if ((e.target as HTMLElement).closest("button")) return;
+              node.edit();
             }
       }
     >
@@ -118,7 +122,11 @@ function SceneNode({
           })()}
         </span>
       )}
-      <span className="scene-item-name">{data.name}</span>
+      {isEditing ? (
+        <NodeRenameInput node={node} />
+      ) : (
+        <span className="scene-item-name">{data.name}</span>
+      )}
       {showOp && data.op && (
         <span className="scene-item-icon scene-item-icon--op" title={data.op}>
           <OpIcon op={data.op} />
@@ -195,8 +203,19 @@ function SceneDragPreview({ offset, id, isDragging }: DragPreviewProps) {
   );
 }
 
+/** Enter or click away saves, Escape cancels; an empty or unchanged name keeps the old one. */
 function NodeRenameInput({ node }: { node: NodeRendererProps<ArboristNode>["node"] }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // Escape unmounts the input, which fires blur — don't let that blur save.
+  const doneRef = useRef(false);
+
+  const finish = (save: boolean) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    const name = inputRef.current?.value.trim() ?? "";
+    if (save && name && name !== node.data.name) node.submit(name);
+    else node.reset();
+  };
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -209,12 +228,15 @@ function NodeRenameInput({ node }: { node: NodeRendererProps<ArboristNode>["node
       className="scene-item-rename-input"
       defaultValue={node.data.name}
       onFocus={(e) => e.currentTarget.select()}
-      onBlur={() => node.reset()}
+      onBlur={() => finish(true)}
       onKeyDown={(e) => {
-        if (e.key === "Escape") node.reset();
-        if (e.key === "Enter") node.submit(inputRef.current?.value ?? "");
+        if (e.key !== "Escape" && e.key !== "Enter") return;
+        // Arborist's tree handler would see this Enter after a cancel and reopen the edit.
+        e.stopPropagation();
+        finish(e.key === "Enter");
       }}
       onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
     />
   );
 }

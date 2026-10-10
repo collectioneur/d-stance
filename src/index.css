@@ -206,6 +206,33 @@ canvas {
   right: var(--space-3);
 }
 
+/* Narrow windows: docked bottom-center (see useRenderPillDocked). */
+.floating-pill--bottom {
+  bottom: var(--space-3);
+  left: 50%;
+  translate: -50%;
+}
+
+/* Popovers open upwards when the pill sits at the bottom. */
+.floating-pill--bottom .render-mode-list {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+.floating-pill--bottom .render-mode-chevron {
+  transform: rotate(180deg);
+}
+.floating-pill--bottom .render-mode-chevron--open {
+  transform: none;
+}
+.floating-pill--bottom .quality-tooltip {
+  top: auto;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%) translateY(4px);
+}
+.floating-pill--bottom .quality-tooltip--visible {
+  transform: translateX(-50%) translateY(0);
+}
+
 .render-mode {
   position: relative;
   display: flex;
@@ -241,6 +268,7 @@ canvas {
   position: fixed;
   z-index: 10;
   bottom: var(--space-3);
+  transition: bottom var(--transition-fast);
   left: 50%;
   translate: -50%;
   background: var(--bg-panel);
@@ -250,6 +278,11 @@ canvas {
   box-shadow:
     0 8px 28px rgba(0, 0, 0, 0.38),
     0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* Render pill docked at the bottom: gizmo bar sits right above it (pill is 34px). */
+.floating-pill--bottom ~ .segmented--floating {
+  bottom: calc(var(--space-3) + 34px + var(--space-2));
 }
 
 .segmented-indicator {
@@ -719,20 +752,24 @@ canvas {
   z-index: 2;
 }
 
-.scene-item--editing {
-  padding-right: var(--space-2);
-}
-
+/* Renaming swaps only the name for this field, in the same spot and font. */
 .scene-item-rename-input {
   flex: 1;
   min-width: 0;
+  height: 22px;
+  margin: 0 -5px;
+  padding: 0 4px;
+  font: inherit;
   font-size: var(--text-md);
-  color: var(--accent-text);
-  background: rgba(0, 0, 0, 0.35);
+  color: var(--text-1);
+  background: transparent;
   border: 1px solid var(--accent);
   border-radius: 3px;
-  padding: 2px 6px;
   outline: none;
+}
+
+.scene-item--root .scene-item-rename-input {
+  font-weight: 600;
 }
 
 .scene-item-icon--spacer {
