@@ -1122,10 +1122,9 @@ canvas {
 }
 
 .scene-object-empty {
-  padding: 6px 14px var(--space-2) 28px;
+  padding: 6px 14px var(--space-2);
   font-size: var(--text-xs);
   color: rgba(255, 255, 255, 0.2);
-  font-style: italic;
 }
 
 /* Op node row — slightly dimmer than shape rows */
@@ -1168,7 +1167,7 @@ canvas {
   justify-content: center;
   gap: 6px;
   padding: 6px var(--space-3);
-  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.03);
   color: rgba(255, 255, 255, 0.4);

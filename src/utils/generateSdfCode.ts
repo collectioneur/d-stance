@@ -18,7 +18,7 @@ export interface GeneratedSdf {
   glsl: string;
 }
 
-export const PLACEHOLDER = "// Nothing to export — add shapes to the scene";
+export const PLACEHOLDER = "// Nothing to export - add shapes to the scene";
 
 const DEG_TO_RAD = Math.PI / 180;
 

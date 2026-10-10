@@ -147,7 +147,7 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
     setTimeout(() => {
       const sdf = bakeImageSdf(bitmap, analysis, threshold, invert, crop);
       if (!sdf) {
-        showToast(crop ? "Nothing detected inside the crop" : "Nothing detected — adjust the threshold");
+        showToast(crop ? "Nothing detected inside the crop" : "Nothing detected - adjust the threshold");
         setBusy(false);
         return;
       }
@@ -309,7 +309,7 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
           Light area becomes the shape. {analysis?.hasAlpha ? "Using alpha channel." : "Using brightness."}{" "}
           {crop ? (
             <>
-              Cropped —{" "}
+              Cropped -{" "}
               <button type="button" className="image-dialog-link" onClick={() => setCrop(null)}>
                 reset
               </button>

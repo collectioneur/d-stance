@@ -460,7 +460,7 @@ export default function RightPanel() {
   } else {
     title = "Properties";
     content = (
-      <p className="scene-object-empty">Nothing selected — click an object in the viewport or scene tree.</p>
+      <p className="scene-object-empty">Nothing selected - click an object in the viewport or scene tree.</p>
     );
   }
 
