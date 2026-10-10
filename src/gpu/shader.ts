@@ -130,6 +130,18 @@ const PickUniforms = d.struct({
   pickPass: d.u32,
 });
 
+/**
+ * Hover glow, two slots so moving between shapes cross-fades: the shape under
+ * the cursor (fading in) and the one just left (fading out). Pick ids are
+ * 1-based, 0 = empty slot.
+ */
+const HoverUniforms = d.struct({
+  pickId: d.u32,
+  strength: d.f32,
+  prevPickId: d.u32,
+  prevStrength: d.f32,
+});
+
 const QualityUniforms = d.struct({
   maxSteps: d.f32,
   reflSteps: d.f32,
@@ -159,14 +171,9 @@ const emptyInstruction = {
 
 const emptyObjectInfo = { start: 0, count: 0 };
 
-export const OUTLINE_OFFSET = 0.01;
-export const OUTLINE_BAND = 0.01;
-const OUTLINE_STRENGTH = 0.5;
-const OUTLINE_RIM_POWER = 1.0;
-const OUTLINE_GRAD_LO = 1.06;
-const OUTLINE_GRAD_HI = 1.45;
-const OUTLINE_EDGE_LO = 0.25;
-const OUTLINE_EDGE_HI = 0.85;
+/** Surface glow band: |own SDF| below LO glows fully, fades out by HI. */
+const GLOW_BAND_LO = 0.004;
+export const GLOW_BAND_HI = 0.035;
 const RAY_MISS_T = 50.0;
 /** In-loop hit: `dist < HIT_EPS * max(t,1)`. Same scale as the reflection march. */
 const HIT_EPS = 0.001;
@@ -251,6 +258,12 @@ export function createShader(root: TgpuRoot) {
   const pickUniforms = root.createUniform(PickUniforms, {
     objectCount: 0,
     pickPass: 0,
+  });
+  const hoverUniforms = root.createUniform(HoverUniforms, {
+    pickId: 0,
+    strength: 0,
+    prevPickId: 0,
+    prevStrength: 0,
   });
   const qualityUniforms = root.createUniform(QualityUniforms, {
     maxSteps: 48,
@@ -1157,85 +1170,22 @@ export function createShader(root: TgpuRoot) {
     return bestId;
   };
 
-  const evalSelectionDist = (p: d.v3f): number => {
+  /**
+   * Selected shapes glow constantly, like hover. One selection-SDF eval at the
+   * scene hit (no extra march); outside the selection's sphere it is skipped.
+   */
+  const selectionGlow = (p: d.v3f): number => {
     "use gpu";
+    if (selectionUniforms.$.enabled !== d.u32(1)) {
+      return 0.0;
+    }
     if (selectionUniforms.$.usesSceneSdf === d.u32(1)) {
-      return sdScene(p);
+      return 1.0; // the scene root: every surface is selected
     }
-    return sdSelection(p);
-  };
-
-  // Rim + creases on the inflated selection shell.
-  // Tetrahedron gradient: 4 SDF evals instead of 6 (same trick as calcNormal).
-  const selectionOutlineMask = (p: d.v3f, rd: d.v3f): number => {
-    "use gpu";
-    const e = 0.001;
-    const k = d.vec2f(1.0, -1.0);
-    const grad =
-      d.vec3f(k.x, k.y, k.y) * evalSelectionDist(p + d.vec3f(e, -e, -e)) +
-      d.vec3f(k.y, k.y, k.x) * evalSelectionDist(p + d.vec3f(-e, -e, e)) +
-      d.vec3f(k.y, k.x, k.y) * evalSelectionDist(p + d.vec3f(-e, e, -e)) +
-      d.vec3f(k.x, k.x, k.x) * evalSelectionDist(p + d.vec3f(e, e, e));
-    const N = std.normalize(grad);
-    const gradMag = std.length(grad) / (4.0 * e);
-    const viewDir = std.normalize(d.vec3f(-rd.x, -rd.y, -rd.z));
-    const rim = std.pow(1.0 - std.abs(std.dot(N, viewDir)), OUTLINE_RIM_POWER);
-    const gradEdge = std.smoothstep(OUTLINE_GRAD_LO, OUTLINE_GRAD_HI, gradMag);
-    const edge = std.max(rim, gradEdge);
-    return std.smoothstep(OUTLINE_EDGE_LO, OUTLINE_EDGE_HI, edge);
-  };
-
-  const rayMarchSelectionOutline = (
-    ro: d.v3f,
-    rd: d.v3f,
-    tScene: number,
-  ): number => {
-    "use gpu";
-    // Tight gate: selection's own bounding sphere, not the whole scene.
-    const bounds = raySphere(
-      ro,
-      rd,
-      selectionUniforms.$.boundsCenter,
-      selectionUniforms.$.boundsRadius,
-    );
-    if (bounds.y < 0.0) {
-      return d.f32(RAY_MISS_T + 10.0);
+    if (std.length(p - selectionUniforms.$.boundsCenter) > selectionUniforms.$.boundsRadius) {
+      return 0.0;
     }
-    // Outline only shows if closer than the scene hit; no point marching past it.
-    const tFar = std.min(bounds.y, tScene + 0.01);
-    let t = bounds.x;
-    if (t > tFar) {
-      return d.f32(RAY_MISS_T + 10.0);
-    }
-    for (
-      let i = d.f32(0.0);
-      i < qualityUniforms.$.outlineSteps;
-      i += d.f32(1.0)
-    ) {
-      const p = ro + rd * t;
-      const dSel = evalSelectionDist(p);
-      const dist = std.abs(dSel - OUTLINE_OFFSET) - OUTLINE_BAND;
-      t += dist;
-      if (dist < 0.0001) {
-        return t;
-      }
-      // Left the gate without converging — explicit miss. With the tight
-      // selection sphere the exit point is near the object, where the mask
-      // is non-zero, so returning t here would paint the sphere as a halo.
-      if (t > tFar) {
-        return d.f32(RAY_MISS_T + 10.0);
-      }
-    }
-    // Ran out of steps while still inside: grazing the shell. Keep t so the
-    // mask decides, matching pre-optimization behavior at the rim.
-    return t;
-  };
-
-  const selectionOutlineColor = (): d.v3f => {
-    "use gpu";
-    const pulse = 0.75 + 0.25 * std.sin(cameraUniforms.$.time * 2.5);
-    const v = pulse * OUTLINE_STRENGTH;
-    return d.vec3f(v, v, v);
+    return 1.0 - std.smoothstep(GLOW_BAND_LO, GLOW_BAND_HI, std.abs(sdSelection(p)));
   };
 
   const GIZMO_ARROW_LEN = 0.85;
@@ -1629,6 +1579,17 @@ export function createShader(root: TgpuRoot) {
     return 1.0 - std.clamp(std.abs(coord) / std.max(w, 0.0001), 0.0, 1.0);
   };
 
+  /** How much hover slot `pickId` glows at surface point `p` (its own SDF ~ 0 there). */
+  const hoverGlow = (p: d.v3f, pickId: number, strength: number): number => {
+    "use gpu";
+    if (pickId === d.u32(0) || strength <= 0.001) {
+      return 0.0;
+    }
+    const info = pickObjectInfoBuffer.$[pickId - d.u32(1)];
+    const dObj = evalPickInstructionRange(p, info.start, info.count);
+    return (1.0 - std.smoothstep(GLOW_BAND_LO, GLOW_BAND_HI, std.abs(dObj))) * strength;
+  };
+
   const rot2D = (angle: number): d.m2x2f => {
     "use gpu";
     const c = std.cos(angle);
@@ -1709,17 +1670,6 @@ export function createShader(root: TgpuRoot) {
 
     const sceneHit = tScene <= RAY_MISS_T;
 
-    let tOutline = d.f32(RAY_MISS_T + 1.0);
-    if (selectionUniforms.$.enabled === d.u32(1)) {
-      tOutline = rayMarchSelectionOutline(ro, rd, tScene);
-    }
-
-    const outlineHit = tOutline <= RAY_MISS_T;
-    const outlineVisible =
-      selectionUniforms.$.enabled === d.u32(1) &&
-      outlineHit &&
-      (!sceneHit || tOutline < tScene - 0.0001);
-
     // Background: super-dark gray vertical gradient + vignette (sRGB direct)
     const gradT = std.clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0);
     const bg = std.mix(
@@ -1787,6 +1737,19 @@ export function createShader(root: TgpuRoot) {
           d.vec3f(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2),
         );
       }
+
+      // Glow: a soft fresnel rim on selected shapes (constant) and on the
+      // hovered one (cross-fading with the one just left); fades across joins.
+      const glow = std.min(
+        selectionGlow(pos) +
+          hoverGlow(pos, hoverUniforms.$.pickId, hoverUniforms.$.strength) +
+          hoverGlow(pos, hoverUniforms.$.prevPickId, hoverUniforms.$.prevStrength),
+        1.0,
+      );
+      if (glow > 0.0) {
+        const rim = std.pow(1.0 - std.max(std.dot(N, viewDir), 0.0), 2.5);
+        col = col + d.vec3f(0.55, 0.66, 0.85) * ((rim * 0.5 + 0.1) * glow);
+      }
     }
 
     // Grid lines over the background, and over anything below the plane.
@@ -1797,12 +1760,6 @@ export function createShader(root: TgpuRoot) {
       col = std.mix(col, d.vec3f(0.42), (minorGrid * 0.06 + majorGrid * 0.14) * fade);
       col = std.mix(col, d.vec3f(0.85, 0.3, 0.3), xAxisLine * 0.55 * fade);
       col = std.mix(col, d.vec3f(0.35, 0.52, 0.9), zAxisLine * 0.55 * fade);
-    }
-
-    if (outlineVisible) {
-      const outlinePos = ro + rd * tOutline;
-      const edge = selectionOutlineMask(outlinePos, rd);
-      col = col + selectionOutlineColor() * edge;
     }
 
     if (gizmoUniforms.$.enabled === d.u32(1)) {
@@ -1850,6 +1807,7 @@ export function createShader(root: TgpuRoot) {
     pickInstructionsBuffer,
     pickObjectInfoBuffer,
     pickUniforms,
+    hoverUniforms,
     qualityUniforms,
     imageSdfTexture,
   };

@@ -7,8 +7,7 @@ import {
   MAX_PICK_INSTRUCTIONS,
   MAX_PICK_OBJECTS,
   OPCODE_OP,
-  OUTLINE_BAND,
-  OUTLINE_OFFSET,
+  GLOW_BAND_HI,
   OPCODE_PUSH_SHAPE,
   PICK_PASS_GIZMO,
   RENDER_MODE_CHROME,
@@ -776,6 +775,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         pickInstructionsBuffer,
         pickObjectInfoBuffer,
         pickUniforms,
+        hoverUniforms,
         qualityUniforms,
         imageSdfTexture,
       } = createShader(root);
@@ -974,6 +974,46 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         }
       }
 
+      /**
+       * Runs the pick shader for the single pixel under the cursor (scissor)
+       * and reads its id back. Callers own pickInProgress (one readback at a
+       * time). pickPass is restored right after submit: queue writes are
+       * ordered with submits, so normal frames keep drawing during readback.
+       */
+      async function readPickPixel(
+        pickPass: number,
+        objectCount: number,
+        clientX: number,
+        clientY: number,
+      ): Promise<number | null> {
+        const px = clientToPickPixel(clientX, clientY, canvas!);
+        if (!px) return null;
+        pickUniforms.write({ objectCount, pickPass });
+
+        const encoder = root.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [
+            { view: pickTextureView, loadOp: "clear", clearValue: [0, 0, 0, 0], storeOp: "store" },
+          ],
+        });
+        pass.setScissorRect(px.x, px.y, 1, 1);
+        pipeline.with(pass).draw(3);
+        pass.end();
+        encoder.copyTextureToBuffer(
+          { texture: pickTexture, origin: { x: px.x, y: px.y, z: 0 } },
+          { buffer: pickReadbackBuffer, bytesPerRow: PICK_READBACK_BYTES_PER_ROW },
+          { width: 1, height: 1 },
+        );
+        root.device.queue.submit([encoder.finish()]);
+        pickUniforms.write({ objectCount: cachedPickObjectCount, pickPass: 0 });
+        await root.device.queue.onSubmittedWorkDone();
+
+        await pickReadbackBuffer.mapAsync(GPUMapMode.READ);
+        const id = readPickIdFromBytes(new Uint8Array(pickReadbackBuffer.getMappedRange()));
+        pickReadbackBuffer.unmap();
+        return id;
+      }
+
       async function pickGizmoAxisGpu(
         clientX: number,
         clientY: number,
@@ -989,33 +1029,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           syncCameraUniform();
           updateGizmoUniforms(sceneRoot, distance, gizmoHoverAxis);
 
-          const pickPixel = clientToPickPixel(clientX, clientY, canvas!);
-          if (!pickPixel) return { axis: null, skipped: false };
-
-          pickUniforms.write({ objectCount: 0, pickPass: PICK_PASS_GIZMO });
-
-          const encoder = root.device.createCommandEncoder();
-          pipeline
-            .with(encoder)
-            .withColorAttachment({ view: pickTextureView })
-            .draw(3);
-          encoder.copyTextureToBuffer(
-            { texture: pickTexture, origin: { x: pickPixel.x, y: pickPixel.y, z: 0 } },
-            {
-              buffer: pickReadbackBuffer,
-              bytesPerRow: PICK_READBACK_BYTES_PER_ROW,
-            },
-            { width: 1, height: 1 },
-          );
-          root.device.queue.submit([encoder.finish()]);
-          await root.device.queue.onSubmittedWorkDone();
-
-          await pickReadbackBuffer.mapAsync(GPUMapMode.READ);
-          const pickId = readPickIdFromBytes(
-            new Uint8Array(pickReadbackBuffer.getMappedRange()),
-          );
-          pickReadbackBuffer.unmap();
-
+          const pickId = await readPickPixel(PICK_PASS_GIZMO, 0, clientX, clientY);
+          if (pickId === null) return { axis: null, skipped: false };
           return { axis: axisFromPickByte(pickId), skipped: false };
         } finally {
           pickUniforms.write({
@@ -1414,37 +1429,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         pickInProgress = true;
 
         try {
-          const rect = canvas!.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) return;
-
-          pickUniforms.write({
-            objectCount: cachedPickObjectCount,
-            pickPass: 1,
-          });
-
-          const pickPixel = clientToPickPixel(clientX, clientY, canvas!);
-          if (!pickPixel) return;
-          const pickX = pickPixel.x;
-          const pickY = pickPixel.y;
-
-          const encoder = root.device.createCommandEncoder();
-          pipeline
-            .with(encoder)
-            .withColorAttachment({ view: pickTextureView })
-            .draw(3);
-          encoder.copyTextureToBuffer(
-            { texture: pickTexture, origin: { x: pickX, y: pickY, z: 0 } },
-            { buffer: pickReadbackBuffer, bytesPerRow: PICK_READBACK_BYTES_PER_ROW },
-            { width: 1, height: 1 },
-          );
-          root.device.queue.submit([encoder.finish()]);
-          await root.device.queue.onSubmittedWorkDone();
-
-          await pickReadbackBuffer.mapAsync(GPUMapMode.READ);
-          const pickId = readPickIdFromBytes(
-            new Uint8Array(pickReadbackBuffer.getMappedRange()),
-          );
-          pickReadbackBuffer.unmap();
+          const pickId = await readPickPixel(1, cachedPickObjectCount, clientX, clientY);
+          if (pickId === null) return;
 
           const { root: sceneRoot, selectItem, toggleSelected, deselect } =
             useSceneStore.getState();
@@ -1484,16 +1470,120 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         });
       };
 
+      // ── Object hover glow: the shape under the cursor, cross-faded ──
+      let hoverItemId: string | null = null;
+      let hoverQueued: { x: number; y: number } | null = null;
+      let hoverPicking = false;
+      /** Min gap between hover picks: each one stalls a frame on readback. */
+      const HOVER_PICK_GAP_MS = 45;
+
+      function clearObjectHover() {
+        hoverQueued = null;
+        hoverItemId = null;
+      }
+
+      async function drainObjectHover() {
+        if (hoverPicking) return;
+        hoverPicking = true;
+        try {
+          while (hoverQueued) {
+            if (pickInProgress) {
+              await new Promise<void>((r) => requestAnimationFrame(() => r()));
+              continue;
+            }
+            const { x, y } = hoverQueued;
+            hoverQueued = null;
+            pickInProgress = true;
+            let id: number | null = null;
+            try {
+              id = await readPickPixel(1, cachedPickObjectCount, x, y);
+            } finally {
+              pickUniforms.write({ objectCount: cachedPickObjectCount, pickPass: 0 });
+              pickInProgress = false;
+            }
+            // A newer move may have cleared hover (drag start, left the canvas).
+            if (id !== null && hoverQueued === null && !pointerDown && !gizmoDragging) {
+              hoverItemId = id > 0 ? (pickItemIds[id - 1] ?? null) : null;
+            }
+            await new Promise((r) => setTimeout(r, HOVER_PICK_GAP_MS));
+          }
+        } finally {
+          hoverPicking = false;
+        }
+      }
+
+      /** `cur` follows the cursor; `prev` is the shape just left, fading out. */
+      let glowCur: { id: string | null; s: number } = { id: null, s: 0 };
+      let glowPrev: { id: string | null; s: number } = { id: null, s: 0 };
+      let hoverWritten = { pickId: 0, strength: 0, prevPickId: 0, prevStrength: 0 };
+
+      /** Selected itself, inside a selected group, or the whole scene is selected. */
+      function isInSelection(itemId: string): boolean {
+        const { root: sceneRoot, selectedIds, rootSelected } = useSceneStore.getState();
+        if (rootSelected || selectedIds.includes(itemId)) return true;
+        const ancestors = getItemAncestorGroups(sceneRoot, itemId) ?? [];
+        return ancestors.some((g) => selectedIds.includes(g.id));
+      }
+
+      function updateHoverUniforms(dt: number) {
+        // No hover glow on a gizmo handle (that's the target) or on the
+        // selection (it already glows).
+        const target =
+          gizmoHoverAxis || !hoverItemId || isInSelection(hoverItemId) ? null : hoverItemId;
+        if (target !== null && target !== glowCur.id) {
+          if (target === glowPrev.id) {
+            // Back onto the shape still fading out: pick it up where it is.
+            [glowCur, glowPrev] = [glowPrev, glowCur];
+          } else {
+            if (glowCur.id !== null) glowPrev = glowCur;
+            glowCur = { id: target, s: 0 };
+          }
+        }
+        const k = Math.min(1, dt * 10);
+        const ease = (v: number, to: number) => {
+          const next = v + (to - v) * k;
+          return Math.abs(to - next) < 0.002 ? to : next;
+        };
+        glowCur.s = ease(glowCur.s, target !== null && target === glowCur.id ? 1 : 0);
+        glowPrev.s = ease(glowPrev.s, 0);
+        if (glowPrev.s === 0) glowPrev.id = null;
+        if (glowCur.s === 0 && target === null) glowCur.id = null;
+
+        // Pick ids are rebuilt on every upload, so resolve the items each frame.
+        const slot = (g: { id: string | null; s: number }) => {
+          const index = g.id ? pickItemIds.indexOf(g.id) : -1;
+          return { pickId: index + 1, strength: index >= 0 ? g.s : 0 };
+        };
+        const cur = slot(glowCur), prev = slot(glowPrev);
+        const want = { pickId: cur.pickId, strength: cur.strength, prevPickId: prev.pickId, prevStrength: prev.strength };
+        if (
+          want.pickId !== hoverWritten.pickId || want.strength !== hoverWritten.strength ||
+          want.prevPickId !== hoverWritten.prevPickId || want.prevStrength !== hoverWritten.prevStrength
+        ) {
+          hoverUniforms.write(want);
+          hoverWritten = want;
+        }
+      }
+
       const onPointerMove = (e: PointerEvent) => {
         if (gizmoDragging) {
+          clearObjectHover();
           updateGizmoDrag(e.clientX, e.clientY);
           return;
         }
 
         if (!pointerDown) {
+          // Only the canvas itself: panels sit on top of it.
+          if (e.target === canvas) {
+            hoverQueued = { x: e.clientX, y: e.clientY };
+            void drainObjectHover();
+          } else {
+            clearObjectHover();
+          }
           updateGizmoHover(e.clientX, e.clientY);
           return;
         }
+        clearObjectHover();
 
         const dx = e.clientX - dragStartX;
         const dy = e.clientY - dragStartY;
@@ -1549,6 +1639,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       });
 
       canvas.addEventListener("pointerdown", onPointerDown);
+      canvas.addEventListener("pointerleave", clearObjectHover);
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerUp);
       canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -1631,7 +1722,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           if (bounds) {
             const { center, radius } = bounds;
             selBoundsCenter = d.vec3f(center[0], center[1], center[2]);
-            selBoundsRadius = radius + OUTLINE_OFFSET + OUTLINE_BAND + 0.02;
+            selBoundsRadius = radius + GLOW_BAND_HI + 0.02;
           }
         }
 
@@ -1666,16 +1757,12 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       // Grow/shrink added and removed items; the store root stays untouched.
       const spawnAnim = new SpawnAnimator();
       let wasAnimating = false;
+      let lastHoverFrame = 0;
       lastSelectedIds = initialState.selectedIds;
       lastRootSelected = initialState.rootSelected;
       lastRenderMode = useRenderStore.getState().renderMode;
 
       function frame(now: number) {
-        if (pickInProgress) {
-          animFrameId = requestAnimationFrame(frame);
-          return;
-        }
-
         if (now - lastFrameTime < targetMs) {
           animFrameId = requestAnimationFrame(frame);
           return;
@@ -1709,6 +1796,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           sceneGpuDirty = false;
         }
         wasAnimating = drawn.animating;
+        updateHoverUniforms(Math.min(0.1, (now - lastHoverFrame) / 1000));
+        lastHoverFrame = now;
 
         // Highlight only while dragging; hover feedback stays cursor-only.
         const activeGizmoAxis = gizmoDragging ? gizmoDragAxis : null;
@@ -1726,6 +1815,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         observer.disconnect();
         cancelAnimationFrame(animFrameId);
         canvas.removeEventListener("pointerdown", onPointerDown);
+        canvas.removeEventListener("pointerleave", clearObjectHover);
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerUp);
         canvas.removeEventListener("wheel", onWheel);

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
-import { Monitor } from "lucide-react";
 import { COPIED_ICON, COPY_LINK_ICON } from "../utils/commands";
 import { Wordmark } from "./Wordmark";
+import LogoSpinner from "./LogoSpinner";
 
 /** Full-screen notice for windows too narrow for the editor (phones, split screens). */
 export default function MobileGate() {
@@ -21,9 +21,7 @@ export default function MobileGate() {
     <div className="mobile-gate">
       <div className="mobile-gate-card">
         <Wordmark />
-        <div className="mobile-gate-icon" aria-hidden="true">
-          <Monitor size={22} />
-        </div>
+        <LogoSpinner />
         <h1 className="mobile-gate-title">Made for desktop</h1>
         <p className="mobile-gate-text">
           d-stance is a 3D editor built for a mouse and a large screen. Open it on a
