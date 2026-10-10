@@ -488,6 +488,8 @@ interface SceneState {
   updateRootName: (name: string) => void;
   /** Transform edits for several items (layers or groups) in one store update. */
   updateTransforms: (patches: ReadonlyMap<string, ItemTransformPatch>) => void;
+  /** Rewrites each item in `ids` with `map` (inspector edits on a multi-selection). */
+  updateItems: (ids: readonly string[], map: (item: SceneItem) => SceneItem) => void;
   selectRoot: () => void;
   deselect: () => void;
   selectItem: (containerId: string, itemId: string) => void;
@@ -679,6 +681,17 @@ export const useSceneStore = create<SceneState>()(
           return { root: { ...state.root, items: apply(state.root.items) } };
         }),
 
+      updateItems: (ids, map) =>
+        set((state) => {
+          const want = new Set(ids);
+          const apply = (items: SceneItem[]): SceneItem[] =>
+            items.map((item) => {
+              const next = want.has(item.id) ? map(item) : item;
+              return next.kind === "group" ? { ...next, items: apply(next.items) } : next;
+            });
+          return { root: { ...state.root, items: apply(state.root.items) } };
+        }),
+
       updateRootName: (name) =>
         set((state) => ({
           root: { ...state.root, name },
@@ -782,6 +795,34 @@ export const temporalStore = useSceneStore.temporal;
 
 if (_saved.root?.items?.length) {
   temporalStore.getState().clear();
+}
+
+type HistorySnapshot = Pick<SceneState, "root" | "counters" | "groupCounter">;
+let historyPausedAt: HistorySnapshot | null = null;
+
+/**
+ * Pause undo tracking for a continuous edit (gizmo drag, typing in a field).
+ * zundo records nothing while paused, so `resumeHistory` pushes the state from
+ * here as one undo step — otherwise the whole edit would be missing from history.
+ */
+export function pauseHistory() {
+  if (historyPausedAt) return;
+  const { root, counters, groupCounter } = useSceneStore.getState();
+  historyPausedAt = { root, counters, groupCounter };
+  temporalStore.getState().pause();
+}
+
+export function resumeHistory() {
+  const before = historyPausedAt;
+  if (!before) return;
+  historyPausedAt = null;
+  temporalStore.getState().resume();
+  if (useSceneStore.getState().root !== before.root) {
+    temporalStore.setState((t) => ({
+      pastStates: [...t.pastStates, before].slice(-UNDO_LIMIT),
+      futureStates: [],
+    }));
+  }
 }
 
 export function undoScene() {

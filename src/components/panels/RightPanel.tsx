@@ -1,11 +1,13 @@
 import { useState } from "react";
 import {
   useSceneStore,
-  temporalStore,
   findItem,
+  pauseHistory,
+  resumeHistory,
   IMAGE_ROUND_MAX,
   type ObjectGroup,
   type OpType,
+  type SceneItem,
   type ShapeLayer,
 } from "../../store/sceneStore";
 import { roundTo } from "../../utils/round";
@@ -13,6 +15,11 @@ import { OpIcon } from "../OpIcon";
 import CodeView from "./CodeView";
 
 // ── Shared numeric input ──────────────────────────────────────────────────────
+
+/** The value all items share, or null when they differ (shown as "mixed"). */
+function common<T>(values: T[]): T | null {
+  return values.every((v) => v === values[0]) ? values[0] : null;
+}
 
 function NumericInput({
   label,
@@ -24,14 +31,15 @@ function NumericInput({
   onChange,
 }: {
   label: string;
-  value: number;
+  /** null = selected items disagree. */
+  value: number | null;
   min?: number;
   max?: number;
   step?: number;
   decimals?: number;
   onChange: (v: number) => void;
 }) {
-  const display = decimals != null ? roundTo(value, decimals) : value;
+  const display = value === null ? "" : decimals != null ? roundTo(value, decimals) : value;
 
   return (
     <div className="prop-row">
@@ -40,11 +48,12 @@ function NumericInput({
         className="prop-input"
         type="number"
         value={display}
+        placeholder={value === null ? "mixed" : undefined}
         min={min}
         max={max}
         step={step ?? 0.1}
-        onFocus={() => temporalStore.getState().pause()}
-        onBlur={() => temporalStore.getState().resume()}
+        onFocus={pauseHistory}
+        onBlur={resumeHistory}
         onChange={(e) => {
           const n = parseFloat(e.target.value);
           if (!isNaN(n)) onChange(decimals != null ? roundTo(n, decimals) : n);
@@ -187,21 +196,18 @@ const OP_HINT: Record<OpType, string> = {
   sIntersect: "Smoothly intersects with the previous result.",
 };
 
-function OperationFields({
-  op,
-  smoothK,
-  showOp,
-  onOpChange,
-  onSmoothKChange,
-}: {
-  op: OpType;
-  smoothK: number;
-  showOp: boolean;
-  onOpChange: (op: OpType) => void;
-  onSmoothKChange: (k: number) => void;
-}) {
+/** Operation picker for `items` (one, or a whole multi-selection). */
+function OperationFields({ items, showOp }: { items: SceneItem[]; showOp: boolean }) {
+  const updateItems = useSceneStore((s) => s.updateItems);
   if (!showOp) return null;
-  const isSmooth = SMOOTH_OPS.has(op);
+
+  const ids = items.map((item) => item.id);
+  const op = common(items.map((item) => item.op));
+  const isSmooth = items.some((item) => SMOOTH_OPS.has(item.op));
+  const smoothK = common(items.map((item) => item.smoothK));
+  const onOpChange = (next: OpType) => updateItems(ids, (item) => ({ ...item, op: next }));
+  const onSmoothKChange = (k: number) =>
+    updateItems(ids, (item) => ({ ...item, smoothK: k }));
 
   return (
     <>
@@ -232,7 +238,7 @@ function OperationFields({
         />
       )}
 
-      <p className="props-op-hint">{OP_HINT[op]}</p>
+      {op && <p className="props-op-hint">{OP_HINT[op]}</p>}
     </>
   );
 }
@@ -250,8 +256,8 @@ function RootProperties() {
           className="prop-input"
           type="text"
           value={root.name}
-          onFocus={() => temporalStore.getState().pause()}
-          onBlur={() => temporalStore.getState().resume()}
+          onFocus={pauseHistory}
+          onBlur={resumeHistory}
           onChange={(e) => updateRootName(e.target.value)}
         />
       </div>
@@ -259,9 +265,21 @@ function RootProperties() {
   );
 }
 
-function GroupProperties({ group, itemIndex }: { group: ObjectGroup; itemIndex: number }) {
+/**
+ * `shared`: the whole selection (just `group` when alone). Operation edits go to
+ * all of it; name and transform fields stay on `group`, the active item.
+ */
+function GroupProperties({
+  group,
+  itemIndex,
+  shared,
+}: {
+  group: ObjectGroup;
+  itemIndex: number;
+  shared: SceneItem[];
+}) {
   const updateGroup = useSceneStore((s) => s.updateGroup);
-  const showOp = itemIndex > 0;
+  const showOp = shared.length > 1 || itemIndex > 0;
 
   const setPosition = (axis: 0 | 1 | 2, v: number) => {
     const pos: [number, number, number] = [...group.position];
@@ -290,19 +308,13 @@ function GroupProperties({ group, itemIndex }: { group: ObjectGroup; itemIndex: 
           className="prop-input"
           type="text"
           value={group.name}
-          onFocus={() => temporalStore.getState().pause()}
-          onBlur={() => temporalStore.getState().resume()}
+          onFocus={pauseHistory}
+          onBlur={resumeHistory}
           onChange={(e) => updateGroup(group.id, { name: e.target.value })}
         />
       </div>
 
-      <OperationFields
-        op={group.op}
-        smoothK={group.smoothK}
-        showOp={showOp}
-        onOpChange={(op) => updateGroup(group.id, { op })}
-        onSmoothKChange={(smoothK) => updateGroup(group.id, { smoothK })}
-      />
+      <OperationFields items={shared} showOp={showOp} />
 
       <div className="props-section-title" style={{ marginTop: showOp ? "16px" : undefined }}>
         Position
@@ -324,16 +336,32 @@ function GroupProperties({ group, itemIndex }: { group: ObjectGroup; itemIndex: 
   );
 }
 
+/**
+ * `shared`: the whole selection (just `layer` when alone). Operation and size
+ * edits go to all of it (size only when every item is this shape type);
+ * transform fields stay on `layer`, the active item.
+ */
 function LayerProperties({
   layer,
   containerId,
   itemIndex,
+  shared,
 }: {
   layer: ShapeLayer;
   containerId: string;
   itemIndex: number;
+  shared: SceneItem[];
 }) {
   const updateLayer = useSceneStore((s) => s.updateLayer);
+  const updateItems = useSceneStore((s) => s.updateItems);
+  const sameShapes = shared.every(
+    (item): item is ShapeLayer => item.kind === "layer" && item.shapeType === layer.shapeType,
+  )
+    ? (shared as ShapeLayer[])
+    : null;
+  const sameIds = sameShapes?.map((item) => item.id) ?? [];
+  const updateSameShapes = (map: (l: ShapeLayer) => ShapeLayer) =>
+    updateItems(sameIds, (item) => (item.kind === "layer" ? map(item) : item));
 
   const setPosition = (axis: 0 | 1 | 2, v: number) => {
     const pos: [number, number, number] = [...layer.position];
@@ -347,11 +375,12 @@ function LayerProperties({
     updateLayer(containerId, layer.id, { rotation: rot });
   };
 
-  const setParam = (idx: 0 | 1 | 2 | 3, v: number) => {
-    const params: [number, number, number, number] = [...layer.params];
-    params[idx] = v;
-    updateLayer(containerId, layer.id, { params });
-  };
+  const setParam = (idx: 0 | 1 | 2 | 3, v: number) =>
+    updateSameShapes((l) => {
+      const params: [number, number, number, number] = [...l.params];
+      params[idx] = v;
+      return { ...l, params };
+    });
 
   const setScale = (axis: 0 | 1 | 2, v: number) => {
     const scale: [number, number, number] = [...layer.scale];
@@ -359,18 +388,12 @@ function LayerProperties({
     updateLayer(containerId, layer.id, { scale });
   };
 
-  const sizeFields = SIZE_FIELDS[layer.shapeType] ?? [];
-  const showOp = itemIndex > 0;
+  const sizeFields = sameShapes ? (SIZE_FIELDS[layer.shapeType] ?? []) : [];
+  const showOp = shared.length > 1 || itemIndex > 0;
 
   return (
     <div className="props-content">
-      <OperationFields
-        op={layer.op}
-        smoothK={layer.smoothK}
-        showOp={showOp}
-        onOpChange={(op) => updateLayer(containerId, layer.id, { op })}
-        onSmoothKChange={(smoothK) => updateLayer(containerId, layer.id, { smoothK })}
-      />
+      <OperationFields items={shared} showOp={showOp} />
 
       <div className="props-section-title" style={{ marginTop: showOp ? "16px" : undefined }}>
         Position
@@ -389,12 +412,14 @@ function LayerProperties({
       <NumericInput label="Sy" value={layer.scale[1]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(1, v)} />
       <NumericInput label="Sz" value={layer.scale[2]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(2, v)} />
 
-      <div className="props-section-title" style={{ marginTop: "16px" }}>Size</div>
+      {sizeFields.length > 0 && (
+        <div className="props-section-title" style={{ marginTop: "16px" }}>Size</div>
+      )}
       {sizeFields.map((f) => (
         <NumericInput
           key={f.label}
           label={f.label}
-          value={layer.params[f.paramIndex]}
+          value={common(sameShapes!.map((l) => l.params[f.paramIndex]))}
           min={f.min}
           max={f.max}
           step={f.step}
@@ -402,20 +427,20 @@ function LayerProperties({
           onChange={(v) => setParam(f.paramIndex, v)}
         />
       ))}
-      {layer.shapeType === "image" && layer.image && (
+      {sameShapes && layer.shapeType === "image" && layer.image && (
         <NumericInput
           label="Round"
-          value={layer.image.round ?? 0}
+          value={common(sameShapes.map((l) => l.image?.round ?? 0))}
           min={0}
           max={IMAGE_ROUND_MAX}
           step={0.005}
           decimals={3}
           onChange={(v) =>
-            updateLayer(containerId, layer.id, { image: { ...layer.image!, round: v } })
+            updateSameShapes((l) => (l.image ? { ...l, image: { ...l.image, round: v } } : l))
           }
         />
       )}
-      {layer.shapeType === "image" && (
+      {sameShapes && layer.shapeType === "image" && (
         <div className="prop-row">
           <label className="prop-label" htmlFor={`invert-${layer.id}`}>
             Invert
@@ -424,7 +449,7 @@ function LayerProperties({
             id={`invert-${layer.id}`}
             className="ui-check"
             type="checkbox"
-            checked={layer.params[3] > 0.5}
+            checked={sameShapes.every((l) => l.params[3] > 0.5)}
             onChange={(e) => setParam(3, e.target.checked ? 1 : 0)}
             title="Plate with the silhouette cut out"
           />
@@ -437,11 +462,13 @@ function LayerProperties({
 export default function RightPanel() {
   const root = useSceneStore((s) => s.root);
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
-  const extraSelected = useSceneStore((s) => s.selectedIds.length - 1);
+  const selectedIds = useSceneStore((s) => s.selectedIds);
   const rootSelected = useSceneStore((s) => s.rootSelected);
   const [tab, setTab] = useState<"props" | "code">("props");
 
   const found = selectedItemId ? findItem(root, selectedItemId) : null;
+  const shared = selectedIds.flatMap((id) => findItem(root, id)?.item ?? []);
+  const extraSelected = shared.length - 1;
 
   let title = root.name;
   let content: React.ReactNode = null;
@@ -453,11 +480,12 @@ export default function RightPanel() {
         layer={found.item}
         containerId={found.container.id}
         itemIndex={found.index}
+        shared={shared}
       />
     );
   } else if (found?.item.kind === "group") {
     title = found.item.name;
-    content = <GroupProperties group={found.item} itemIndex={found.index} />;
+    content = <GroupProperties group={found.item} itemIndex={found.index} shared={shared} />;
   } else if (rootSelected) {
     content = <RootProperties />;
   } else {
@@ -491,7 +519,7 @@ export default function RightPanel() {
             {extraSelected > 0 && (
               <span
                 className="props-shape-extra"
-                title="Fields edit the active (last clicked) object only"
+                title="Operation and size apply to all selected; position, rotation and scale to this object"
               >
                 +{extraSelected} selected
               </span>

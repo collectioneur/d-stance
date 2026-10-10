@@ -22,8 +22,8 @@ import {
   findItem,
   topLevelSelection,
   getAncestorGroups,
-  temporalStore,
-  UNDO_LIMIT,
+  pauseHistory,
+  resumeHistory,
   IMAGE_ROUND_MAX,
   MAX_IMAGES,
   type ObjectGroup,
@@ -867,17 +867,6 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let gizmoDragAncestors: ObjectGroup[] | null = null;
       /** Set when the drag drives a multi-selection (world-space pivot). */
       let gizmoDragGroup: GroupDragTarget[] | null = null;
-      /** Undo entry for the drag: history is paused while it runs. */
-      let gizmoDragUndo: Pick<
-        ReturnType<typeof useSceneStore.getState>,
-        "root" | "counters" | "groupCounter"
-      > | null = null;
-
-      function pauseHistoryForDrag() {
-        const { root, counters, groupCounter } = useSceneStore.getState();
-        gizmoDragUndo = { root, counters, groupCounter };
-        temporalStore.getState().pause();
-      }
       let cachedPickObjectCount = 0;
 
       let hoverGpuSeq = 0;
@@ -1212,7 +1201,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           gizmoDragRing = null;
           gizmoDragScale = scaleDrag;
           gizmoHoverAxis = axis;
-          pauseHistoryForDrag();
+          pauseHistory();
           canvas!.style.cursor = axisIdToCursor(axis);
           return true;
         }
@@ -1247,7 +1236,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           gizmoDragRing = ringDrag;
           gizmoDragScale = null;
           gizmoHoverAxis = axis;
-          pauseHistoryForDrag();
+          pauseHistory();
           canvas!.style.cursor = "grabbing";
           return true;
         }
@@ -1276,7 +1265,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         gizmoDragRing = null;
         gizmoDragScale = null;
         gizmoHoverAxis = axis;
-        pauseHistoryForDrag();
+        pauseHistory();
         canvas!.style.cursor = axisIdToCursor(axis);
         return true;
       }
@@ -1391,17 +1380,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         gizmoDragItemId = null;
         gizmoDragAncestors = null;
         gizmoDragGroup = null;
-        temporalStore.getState().resume();
-        // Paused tracking recorded nothing; push the pre-drag scene so one undo
-        // reverts the whole drag.
-        const before = gizmoDragUndo;
-        gizmoDragUndo = null;
-        if (before && useSceneStore.getState().root !== before.root) {
-          temporalStore.setState((t) => ({
-            pastStates: [...t.pastStates, before].slice(-UNDO_LIMIT),
-            futureStates: [],
-          }));
-        }
+        resumeHistory();
       }
 
       function updateGizmoHover(clientX: number, clientY: number) {
