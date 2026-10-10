@@ -744,15 +744,24 @@ canvas {
   font-weight: 600;
 }
 
-.scene-list::-webkit-scrollbar {
-  width: 4px;
+/*
+ * App-wide scrollbars (tree, properties, code). The default macOS overlay bar
+ * lights its track up white on hover; this one keeps the same look throughout.
+ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
-.scene-list::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
-.scene-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 2px;
+::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
 }
 
 .scene-empty {
@@ -1093,18 +1102,6 @@ canvas {
   font-size: inherit;
   line-height: inherit;
   white-space: pre;
-}
-
-.code-pre::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
-}
-.code-pre::-webkit-scrollbar-track {
-  background: transparent;
-}
-.code-pre::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 2px;
 }
 
 /* ─── Scene object (left panel tree nodes) ───────────────────── */
