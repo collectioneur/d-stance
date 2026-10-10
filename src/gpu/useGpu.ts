@@ -23,6 +23,7 @@ import {
   topLevelSelection,
   getAncestorGroups,
   temporalStore,
+  UNDO_LIMIT,
   IMAGE_ROUND_MAX,
   MAX_IMAGES,
   type ObjectGroup,
@@ -42,7 +43,12 @@ import {
   beginAxisScreenDrag,
   beginRingDrag,
   beginScaleDrag,
-  getGizmoWorldAxes,
+  beginGroupDrag,
+  getSelectionGizmoFrame,
+  groupRotatePatches,
+  groupScalePatches,
+  groupTranslatePatches,
+  type GroupDragTarget,
   ringTotalAngleFromScreenDrag,
   scaleFactorFromScreenDrag,
   getGizmoWorldPosition,
@@ -859,6 +865,19 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let gizmoDragScale: ScaleDragState | null = null;
       let gizmoDragItemId: string | null = null;
       let gizmoDragAncestors: ObjectGroup[] | null = null;
+      /** Set when the drag drives a multi-selection (world-space pivot). */
+      let gizmoDragGroup: GroupDragTarget[] | null = null;
+      /** Undo entry for the drag: history is paused while it runs. */
+      let gizmoDragUndo: Pick<
+        ReturnType<typeof useSceneStore.getState>,
+        "root" | "counters" | "groupCounter"
+      > | null = null;
+
+      function pauseHistoryForDrag() {
+        const { root, counters, groupCounter } = useSceneStore.getState();
+        gizmoDragUndo = { root, counters, groupCounter };
+        temporalStore.getState().pause();
+      }
       let cachedPickObjectCount = 0;
 
       let hoverGpuSeq = 0;
@@ -870,9 +889,6 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       } | null = null;
 
       function isGizmoVisibleMode(): boolean {
-        // ponytail: no gizmo for a multi-selection yet — it would move only
-        // the active item. Group transforms come with a world-space pivot.
-        if (useSceneStore.getState().selectedIds.length > 1) return false;
         const mode = useGizmoStore.getState().mode;
         return mode === "translate" || mode === "rotate" || mode === "scale";
       }
@@ -914,23 +930,22 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         canvas!.style.cursor = "default";
       }
 
+      function selectionGizmoFrame(sceneRoot: SceneRoot) {
+        const { selectedIds, selectedItemId } = useSceneStore.getState();
+        return getSelectionGizmoFrame(sceneRoot, selectedIds, selectedItemId);
+      }
+
       function updateGizmoUniforms(
         sceneRoot: SceneRoot,
-        selectedItemId: string | null,
         cameraDistance: number,
         activeAxis: GizmoHandle | null,
       ) {
-        if (!isGizmoVisibleMode() || !selectedItemId) {
+        const frame = isGizmoVisibleMode() ? selectionGizmoFrame(sceneRoot) : null;
+        if (!frame) {
           writeGizmoDisabled();
           return;
         }
-
-        const pivotWorld = getGizmoWorldPosition(sceneRoot, selectedItemId);
-        const axes = getGizmoWorldAxes(sceneRoot, selectedItemId);
-        if (!pivotWorld || !axes) {
-          writeGizmoDisabled();
-          return;
-        }
+        const { pivot: pivotWorld, axes } = frame;
 
         const visualScale = gizmoVisualScaleForDistance(cameraDistance);
         gizmoUniforms.write({
@@ -981,12 +996,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         pickInProgress = true;
         try {
           syncCameraUniform();
-          updateGizmoUniforms(
-            sceneRoot,
-            selectedItemId,
-            distance,
-            gizmoHoverAxis,
-          );
+          updateGizmoUniforms(sceneRoot, distance, gizmoHoverAxis);
 
           const pickPixel = clientToPickPixel(clientX, clientY, canvas!);
           if (!pickPixel) return { axis: null, skipped: false };
@@ -1049,23 +1059,15 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             if (pick.seq !== hoverGpuSeq) continue;
             if (result.skipped) continue;
 
-            const { root: sceneRoot, selectedItemId } =
-              useSceneStore.getState();
-            if (!selectedItemId) {
+            const frame = selectionGizmoFrame(useSceneStore.getState().root);
+            if (!frame) {
               gizmoHoverAxis = null;
               canvas!.style.cursor = "default";
               continue;
             }
 
-            const pivotWorld = getGizmoWorldPosition(sceneRoot, selectedItemId);
-            if (!pivotWorld) {
-              gizmoHoverAxis = null;
-              canvas!.style.cursor = "default";
-              continue;
-            }
-
+            const { pivot: pivotWorld, axes } = frame;
             const mode = gizmoPickMode();
-            const axes = getGizmoWorldAxes(sceneRoot, selectedItemId);
             const [rx, ry] = getCameraRot();
             const gizmoScale = gizmoVisualScaleForDistance(distance);
 
@@ -1112,18 +1114,22 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       ): Promise<boolean> {
         if (!isGizmoVisibleMode()) return false;
 
-        const { root: sceneRoot, selectedItemId } = useSceneStore.getState();
-        if (!selectedItemId) return false;
+        const sceneRoot = useSceneStore.getState().root;
+        const frame = selectionGizmoFrame(sceneRoot);
+        if (!frame) return false;
+        // Single item: its own drag path below. Several: world-space group drag.
+        const selectedItemId = frame.ids[0];
+        const group = frame.ids.length > 1 ? beginGroupDrag(sceneRoot, frame.ids) : null;
 
         const found = findItem(sceneRoot, selectedItemId);
         if (!found) return false;
 
-        const pivotWorld = getGizmoWorldPosition(sceneRoot, selectedItemId);
+        const pivotWorld = frame.pivot;
         const ancestors = getItemAncestorGroups(sceneRoot, selectedItemId);
-        if (!pivotWorld || ancestors === null) return false;
+        if (ancestors === null) return false;
 
         const mode = gizmoPickMode();
-        const axes = getGizmoWorldAxes(sceneRoot, selectedItemId);
+        const axes = frame.axes;
         const [rx, ry] = getCameraRot();
         const gizmoScale = gizmoVisualScaleForDistance(distance);
 
@@ -1199,13 +1205,14 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           gizmoDragging = true;
           gizmoDragAxis = axis;
           gizmoDragItemId = selectedItemId;
+          gizmoDragGroup = group;
           gizmoDragAncestors = ancestors;
           gizmoDragStartWorld = pivotWorld;
           gizmoDragScreen = null;
           gizmoDragRing = null;
           gizmoDragScale = scaleDrag;
           gizmoHoverAxis = axis;
-          temporalStore.getState().pause();
+          pauseHistoryForDrag();
           canvas!.style.cursor = axisIdToCursor(axis);
           return true;
         }
@@ -1233,13 +1240,14 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           gizmoDragging = true;
           gizmoDragAxis = axis;
           gizmoDragItemId = selectedItemId;
+          gizmoDragGroup = group;
           gizmoDragAncestors = ancestors;
           gizmoDragStartWorld = pivotWorld;
           gizmoDragScreen = null;
           gizmoDragRing = ringDrag;
           gizmoDragScale = null;
           gizmoHoverAxis = axis;
-          temporalStore.getState().pause();
+          pauseHistoryForDrag();
           canvas!.style.cursor = "grabbing";
           return true;
         }
@@ -1261,13 +1269,14 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         gizmoDragging = true;
         gizmoDragAxis = axis;
         gizmoDragItemId = selectedItemId;
+        gizmoDragGroup = group;
         gizmoDragAncestors = ancestors;
         gizmoDragStartWorld = pivotWorld;
         gizmoDragScreen = dragScreen;
         gizmoDragRing = null;
         gizmoDragScale = null;
         gizmoHoverAxis = axis;
-        temporalStore.getState().pause();
+        pauseHistoryForDrag();
         canvas!.style.cursor = axisIdToCursor(axis);
         return true;
       }
@@ -1285,6 +1294,12 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             clientY,
             gizmoDragScale,
           );
+          if (gizmoDragGroup && gizmoDragStartWorld) {
+            useSceneStore.getState().updateTransforms(
+              groupScalePatches(gizmoDragGroup, gizmoDragStartWorld, gizmoDragAxis, factor),
+            );
+            return;
+          }
           applyScaleFactorToItem(
             useSceneStore.getState().root,
             gizmoDragItemId,
@@ -1304,7 +1319,17 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             distance,
             gizmoDragRing,
           );
-          if (totalAngle !== null) {
+          if (totalAngle !== null && gizmoDragGroup) {
+            gizmoDragRing.totalAngleRad = totalAngle; // unwrap reference for the next move
+            useSceneStore.getState().updateTransforms(
+              groupRotatePatches(
+                gizmoDragGroup,
+                gizmoDragRing.pivotWorld,
+                gizmoDragRing.worldAxis,
+                totalAngle,
+              ),
+            );
+          } else if (totalAngle !== null) {
             applyWorldRotationToItem(
               useSceneStore.getState().root,
               gizmoDragItemId,
@@ -1331,6 +1356,17 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           gizmoDragScreen,
         );
 
+        if (gizmoDragGroup) {
+          useSceneStore.getState().updateTransforms(
+            groupTranslatePatches(gizmoDragGroup, [
+              axisDir[0] * deltaT,
+              axisDir[1] * deltaT,
+              axisDir[2] * deltaT,
+            ]),
+          );
+          return;
+        }
+
         const newPivot: [number, number, number] = [
           gizmoDragStartWorld[0] + axisDir[0] * deltaT,
           gizmoDragStartWorld[1] + axisDir[1] * deltaT,
@@ -1354,7 +1390,18 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         gizmoDragScale = null;
         gizmoDragItemId = null;
         gizmoDragAncestors = null;
+        gizmoDragGroup = null;
         temporalStore.getState().resume();
+        // Paused tracking recorded nothing; push the pre-drag scene so one undo
+        // reverts the whole drag.
+        const before = gizmoDragUndo;
+        gizmoDragUndo = null;
+        if (before && useSceneStore.getState().root !== before.root) {
+          temporalStore.setState((t) => ({
+            pastStates: [...t.pastStates, before].slice(-UNDO_LIMIT),
+            futureStates: [],
+          }));
+        }
       }
 
       function updateGizmoHover(clientX: number, clientY: number) {
@@ -1651,7 +1698,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         }
         lastFrameTime = now;
 
-        const { root: sceneRoot, selectedItemId, selectedIds, rootSelected } =
+        const { root: sceneRoot, selectedIds, rootSelected } =
           useSceneStore.getState();
         const { renderMode, quality } = useRenderStore.getState();
         if (quality !== lastQuality) {
@@ -1676,7 +1723,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
         // Highlight only while dragging; hover feedback stays cursor-only.
         const activeGizmoAxis = gizmoDragging ? gizmoDragAxis : null;
-        updateGizmoUniforms(sceneRoot, selectedItemId, distance, activeGizmoAxis);
+        updateGizmoUniforms(sceneRoot, distance, activeGizmoAxis);
 
         syncCameraUniform();
         pipeline.withColorAttachment({ view: context }).draw(3);

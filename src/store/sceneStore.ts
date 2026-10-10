@@ -72,6 +72,7 @@ export type SceneRoot = {
 export type SceneContainer = SceneRoot | ObjectGroup;
 
 export const MAX_INSTRUCTIONS = 256;
+export const UNDO_LIMIT = 100;
 /** GPU objectInfo buffer slots — only root slot [0] is used for scene render. */
 export const MAX_GPU_OBJECTS = 8;
 /** Max pickable scene items (IDs encoded in 1 byte: 1–255). */
@@ -193,6 +194,8 @@ export function wouldExceedImages(root: SceneRoot, sdf: string): boolean {
   const used = collectImageSdfs(root.items);
   return !used.has(sdf) && used.size >= MAX_IMAGES;
 }
+
+export type ItemTransformPatch = Partial<Pick<ShapeLayer, "position" | "rotation" | "scale">>;
 
 export type InsertRejectReason = "cap" | "depth" | "images" | "invalid_parent";
 
@@ -483,6 +486,8 @@ interface SceneState {
     >,
   ) => void;
   updateRootName: (name: string) => void;
+  /** Transform edits for several items (layers or groups) in one store update. */
+  updateTransforms: (patches: ReadonlyMap<string, ItemTransformPatch>) => void;
   selectRoot: () => void;
   deselect: () => void;
   selectItem: (containerId: string, itemId: string) => void;
@@ -663,6 +668,17 @@ export const useSceneStore = create<SceneState>()(
           ),
         })),
 
+      updateTransforms: (patches) =>
+        set((state) => {
+          const apply = (items: SceneItem[]): SceneItem[] =>
+            items.map((item) => {
+              const patch = patches.get(item.id);
+              const next = patch ? { ...item, ...patch } : item;
+              return next.kind === "group" ? { ...next, items: apply(next.items) } : next;
+            });
+          return { root: { ...state.root, items: apply(state.root.items) } };
+        }),
+
       updateRootName: (name) =>
         set((state) => ({
           root: { ...state.root, name },
@@ -757,7 +773,7 @@ export const useSceneStore = create<SceneState>()(
         groupCounter: state.groupCounter,
       }),
       equality: shallow,
-      limit: 100,
+      limit: UNDO_LIMIT,
     },
   ),
 );

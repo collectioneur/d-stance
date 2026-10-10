@@ -1,7 +1,9 @@
 import {
   findItem,
   getAncestorGroups,
+  topLevelSelection,
   useSceneStore,
+  type ItemTransformPatch,
   type ObjectGroup,
   type SceneRoot,
 } from "../store/sceneStore";
@@ -1610,3 +1612,215 @@ export function applyWorldDeltaToItem(
     updateGroup(found.item.id, { position: newLocal });
   }
 }
+
+/* ---------- Multi-selection gizmo ---------- */
+
+const WORLD_AXES: GizmoWorldAxes = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+
+function mat3Transpose(m: Mat3): Mat3 {
+  return [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+}
+
+/**
+ * Where the gizmo sits and how it is oriented for the current selection.
+ * One top-level item: its pivot and axes (unchanged single-item behavior).
+ * Several: median of their world positions, world axes. `ids` = items to drive.
+ */
+export function getSelectionGizmoFrame(
+  root: SceneRoot,
+  selectedIds: readonly string[],
+  activeId: string | null,
+): { pivot: Vec3; axes: GizmoWorldAxes; ids: string[] } | null {
+  const ids = topLevelSelection(root, selectedIds);
+  if (ids.length > 1) {
+    const pivot: Vec3 = [0, 0, 0];
+    for (const id of ids) {
+      const p = getGizmoWorldPosition(root, id);
+      if (!p) return null;
+      for (let k = 0; k < 3; k++) pivot[k] += p[k] / ids.length;
+    }
+    return { pivot, axes: WORLD_AXES, ids };
+  }
+  const id = ids[0] ?? activeId;
+  if (!id) return null;
+  const pivot = getGizmoWorldPosition(root, id);
+  const axes = getGizmoWorldAxes(root, id);
+  if (!pivot || !axes) return null;
+  return { pivot, axes, ids: [id] };
+}
+
+/** One top-level selected item, captured when a multi-selection drag starts. */
+export type GroupDragTarget = {
+  id: string;
+  ancestors: ObjectGroup[];
+  startWorld: Vec3;
+  startRotation: [number, number, number];
+  startScale: [number, number, number];
+  /** Ancestor rotations, outermost first (scale ignored, as in getGizmoWorldAxes). */
+  parentRot: Mat3;
+  /** parentRot · own rotation. */
+  worldRot: Mat3;
+};
+
+export type GroupPatches = Map<string, ItemTransformPatch>;
+
+export function beginGroupDrag(root: SceneRoot, ids: readonly string[]): GroupDragTarget[] {
+  const targets: GroupDragTarget[] = [];
+  for (const id of ids) {
+    const found = findItem(root, id);
+    if (!found) continue;
+    const ancestors = getAncestorGroups(root, found.container.id);
+    let parentRot = eulerDegreesToMat3([0, 0, 0]);
+    for (const group of ancestors) {
+      parentRot = mat3Mul(parentRot, eulerDegreesToMat3(group.rotation));
+    }
+    targets.push({
+      id,
+      ancestors,
+      startWorld: itemLocalToWorldPosition([...found.item.position], ancestors),
+      startRotation: [...found.item.rotation],
+      startScale: [...found.item.scale],
+      parentRot,
+      worldRot: mat3Mul(parentRot, eulerDegreesToMat3(found.item.rotation)),
+    });
+  }
+  return targets;
+}
+
+/** Every item moves by the same world delta, whatever group it sits in. */
+export function groupTranslatePatches(targets: GroupDragTarget[], delta: Vec3): GroupPatches {
+  return new Map(
+    targets.map((t) => [
+      t.id,
+      { position: worldToItemLocalPosition(add(t.startWorld, delta), t.ancestors) },
+    ]),
+  );
+}
+
+/** World rotation Q about the pivot: orbit positions, re-express Q · worldRot in each parent. */
+export function groupRotatePatches(
+  targets: GroupDragTarget[],
+  pivot: Vec3,
+  worldAxis: Vec3,
+  angleRad: number,
+): GroupPatches {
+  const q = mat3FromAxisAngle(worldAxis, angleRad);
+  return new Map(
+    targets.map((t) => {
+      const world = add(pivot, mat3TransformVec3(q, sub(t.startWorld, pivot)));
+      const local = mat3Mul(mat3Transpose(t.parentRot), mat3Mul(q, t.worldRot));
+      return [
+        t.id,
+        {
+          position: worldToItemLocalPosition(world, t.ancestors),
+          rotation: mat3ToEulerDegreesHinted(local, t.startRotation),
+        },
+      ];
+    }),
+  );
+}
+
+/**
+ * Center handle: uniform scale about the pivot (exact). Axis handle: spread
+ * positions along that world axis and scale each item's local axis closest to
+ * it — exact for axis-aligned items; a rotated item would need shear, which a
+ * TRS layer cannot hold, so it gets the nearest representable scale.
+ */
+export function groupScalePatches(
+  targets: GroupDragTarget[],
+  pivot: Vec3,
+  handle: GizmoHandle,
+  factor: number,
+): GroupPatches {
+  const f = Math.max(0, factor); // no mirroring through the pivot
+  return new Map(
+    targets.map((t) => {
+      const rel = sub(t.startWorld, pivot);
+      if (handle === "c") {
+        return [
+          t.id,
+          {
+            position: worldToItemLocalPosition(add(pivot, scaleVec(rel, f)), t.ancestors),
+            scale: applyFactorToScale(t.startScale, null, factor),
+          },
+        ];
+      }
+      const axis = AXIS_DIRS[handle];
+      const k = handle === "x" ? 0 : handle === "y" ? 1 : 2;
+      // Column j of worldRot = item's local axis j in world; pick the one along `axis`.
+      let j: 0 | 1 | 2 = 0;
+      for (const c of [1, 2] as const) {
+        if (Math.abs(t.worldRot[c * 3 + k]) > Math.abs(t.worldRot[j * 3 + k])) j = c;
+      }
+      const world = add(t.startWorld, scaleVec(axis, (f - 1) * dot(rel, axis)));
+      return [
+        t.id,
+        {
+          position: worldToItemLocalPosition(world, t.ancestors),
+          scale: applyFactorToScale(t.startScale, j, factor),
+        },
+      ];
+    }),
+  );
+}
+
+/** Group drag lands items where world-space math says, through a rotated parent. */
+function assertGroupGizmoMath(): void {
+  const layer = (id: string, position: Vec3, rotation: Vec3) => ({
+    kind: "layer" as const,
+    id,
+    shapeType: "sphere" as const,
+    name: id,
+    position,
+    rotation,
+    scale: [1, 1, 1] as Vec3,
+    params: [0.5, 0, 0, 0] as [number, number, number, number],
+    op: "union" as const,
+    smoothK: 0,
+  });
+  const root: SceneRoot = {
+    id: "r",
+    name: "r",
+    items: [
+      layer("m", [0, 0, 0], [0, 0, 0]),
+      {
+        kind: "group",
+        id: "g",
+        name: "g",
+        position: [1, 0, 0],
+        rotation: [0, 0, 90],
+        scale: [1, 1, 1],
+        op: "union",
+        smoothK: 0,
+        items: [layer("l", [1, 0, 0], [30, 0, 0])],
+      },
+    ],
+  };
+  const near = (a: Vec3, b: Vec3, label: string) => {
+    if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) > 1e-4) {
+      throw new Error(`group gizmo: ${label} got=${a} want=${b}`);
+    }
+  };
+  const targets = beginGroupDrag(root, ["m", "l"]);
+  const l = targets.find((t) => t.id === "l")!;
+  near(l.startWorld, [1, 1, 0], "start world");
+  const worldOf = (patches: GroupPatches) =>
+    itemLocalToWorldPosition(patches.get("l")!.position!, l.ancestors);
+
+  near(worldOf(groupTranslatePatches(targets, [0, 0, 1])), [1, 1, 1], "translate");
+
+  const rot = groupRotatePatches(targets, [0, 0, 0], [0, 0, 1], Math.PI / 2);
+  near(worldOf(rot), [-1, 1, 0], "rotate position");
+  const want = mat3Mul(eulerDegreesToMat3([0, 0, 90]), eulerDegreesToMat3([30, 0, 0]));
+  if (mat3Drift(eulerDegreesToMat3(rot.get("l")!.rotation!), want) > 1e-4) {
+    throw new Error("group gizmo: rotate orientation");
+  }
+
+  const sc = groupScalePatches(targets, [0, 0, 0], "c", 2);
+  near(worldOf(sc), [2, 2, 0], "uniform scale position");
+  near(sc.get("l")!.scale!, [2, 2, 2], "uniform scale");
+  // World X on an item turned 90° about Z by its parent = its local Y.
+  near(groupScalePatches(targets, [0, 0, 0], "x", 2).get("l")!.scale!, [1, 2, 1], "axis scale");
+}
+
+assertGroupGizmoMath();
