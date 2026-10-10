@@ -69,3 +69,7 @@ The whole scene lives in the URL, so to save or share a project just copy the li
 npm install
 npm run dev
 ```
+
+## License
+
+[MIT](LICENSE)
