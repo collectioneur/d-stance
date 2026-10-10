@@ -3,6 +3,7 @@ import {
   countInstructions,
   findItem,
   MAX_IMAGES,
+  topLevelSelection,
   useSceneStore,
   type InsertRejectReason,
   type ObjectGroup,
@@ -37,22 +38,22 @@ const REJECT_MESSAGE: Record<InsertRejectReason, string> = {
   invalid_parent: "Invalid paste target",
 };
 
-/** Snapshots the selected item. Returns the text for the system clipboard, or null if nothing to copy. */
+/** Snapshots the selection. Returns the text for the system clipboard, or null if nothing to copy. */
 export function copySelection(): string | null {
-  const { root, selectedItemId } = useSceneStore.getState();
-  const found = selectedItemId ? findItem(root, selectedItemId) : null;
-  if (!found) return null;
+  const { root, selectedIds } = useSceneStore.getState();
+  const items = topLevelSelection(root, selectedIds).map((id) => findItem(root, id)!.item);
+  if (items.length === 0) return null;
 
-  clipItems = [structuredClone(found.item)];
-  clipSourceIds = [found.item.id];
-  clipToken = `d-stance: ${found.item.name}`;
+  clipItems = items.map((item) => structuredClone(item));
+  clipSourceIds = items.map((item) => item.id);
+  clipToken = `d-stance: ${items.map((item) => item.name).join(", ")}`;
   return clipToken;
 }
 
 /**
- * Selected shape → after it in its container. Selected group → inside it, at the
- * end (like adding a shape), unless that group is what was copied → after it.
- * Nothing / root selected → end of root.
+ * Relative to the active item. Shape → after it in its container. Group →
+ * inside it, at the end (like adding a shape), unless that group is what was
+ * copied → after it. Nothing / root selected → end of root.
  */
 function pasteTarget(
   root: SceneRoot,
@@ -85,16 +86,17 @@ export function pasteObjects(systemText: string | undefined): boolean {
   return true;
 }
 
-/** Cmd+D: copy of the selected item right after it. Leaves the clipboard alone. */
+/** Cmd+D: each selected item gets a copy right after it. Leaves the clipboard alone. */
 export function duplicateSelection(): void {
   const state = useSceneStore.getState();
-  const found = state.selectedItemId ? findItem(state.root, state.selectedItemId) : null;
-  if (!found) return;
-
-  const reason = state.insertItems(found.container.id, found.index + 1, [
-    cloneWithNewIds(found.item),
-  ]);
+  const reason = state.duplicateItems(state.selectedIds);
   if (reason) showToast(REJECT_MESSAGE[reason]);
+}
+
+/** Delete / Backspace. */
+export function deleteSelection(): void {
+  const state = useSceneStore.getState();
+  state.removeItems(state.selectedIds);
 }
 
 /** Clone must get fresh ids on every node and pack to the same instruction count. */

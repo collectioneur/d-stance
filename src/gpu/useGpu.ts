@@ -20,6 +20,7 @@ import {
   useSceneStore,
   collectImageSdfs,
   findItem,
+  topLevelSelection,
   getAncestorGroups,
   temporalStore,
   IMAGE_ROUND_MAX,
@@ -328,6 +329,32 @@ function selectionBoundRadius(root: SceneRoot, itemId: string): number | null {
   return r;
 }
 
+/** Sphere around every selected item's bound sphere (outline-march gate). */
+function selectionBounds(
+  root: SceneRoot,
+  ids: readonly string[],
+): { center: [number, number, number]; radius: number } | null {
+  const spheres: { c: [number, number, number]; r: number }[] = [];
+  for (const id of topLevelSelection(root, ids)) {
+    const c = getGizmoWorldPosition(root, id);
+    const r = selectionBoundRadius(root, id);
+    if (!c || r === null) return null;
+    spheres.push({ c, r });
+  }
+  if (spheres.length === 0) return null;
+
+  const center: [number, number, number] = [0, 0, 0];
+  for (const { c } of spheres) {
+    for (let k = 0; k < 3; k++) center[k] += c[k] / spheres.length;
+  }
+  let radius = 0;
+  for (const { c, r } of spheres) {
+    const dist = Math.hypot(c[0] - center[0], c[1] - center[1], c[2] - center[2]);
+    radius = Math.max(radius, dist + r);
+  }
+  return { center, radius };
+}
+
 function itemContributes(item: SceneItem): boolean {
   if (item.kind === "layer") return true;
   for (const child of item.items) {
@@ -420,7 +447,7 @@ function buildGpuData(root: SceneRoot): {
 
 function buildSelectionGpuData(
   root: SceneRoot,
-  selectedItemId: string | null,
+  selectedIds: readonly string[],
   rootSelected: boolean,
 ): {
   instructions: InstructionData[];
@@ -429,8 +456,9 @@ function buildSelectionGpuData(
   usesSceneSdf: boolean;
 } {
   const instructions: InstructionData[] = [];
+  const ids = topLevelSelection(root, selectedIds);
 
-  if (!selectedItemId) {
+  if (ids.length === 0) {
     const enabled = rootSelected && root.items.length > 0;
 
     while (instructions.length < MAX_INSTRUCTIONS) {
@@ -440,15 +468,15 @@ function buildSelectionGpuData(
     return { instructions, count: 0, enabled, usesSceneSdf: enabled };
   }
 
-  const found = findItem(root, selectedItemId);
-  if (!found) {
-    while (instructions.length < MAX_INSTRUCTIONS) {
-      instructions.push(EMPTY_INSTRUCTION);
-    }
-    return { instructions, count: 0, enabled: false, usesSceneSdf: false };
+  // Multi-selection outlines the hard union of each selected subtree.
+  for (const id of ids) {
+    const sub: InstructionData[] = [];
+    if (!compileItemSubtreeInstructions(root, id, sub)) continue;
+    const needsOp = instructions.length > 0;
+    if (instructions.length + sub.length + (needsOp ? 1 : 0) > MAX_INSTRUCTIONS) break;
+    instructions.push(...sub);
+    if (needsOp) pushOpInstruction("union", 0, instructions);
   }
-
-  compileItemSubtreeInstructions(root, selectedItemId, instructions);
 
   const count = instructions.length;
 
@@ -814,7 +842,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         return orbitPreviewRot ?? [rotX, rotY];
       }
 
-      let lastSelectedItemId: string | null = null;
+      let lastSelectedIds: string[] = [];
       let lastRootSelected = false;
       let lastRenderMode: RenderMode | null = null;
       let lastQuality = useRenderStore.getState().quality;
@@ -842,6 +870,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       } | null = null;
 
       function isGizmoVisibleMode(): boolean {
+        // ponytail: no gizmo for a multi-selection yet — it would move only
+        // the active item. Group transforms come with a world-space pivot.
+        if (useSceneStore.getState().selectedIds.length > 1) return false;
         const mode = useGizmoStore.getState().mode;
         return mode === "translate" || mode === "rotate" || mode === "scale";
       }
@@ -1349,7 +1380,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         void drainGizmoHoverPicks();
       }
 
-      async function pickAt(clientX: number, clientY: number) {
+      /** `additive`: Cmd/Ctrl/Shift-click toggles the hit item in the selection. */
+      async function pickAt(clientX: number, clientY: number, additive: boolean) {
         if (pickInProgress) return;
         pickInProgress = true;
 
@@ -1386,11 +1418,11 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           );
           pickReadbackBuffer.unmap();
 
-          const { root: sceneRoot, selectItem, deselect } =
+          const { root: sceneRoot, selectItem, toggleSelected, deselect } =
             useSceneStore.getState();
 
           if (pickId === 0) {
-            deselect();
+            if (!additive) deselect();
             return;
           }
 
@@ -1400,7 +1432,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           const found = findItem(sceneRoot, itemId);
           if (!found || found.item.kind !== "layer") return;
 
-          selectItem(found.container.id, itemId);
+          if (additive) toggleSelected(itemId);
+          else selectItem(found.container.id, itemId);
         } finally {
           pickUniforms.write({
             objectCount: cachedPickObjectCount,
@@ -1468,7 +1501,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           orbitPreviewRot = null;
           updateGizmoHover(e.clientX, e.clientY);
         } else {
-          void pickAt(e.clientX, e.clientY);
+          void pickAt(e.clientX, e.clientY, e.metaKey || e.ctrlKey || e.shiftKey);
         }
       };
 
@@ -1537,7 +1570,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
       function uploadSceneGpu(
         sceneRoot: SceneRoot,
-        selectedItemId: string | null,
+        selectedIds: readonly string[],
         rootSelected: boolean,
         renderMode: RenderMode,
       ) {
@@ -1557,7 +1590,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
         const selection = buildSelectionGpuData(
           sceneRoot,
-          selectedItemId,
+          selectedIds,
           rootSelected,
         );
         selectionInstructionsBuffer.write(selection.instructions);
@@ -1565,10 +1598,10 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         // Tight outline-march gate; falls back to scene bounds (root selection).
         let selBoundsCenter = d.vec3f(0, 0, 0);
         let selBoundsRadius = sceneBoundRadius(sceneRoot.items) + 0.05;
-        if (selection.enabled && !selection.usesSceneSdf && selectedItemId) {
-          const center = getGizmoWorldPosition(sceneRoot, selectedItemId);
-          const radius = selectionBoundRadius(sceneRoot, selectedItemId);
-          if (center && radius !== null) {
+        if (selection.enabled && !selection.usesSceneSdf) {
+          const bounds = selectionBounds(sceneRoot, selectedIds);
+          if (bounds) {
+            const { center, radius } = bounds;
             selBoundsCenter = d.vec3f(center[0], center[1], center[2]);
             selBoundsRadius = radius + OUTLINE_OFFSET + OUTLINE_BAND + 0.02;
           }
@@ -1597,12 +1630,12 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       const initialState = useSceneStore.getState();
       uploadSceneGpu(
         initialState.root,
-        initialState.selectedItemId,
+        initialState.selectedIds,
         initialState.rootSelected,
         useRenderStore.getState().renderMode,
       );
       lastRoot = initialState.root;
-      lastSelectedItemId = initialState.selectedItemId;
+      lastSelectedIds = initialState.selectedIds;
       lastRootSelected = initialState.rootSelected;
       lastRenderMode = useRenderStore.getState().renderMode;
 
@@ -1618,7 +1651,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         }
         lastFrameTime = now;
 
-        const { root: sceneRoot, selectedItemId, rootSelected } =
+        const { root: sceneRoot, selectedItemId, selectedIds, rootSelected } =
           useSceneStore.getState();
         const { renderMode, quality } = useRenderStore.getState();
         if (quality !== lastQuality) {
@@ -1628,14 +1661,14 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         if (
           sceneGpuDirty ||
           sceneRoot !== lastRoot ||
-          selectedItemId !== lastSelectedItemId ||
+          selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
           renderMode !== lastRenderMode
         ) {
-          uploadSceneGpu(sceneRoot, selectedItemId, rootSelected, renderMode);
+          uploadSceneGpu(sceneRoot, selectedIds, rootSelected, renderMode);
 
           lastRoot = sceneRoot;
-          lastSelectedItemId = selectedItemId;
+          lastSelectedIds = selectedIds;
           lastRootSelected = rootSelected;
           lastRenderMode = renderMode;
           sceneGpuDirty = false;

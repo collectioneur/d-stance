@@ -138,6 +138,7 @@ function applyScene(scene: PersistedScene) {
     groupCounter: scene.groupCounter,
     selectedContainerId: scene.root.id,
     selectedItemId: null,
+    selectedIds: [],
     rootSelected: false,
   });
   temporalStore.getState().clear();
@@ -196,6 +197,7 @@ export function usePersistence(): void {
           groupCounter: 0,
           selectedContainerId: root.id,
           selectedItemId: null,
+          selectedIds: [],
           rootSelected: false,
         });
         temporalStore.getState().clear();

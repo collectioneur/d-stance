@@ -12,7 +12,12 @@ import { undoScene, redoScene } from "./store/sceneStore";
 import { useGizmoStore } from "./store/gizmoStore";
 import { usePersistence } from "./store/persistence";
 import { openImageImport } from "./utils/commands";
-import { copySelection, duplicateSelection, pasteObjects } from "./scene/clipboard";
+import {
+  copySelection,
+  deleteSelection,
+  duplicateSelection,
+  pasteObjects,
+} from "./scene/clipboard";
 import { isImageFile } from "./utils/decodeImage";
 import { setToastListener } from "./utils/toast";
 
@@ -49,6 +54,13 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyD") {
         e.preventDefault();
         duplicateSelection();
+      }
+      if (
+        (e.code === "Delete" || e.code === "Backspace") &&
+        !e.metaKey && !e.ctrlKey && !e.altKey
+      ) {
+        e.preventDefault();
+        deleteSelection();
       }
 
       if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {

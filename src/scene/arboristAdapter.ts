@@ -4,6 +4,7 @@ import {
   getContainerDepth,
   maxGroupDepth,
   MAX_TRANSFORM_DEPTH,
+  topLevelSelection,
   wouldExceedDepth,
   type ObjectGroup,
   type OpType,
@@ -156,11 +157,14 @@ export type MoveRejectReason = "cycle" | "depth" | "invalid_parent" | "not_found
 
 export function applyMoveToRoot(
   root: SceneRoot,
-  dragIds: string[],
+  rawDragIds: string[],
   parentId: string | null,
   index: number,
 ): { root: SceneRoot } | { reason: MoveRejectReason } {
   const targetParentId = parentId ?? root.id;
+  // Children of a dragged group travel with it; keep tree order on drop.
+  const dragIds = topLevelSelection(root, rawDragIds);
+  if (dragIds.length === 0) return { reason: "not_found" };
 
   if (!findContainer(root, targetParentId)) {
     return { reason: "invalid_parent" };
@@ -171,28 +175,22 @@ export function applyMoveToRoot(
     if (isDescendant(root, dragId, targetParentId)) return { reason: "cycle" };
   }
 
+  // `index` counts the target's children before removal: shift it back by the
+  // dragged siblings that sat above the drop point.
+  let insertIndex = index;
+  for (const dragId of dragIds) {
+    const found = findItem(root, dragId);
+    if (!found) return { reason: "not_found" };
+    if (found.container.id === targetParentId && found.index < index) insertIndex -= 1;
+  }
+
   let newRoot = root;
   const moved: SceneItem[] = [];
-  const sourceIndices: { parentId: string; index: number }[] = [];
-
   for (const dragId of dragIds) {
-    const found = findItem(newRoot, dragId);
-    if (!found) return { reason: "not_found" };
-    sourceIndices.push({ parentId: found.container.id, index: found.index });
-
     const removed = removeItemFromRoot(newRoot, dragId);
     if (!removed) return { reason: "not_found" };
     newRoot = removed.root;
     moved.push(removed.item);
-  }
-
-  let insertIndex = index;
-  if (
-    dragIds.length === 1 &&
-    sourceIndices[0].parentId === targetParentId &&
-    sourceIndices[0].index < index
-  ) {
-    insertIndex = index - 1;
   }
 
   for (let i = 0; i < moved.length; i++) {
@@ -208,12 +206,13 @@ export function applyMoveToRoot(
 
 export function canDropAt(
   root: SceneRoot,
-  dragIds: string[],
+  rawDragIds: string[],
   parentId: string | null,
   parentData: ArboristNode | null,
   isRootParent: boolean,
 ): boolean {
   const targetParentId = parentId ?? root.id;
+  const dragIds = topLevelSelection(root, rawDragIds);
 
   if (isRootParent) return false;
   if (parentData?.kind === "layer") return false;

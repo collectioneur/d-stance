@@ -9,6 +9,7 @@ import {
   type ShapeLayer,
 } from "../../store/sceneStore";
 import { roundTo } from "../../utils/round";
+import { OpIcon } from "../OpIcon";
 import CodeView from "./CodeView";
 
 // ── Shared numeric input ──────────────────────────────────────────────────────
@@ -166,13 +167,13 @@ const SIZE_FIELDS: Record<string, SizeField[]> = {
   ],
 };
 
-const OP_OPTIONS: { value: OpType; label: string; icon: string }[] = [
-  { value: "union", label: "Union", icon: "∪" },
-  { value: "subtract", label: "Subtract", icon: "∖" },
-  { value: "intersect", label: "Intersect", icon: "∩" },
-  { value: "sUnion", label: "Smooth Union", icon: "~∪" },
-  { value: "sSubtract", label: "Smooth Subtract", icon: "~∖" },
-  { value: "sIntersect", label: "Smooth Intersect", icon: "~∩" },
+const OP_OPTIONS: { value: OpType; label: string }[] = [
+  { value: "union", label: "Union" },
+  { value: "subtract", label: "Subtract" },
+  { value: "intersect", label: "Intersect" },
+  { value: "sUnion", label: "Smooth Union" },
+  { value: "sSubtract", label: "Smooth Subtract" },
+  { value: "sIntersect", label: "Smooth Intersect" },
 ];
 
 const SMOOTH_OPS: Set<OpType> = new Set(["sUnion", "sSubtract", "sIntersect"]);
@@ -205,19 +206,20 @@ function OperationFields({
   return (
     <>
       <div className="props-section-title">Operation</div>
-      <div className="prop-row">
-        <label className="prop-label">Type</label>
-        <select
-          className="prop-input prop-select"
-          value={op}
-          onChange={(e) => onOpChange(e.target.value as OpType)}
-        >
-          {OP_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.icon} {opt.label}
-            </option>
-          ))}
-        </select>
+      <div className="op-picker" role="radiogroup" aria-label="Operation type">
+        {OP_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            role="radio"
+            aria-checked={op === opt.value}
+            className={`op-picker-btn${op === opt.value ? " op-picker-btn--active" : ""}`}
+            title={opt.label}
+            onClick={() => onOpChange(opt.value)}
+          >
+            <OpIcon op={opt.value} size={28} />
+          </button>
+        ))}
       </div>
 
       {isSmooth && (
@@ -435,6 +437,7 @@ function LayerProperties({
 export default function RightPanel() {
   const root = useSceneStore((s) => s.root);
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
+  const extraSelected = useSceneStore((s) => s.selectedIds.length - 1);
   const rootSelected = useSceneStore((s) => s.rootSelected);
   const [tab, setTab] = useState<"props" | "code">("props");
 
@@ -483,7 +486,17 @@ export default function RightPanel() {
       </div>
       {tab === "props" ? (
         <>
-          <div className="props-shape-name">{title}</div>
+          <div className="props-shape-name">
+            {title}
+            {extraSelected > 0 && (
+              <span
+                className="props-shape-extra"
+                title="Fields edit the active (last clicked) object only"
+              >
+                +{extraSelected} selected
+              </span>
+            )}
+          </div>
           {content}
         </>
       ) : (

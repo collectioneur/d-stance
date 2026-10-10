@@ -875,6 +875,13 @@ canvas {
   color: var(--text-1);
 }
 
+.props-shape-extra {
+  margin-left: 8px;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--text-3);
+}
+
 .props-content {
   flex: 1;
   min-height: 0;
@@ -1143,10 +1150,54 @@ canvas {
 }
 
 .scene-item-icon--op {
-  font-size: var(--text-sm);
   opacity: 0.9;
   color: var(--accent-secondary);
-  font-family: var(--font-mono);
+}
+
+.op-icon {
+  display: block;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  -webkit-mask-size: contain;
+}
+
+.op-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.op-picker-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.op-picker-btn:hover:not(.op-picker-btn--active) {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.op-picker-btn--active {
+  color: var(--accent-secondary);
+  background: var(--accent-soft);
+  border-color: var(--accent-secondary);
 }
 
 .scene-item-name--op {
@@ -1214,7 +1265,6 @@ canvas {
   color: var(--text-4);
   margin-top: var(--space-1);
   line-height: 1.5;
-  font-style: italic;
 }
 
 /* ─── Image import dialog ────────────────────────────────────── */

@@ -204,6 +204,23 @@ export function validateRoot(root: SceneRoot): InsertRejectReason | null {
   return null;
 }
 
+/**
+ * Selected ids an operation should act on, in tree order: an item whose
+ * ancestor is also selected is dropped (it moves, copies, dies with the ancestor).
+ */
+export function topLevelSelection(root: SceneRoot, ids: readonly string[]): string[] {
+  const want = new Set(ids);
+  const out: string[] = [];
+  const walk = (items: SceneItem[]) => {
+    for (const item of items) {
+      if (want.has(item.id)) out.push(item.id);
+      else if (item.kind === "group") walk(item.items);
+    }
+  };
+  walk(root.items);
+  return out;
+}
+
 /** Deep copy with a fresh id on every node, so the copy never aliases its source. */
 export function cloneWithNewIds(item: SceneItem): SceneItem {
   const copy = structuredClone(item);
@@ -397,10 +414,34 @@ function mapItemDeep(
   return item;
 }
 
+/**
+ * Selection fields for `ids` with `activeId` as the active item (inspector,
+ * gizmo, add target). Drops ids missing from `root`; falls back to the last id.
+ */
+function selectionPatch(root: SceneRoot, ids: readonly string[], activeId: string | null) {
+  const live = ids.filter((id) => findItem(root, id) !== null);
+  const active =
+    activeId !== null && live.includes(activeId) ? activeId : (live[live.length - 1] ?? null);
+  const found = active ? findItem(root, active) : null;
+  return {
+    selectedIds: found ? live : [],
+    selectedItemId: found ? active : null,
+    selectedContainerId: found
+      ? found.item.kind === "group"
+        ? found.item.id
+        : found.container.id
+      : root.id,
+    rootSelected: false,
+  };
+}
+
 interface SceneState {
   root: SceneRoot;
   selectedContainerId: string;
+  /** Active item of the selection (inspector, gizmo); always in `selectedIds`. */
   selectedItemId: string | null;
+  /** Whole selection in click order; empty when nothing (or the root) is selected. */
+  selectedIds: string[];
   /** True when Scene root is explicitly selected (not deselected). */
   rootSelected: boolean;
   counters: Record<ShapeType, number>;
@@ -418,7 +459,11 @@ interface SceneState {
     index: number,
     items: SceneItem[],
   ) => InsertRejectReason | null;
+  /** Copies each top-level item of `ids` right after its original; selects the copies. */
+  duplicateItems: (ids: string[]) => InsertRejectReason | null;
   removeItem: (containerId: string, itemId: string) => void;
+  /** Removes `ids` and everything under them in one undo step. */
+  removeItems: (ids: string[]) => void;
   updateLayer: (
     containerId: string,
     layerId: string,
@@ -441,6 +486,9 @@ interface SceneState {
   selectRoot: () => void;
   deselect: () => void;
   selectItem: (containerId: string, itemId: string) => void;
+  setSelection: (ids: string[], activeId: string | null) => void;
+  /** Cmd/Shift-click on the canvas: add or drop one item. */
+  toggleSelected: (itemId: string) => void;
 }
 
 const _saved = loadInitialState();
@@ -452,6 +500,7 @@ export const useSceneStore = create<SceneState>()(
       root: _initialRoot,
       selectedContainerId: _initialRoot.id,
       selectedItemId: null,
+      selectedIds: [],
       rootSelected: false,
       // Merge: scenes saved before new shapes existed lack their counter keys.
       counters: { ...zeroCounters(), ..._saved.counters },
@@ -490,6 +539,7 @@ export const useSceneStore = create<SceneState>()(
           counters: { ...state.counters, [shapeType]: count },
           selectedContainerId: containerId,
           selectedItemId: newLayer.id,
+          selectedIds: [newLayer.id],
           rootSelected: false,
         });
         return true;
@@ -526,6 +576,7 @@ export const useSceneStore = create<SceneState>()(
           groupCounter: count,
           selectedContainerId: newGroup.id,
           selectedItemId: newGroup.id,
+          selectedIds: [newGroup.id],
           rootSelected: false,
         });
         return true;
@@ -544,37 +595,56 @@ export const useSceneStore = create<SceneState>()(
         const reason = validateRoot(newRoot);
         if (reason) return reason;
 
-        const last = items[items.length - 1];
-        set({
-          root: newRoot,
-          selectedContainerId: last.kind === "group" ? last.id : containerId,
-          selectedItemId: last.id,
-          rootSelected: false,
-        });
+        const ids = items.map((item) => item.id);
+        set({ root: newRoot, ...selectionPatch(newRoot, ids, ids[ids.length - 1]) });
         return null;
       },
 
-      removeItem: (containerId, itemId) =>
-        set((state) => {
-          const container = findContainer(state.root, containerId);
-          if (!container) return state;
+      duplicateItems: (ids) => {
+        const state = get();
+        let newRoot = state.root;
+        const copyIds: string[] = [];
+        let activeCopy: string | null = null;
+        for (const id of topLevelSelection(state.root, ids)) {
+          const found = findItem(newRoot, id);
+          if (!found) continue;
+          const copy = cloneWithNewIds(found.item);
+          newRoot = mapRootContainer(newRoot, found.container.id, (list) => {
+            const next = [...list];
+            next.splice(found.index + 1, 0, copy);
+            return next;
+          });
+          copyIds.push(copy.id);
+          if (id === state.selectedItemId) activeCopy = copy.id;
+        }
+        if (copyIds.length === 0) return null;
+        const reason = validateRoot(newRoot);
+        if (reason) return reason;
 
-          const newRoot = mapRootContainer(state.root, containerId, (items) =>
-            items.filter((item) => item.id !== itemId),
-          );
-          const stillSelected =
-            state.selectedItemId !== null &&
-            findItem(newRoot, state.selectedItemId) !== null;
+        set({ root: newRoot, ...selectionPatch(newRoot, copyIds, activeCopy) });
+        return null;
+      },
 
-          return {
-            root: newRoot,
-            selectedItemId: stillSelected ? state.selectedItemId : null,
-            selectedContainerId: stillSelected
-              ? state.selectedContainerId
-              : newRoot.id,
-            rootSelected: stillSelected ? state.rootSelected : false,
-          };
-        }),
+      removeItem: (_containerId, itemId) => get().removeItems([itemId]),
+
+      removeItems: (ids) => {
+        const state = get();
+        const drop = new Set(ids);
+        if (drop.size === 0) return;
+        const strip = (items: SceneItem[]): SceneItem[] =>
+          items
+            .filter((item) => !drop.has(item.id))
+            .map((item) => (item.kind === "group" ? { ...item, items: strip(item.items) } : item));
+        const newRoot = { ...state.root, items: strip(state.root.items) };
+
+        const patch = selectionPatch(newRoot, state.selectedIds, state.selectedItemId);
+        set({
+          root: newRoot,
+          ...patch,
+          // Root selection survives deleting something else (e.g. a row's X button).
+          rootSelected: patch.selectedItemId === null && state.rootSelected,
+        });
+      },
 
       // Values stored full-precision; rounding is display-only (NumericInput).
       updateLayer: (containerId, layerId, patch) =>
@@ -602,6 +672,7 @@ export const useSceneStore = create<SceneState>()(
         set((state) => ({
           selectedContainerId: state.root.id,
           selectedItemId: null,
+          selectedIds: [],
           rootSelected: true,
         })),
 
@@ -609,22 +680,27 @@ export const useSceneStore = create<SceneState>()(
         set((state) => ({
           selectedContainerId: state.root.id,
           selectedItemId: null,
+          selectedIds: [],
           rootSelected: false,
         })),
 
       selectItem: (_containerId, itemId) =>
         set((state) => {
-          const found = findItem(state.root, itemId);
-          if (!found) return state;
+          if (!findItem(state.root, itemId)) return state;
+          return selectionPatch(state.root, [itemId], itemId);
+        }),
 
-          const selectedContainerId =
-            found.item.kind === "group" ? found.item.id : found.container.id;
+      setSelection: (ids, activeId) =>
+        set((state) => selectionPatch(state.root, ids, activeId)),
 
-          return {
-            selectedContainerId,
-            selectedItemId: itemId,
-            rootSelected: false,
-          };
+      toggleSelected: (itemId) =>
+        set((state) => {
+          if (!state.selectedIds.includes(itemId)) {
+            return selectionPatch(state.root, [...state.selectedIds, itemId], itemId);
+          }
+          const rest = state.selectedIds.filter((id) => id !== itemId);
+          const active = state.selectedItemId === itemId ? null : state.selectedItemId;
+          return selectionPatch(state.root, rest, active);
         }),
 
       moveItems: (dragIds, parentId, index) => {
@@ -642,27 +718,13 @@ export const useSceneStore = create<SceneState>()(
         }
 
         const newRoot = result.root;
-        let selectedContainerId = state.selectedContainerId;
-        let selectedItemId = state.selectedItemId;
-
-        if (state.selectedItemId && findItem(newRoot, state.selectedItemId)) {
-          const found = findItem(newRoot, state.selectedItemId)!;
-          selectedContainerId =
-            found.item.kind === "group" ? found.item.id : found.container.id;
-          selectedItemId = state.selectedItemId;
-        } else if (dragIds.length > 0 && findItem(newRoot, dragIds[0])) {
-          const found = findItem(newRoot, dragIds[0])!;
-          selectedContainerId =
-            found.item.kind === "group" ? found.item.id : found.container.id;
-          selectedItemId = dragIds[0];
-        }
-
-        set({
-          root: newRoot,
-          selectedContainerId,
-          selectedItemId,
-          rootSelected: false,
-        });
+        // Keep the selection (the container of the active item may have changed);
+        // dragging with nothing selected selects what was dragged.
+        const selection =
+          state.selectedIds.length > 0
+            ? selectionPatch(newRoot, state.selectedIds, state.selectedItemId)
+            : selectionPatch(newRoot, dragIds, dragIds[0] ?? null);
+        set({ root: newRoot, ...selection });
         return true;
       },
 
@@ -712,6 +774,7 @@ export function undoScene() {
   useSceneStore.setState({
     selectedContainerId: root.id,
     selectedItemId: null,
+    selectedIds: [],
     rootSelected: false,
   });
 }
@@ -722,6 +785,7 @@ export function redoScene() {
   useSceneStore.setState({
     selectedContainerId: root.id,
     selectedItemId: null,
+    selectedIds: [],
     rootSelected: false,
   });
 }

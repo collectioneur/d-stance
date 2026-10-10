@@ -4,7 +4,9 @@ import {
   Tree,
   type CursorProps,
   type DragPreviewProps,
+  type NodeApi,
   type NodeRendererProps,
+  type TreeApi,
 } from "react-arborist";
 import { useTreeApi } from "react-arborist/dist/module/context.js";
 import {
@@ -21,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { SHAPE_ICONS } from "../../utils/commands";
+import { OpIcon } from "../OpIcon";
 import { useElementSize } from "../../hooks/useElementSize";
 import {
   useSceneStore,
@@ -28,21 +31,11 @@ import {
   findItem,
   wouldExceedCap,
   wouldExceedDepth,
-  type OpType,
 } from "../../store/sceneStore";
 import { showToast } from "../../utils/toast";
 
 
 const TREE_INDENT = 12;
-
-const OP_ICON: Record<OpType, string> = {
-  union: "∪",
-  subtract: "∖",
-  intersect: "∩",
-  sUnion: "~∪",
-  sSubtract: "~∖",
-  sIntersect: "~∩",
-};
 
 function SceneNode({
   node,
@@ -85,7 +78,23 @@ function SceneNode({
       ref={preview ? undefined : dragHandle}
       style={style}
       className={itemClass}
-      onClick={preview ? undefined : node.handleClick}
+      onClick={
+        preview
+          ? undefined
+          : (e) => {
+              // Arborist's own handler (also bound on its row wrapper) only knows
+              // metaKey; accept Ctrl too, and keep it from toggling a second time.
+              e.stopPropagation();
+              if (e.metaKey || e.ctrlKey) {
+                if (node.isSelected) node.deselect();
+                else node.selectMulti();
+              } else if (e.shiftKey) {
+                node.selectContiguous();
+              } else {
+                node.select();
+              }
+            }
+      }
     >
       {(isRoot || isGroup) && (
         <button
@@ -112,7 +121,7 @@ function SceneNode({
       <span className="scene-item-name">{data.name}</span>
       {showOp && data.op && (
         <span className="scene-item-icon scene-item-icon--op" title={data.op}>
-          {OP_ICON[data.op]}
+          <OpIcon op={data.op} />
         </span>
       )}
       {!preview && !isRoot && (
@@ -216,14 +225,43 @@ export default function LeftPanel() {
 
   const root = useSceneStore((s) => s.root);
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
+  const selectedIds = useSceneStore((s) => s.selectedIds);
   const selectedContainerId = useSceneStore((s) => s.selectedContainerId);
   const rootSelected = useSceneStore((s) => s.rootSelected);
   const addGroupToContainer = useSceneStore((s) => s.addGroupToContainer);
   const moveItems = useSceneStore((s) => s.moveItems);
   const renameItem = useSceneStore((s) => s.renameItem);
   const updateRootName = useSceneStore((s) => s.updateRootName);
-  const selectItem = useSceneStore((s) => s.selectItem);
+  const setSelection = useSceneStore((s) => s.setSelection);
   const selectRoot = useSceneStore((s) => s.selectRoot);
+  const deselect = useSceneStore((s) => s.deselect);
+
+  const treeRef = useRef<TreeApi<ArboristNode> | null>(null);
+  /** True while we push store selection into the tree — its onSelect echo is ignored. */
+  const syncingRef = useRef(false);
+  /** False until the mounted tree got the store selection (skips its mount-time deselectAll). */
+  const treeSyncedRef = useRef(false);
+  const treeMounted = listHeight > 0 && listWidth > 0;
+
+  // Store → tree. Arborist's `selection` prop is single-id and would collapse
+  // a multi-selection, so sync through the tree api instead.
+  useEffect(() => {
+    const tree = treeRef.current;
+    if (!tree) {
+      treeSyncedRef.current = false;
+      return;
+    }
+    const want = rootSelected ? [root.id] : selectedIds;
+    const have = tree.selectedIds;
+    if (want.length !== have.size || want.some((id) => !have.has(id))) {
+      const active = rootSelected ? root.id : selectedItemId;
+      syncingRef.current = true;
+      tree.setSelection({ ids: want, anchor: active, mostRecent: active });
+      syncingRef.current = false;
+      if (active) tree.scrollTo(active);
+    }
+    treeSyncedRef.current = true;
+  }, [treeMounted, selectedIds, selectedItemId, rootSelected, root.id]);
 
   const arboristData = useMemo(() => sceneRootToArborist(root), [root]);
 
@@ -247,26 +285,28 @@ export default function LeftPanel() {
     }
   }
 
-  function syncSelection(nodes: { id: string; data: ArboristNode }[]) {
-    if (nodes.length === 0) return;
-    const id = nodes[0].id;
-    if (id === root.id) {
-      selectRoot();
+  // Tree → store.
+  function syncSelection(nodes: NodeApi<ArboristNode>[]) {
+    if (syncingRef.current || !treeSyncedRef.current) return;
+    const ids = nodes.map((n) => n.id).filter((id) => id !== root.id);
+    if (ids.length === 0) {
+      if (nodes.length > 0) selectRoot();
+      else deselect();
       return;
     }
-    const found = findItem(root, id);
-    if (!found) return;
-    const containerId =
-      found.item.kind === "group" ? found.item.id : found.container.id;
-    selectItem(containerId, id);
+    const recent = treeRef.current?.mostRecentNode?.id;
+    setSelection(ids, recent && ids.includes(recent) ? recent : ids[ids.length - 1]);
+    // The scene root is not part of a multi-selection.
+    if (ids.length < nodes.length) treeRef.current?.deselect(root.id);
   }
 
   return (
     <div className="panel panel-left">
       <div className="panel-header">Objects</div>
       <div className="scene-list" ref={listRef}>
-        {listHeight > 0 && listWidth > 0 && (
+        {treeMounted && (
           <Tree<ArboristNode>
+            ref={treeRef}
             data={arboristData}
             width={listWidth}
             height={listHeight}
@@ -276,8 +316,6 @@ export default function LeftPanel() {
             dndRootElement={document.body}
             renderDragPreview={SceneDragPreview}
             renderCursor={SceneDropCursor}
-            selection={rootSelected ? root.id : (selectedItemId ?? undefined)}
-            disableMultiSelection
             disableDrag={(data) => data.kind === "root"}
             idAccessor="id"
             childrenAccessor={arboristChildrenAccessor}
@@ -288,8 +326,7 @@ export default function LeftPanel() {
               if (id === root.id) updateRootName(name);
               else renameItem(id, name);
             }}
-            onSelect={(nodes) => syncSelection(nodes)}
-            onActivate={(node) => syncSelection([node])}
+            onSelect={syncSelection}
             disableDrop={({ parentNode, dragNodes }) => {
               const dragIds = dragNodes.map((n) => n.id);
               const parentData = parentNode.isRoot
