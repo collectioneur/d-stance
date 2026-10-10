@@ -173,6 +173,15 @@ canvas {
   padding: 0 2px;
 }
 
+/* The "d": rendered mark, sized to the ascender and sitting on the baseline. */
+.wordmark-mark {
+  display: inline-block;
+  height: 1.5em;
+  width: auto;
+  margin-right: 0.06em;
+  vertical-align: -0.07em;
+}
+
 .wordmark-dot {
   display: inline-block;
   margin: 0 0.02em;
@@ -1326,7 +1335,7 @@ canvas {
   color: var(--accent-secondary);
 }
 
-.op-icon {
+.mask-icon {
   display: block;
   flex-shrink: 0;
   background-color: currentColor;

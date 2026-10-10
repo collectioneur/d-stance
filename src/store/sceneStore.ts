@@ -140,6 +140,11 @@ const TYPE_LABEL: Record<ShapeType, string> = {
 
 export const ALL_SHAPE_TYPES = Object.keys(TYPE_LABEL) as ShapeType[];
 
+/** Default params for a new shape of this type (also the inspector's reset value). */
+export function defaultParams(type: ShapeType): readonly [number, number, number, number] {
+  return DEFAULT_PARAMS[type];
+}
+
 export function shapeLabel(type: ShapeType): string {
   return TYPE_LABEL[type];
 }

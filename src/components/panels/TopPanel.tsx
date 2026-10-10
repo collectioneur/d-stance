@@ -1,9 +1,18 @@
 import { useState, useRef } from "react";
 import { useStore } from "zustand";
-import { Check, ImagePlus, Link2, Plus, Redo2, Undo2 } from "lucide-react";
+import { Plus, Redo2, Undo2 } from "lucide-react";
 import { temporalStore, undoScene, redoScene } from "../../store/sceneStore";
-import { IMAGE_HOTKEY, SHAPES, addShape, pickImageFile } from "../../utils/commands";
+import {
+  COPIED_ICON,
+  COPY_LINK_ICON,
+  IMAGE_ADD_ICON,
+  IMAGE_HOTKEY,
+  SHAPES,
+  addShape,
+  pickImageFile,
+} from "../../utils/commands";
 import { openPalette } from "../CommandPalette";
+import { Wordmark } from "../Wordmark";
 
 const isMac = navigator.platform.startsWith("Mac");
 const paletteKey = isMac ? "⌘K" : "Ctrl+K";
@@ -25,13 +34,7 @@ export default function TopPanel() {
 
   return (
     <div className="panel panel-top">
-      <span className="wordmark" aria-label="d-stance">
-        d
-        <span className="wordmark-dot" aria-hidden="true">
-          -
-        </span>
-        stance
-      </span>
+      <Wordmark />
       <div className="top-panel-divider" />
       <div className="top-panel-history">
         <button
@@ -55,7 +58,7 @@ export default function TopPanel() {
           onClick={handleCopyLink}
           title="Copy share link"
         >
-          {copied ? <Check size={15} /> : <Link2 size={15} />}
+          {copied ? <COPIED_ICON size={15} /> : <COPY_LINK_ICON size={15} />}
         </button>
       </div>
       <div className="top-panel-divider" />
@@ -76,7 +79,7 @@ export default function TopPanel() {
           onClick={pickImageFile}
           title={`Add image as SDF (${IMAGE_HOTKEY}, or paste / drop an image)`}
         >
-          <ImagePlus size={15} />
+          <IMAGE_ADD_ICON size={15} />
           <span className="shape-btn-key">{IMAGE_HOTKEY}</span>
         </button>
         <button

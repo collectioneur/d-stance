@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Gem, Sun, type LucideIcon } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { useRenderStore, type RenderMode } from "../../store/renderStore";
+import { RENDER_MODE_ICONS } from "../../utils/commands";
+import type { IconComponent } from "../MaskIcon";
 
-const MODES: { value: RenderMode; label: string; icon: LucideIcon }[] = [
-  { value: "classic", label: "Classic", icon: Sun },
-  { value: "chrome", label: "Chrome", icon: Gem },
+const MODES: { value: RenderMode; label: string; icon: IconComponent }[] = [
+  { value: "classic", label: "Classic", icon: RENDER_MODE_ICONS.classic },
+  { value: "chrome", label: "Chrome", icon: RENDER_MODE_ICONS.chrome },
 ];
 
 export default function RenderModePanel() {

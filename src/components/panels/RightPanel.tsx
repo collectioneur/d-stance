@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   useSceneStore,
   findItem,
@@ -9,6 +9,7 @@ import {
   type OpType,
   type SceneItem,
   type ShapeLayer,
+  defaultParams,
 } from "../../store/sceneStore";
 import { roundTo } from "../../utils/round";
 import { OpIcon } from "../OpIcon";
@@ -21,13 +22,22 @@ function common<T>(values: T[]): T | null {
   return values.every((v) => v === values[0]) ? values[0] : null;
 }
 
+/**
+ * Number field. While focused it holds your text as typed (empty, "-", "0." are
+ * fine) and applies every valid number live. On leaving, an empty or invalid
+ * entry becomes `fallback` (the field's default; else the value at focus) and
+ * the result is clamped to min/max. ↑/↓ step by `step` from the current value
+ * (Shift ×10), Enter applies, Escape restores the value at focus. A "mixed"
+ * field left empty changes nothing.
+ */
 function NumericInput({
   label,
   value,
   min,
   max,
-  step,
+  step = 0.01,
   decimals,
+  fallback,
   onChange,
 }: {
   label: string;
@@ -37,9 +47,49 @@ function NumericInput({
   max?: number;
   step?: number;
   decimals?: number;
+  /** Value restored when the field is left empty or invalid. */
+  fallback?: number;
   onChange: (v: number) => void;
 }) {
-  const display = value === null ? "" : decimals != null ? roundTo(value, decimals) : value;
+  const [draft, setDraft] = useState<string | null>(null);
+  const atFocus = useRef<number | null>(null);
+
+  const round = (n: number) => (decimals != null ? roundTo(n, decimals) : n);
+  const clamp = (n: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, n));
+  const parse = (text: string) => {
+    const n = parseFloat(text);
+    return text.trim() !== "" && Number.isFinite(n) ? n : null;
+  };
+  const commit = (n: number) => onChange(clamp(round(n)));
+  const shown = value === null ? "" : String(round(value));
+
+  function finish() {
+    // Mixed at focus (atFocus null): an empty/invalid entry leaves every item as is.
+    if (draft !== null && parse(draft) === null && atFocus.current !== null) {
+      commit(fallback ?? atFocus.current);
+    }
+    setDraft(null);
+    resumeHistory();
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      e.currentTarget.blur();
+    } else if (e.key === "Escape") {
+      if (atFocus.current !== null) commit(atFocus.current);
+      setDraft(null);
+      e.currentTarget.blur();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      // Our own stepping: exact multiples of `step` from the current value
+      // (native stepping snaps to a grid based at `min`, e.g. 1 → 0.91).
+      e.preventDefault();
+      const base = (draft !== null ? parse(draft) : null) ?? value ?? fallback ?? 0;
+      const delta = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
+      const next = clamp(round(Number((base + delta).toFixed(10))));
+      onChange(next);
+      setDraft(String(next));
+    }
+  }
 
   return (
     <div className="prop-row">
@@ -47,16 +97,24 @@ function NumericInput({
       <input
         className="prop-input"
         type="number"
-        value={display}
+        inputMode="decimal"
+        value={draft ?? shown}
         placeholder={value === null ? "mixed" : undefined}
-        min={min}
-        max={max}
-        step={step ?? 0.1}
-        onFocus={pauseHistory}
-        onBlur={resumeHistory}
+        step={step}
+        onFocus={(e) => {
+          pauseHistory();
+          atFocus.current = value;
+          setDraft(shown);
+          e.currentTarget.select();
+        }}
+        onBlur={finish}
+        onKeyDown={onKeyDown}
+        // A focused number field would eat panel scrolling as value changes.
+        onWheel={(e) => e.currentTarget.blur()}
         onChange={(e) => {
-          const n = parseFloat(e.target.value);
-          if (!isNaN(n)) onChange(decimals != null ? roundTo(n, decimals) : n);
+          setDraft(e.target.value);
+          const n = parse(e.target.value);
+          if (n !== null) commit(n);
         }}
       />
     </div>
@@ -74,104 +132,104 @@ interface SizeField {
 }
 
 const SIZE_FIELDS: Record<string, SizeField[]> = {
-  sphere: [{ label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 }],
+  sphere: [{ label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 }],
   box: [
-    { label: "Width", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Height", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Width", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Height", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.01 },
   ],
   torus: [
-    { label: "Major R", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Minor r", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Major R", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Minor r", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   cylinder: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   capsule: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   cone: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   roundedBox: [
-    { label: "Width", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Height", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Width", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Height", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.01 },
     { label: "Round r", paramIndex: 3, min: 0, step: 0.01 },
   ],
   boxFrame: [
-    { label: "Width", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Height", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Width", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Height", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Depth", paramIndex: 2, min: 0.01, step: 0.01 },
     { label: "Edge", paramIndex: 3, min: 0.005, step: 0.01 },
   ],
   cappedTorus: [
-    { label: "Major R", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Minor r", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Angle °", paramIndex: 2, min: 1, max: 180, step: 5 },
+    { label: "Major R", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Minor r", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Angle °", paramIndex: 2, min: 1, max: 180, step: 1 },
   ],
   link: [
-    { label: "Half Length", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Major R", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Half Length", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Major R", paramIndex: 1, min: 0.01, step: 0.01 },
     { label: "Minor r", paramIndex: 2, min: 0.01, step: 0.01 },
   ],
   hexPrism: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   triPrism: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   roundedCylinder: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
     { label: "Round r", paramIndex: 1, min: 0.005, step: 0.01 },
-    { label: "Half Height", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Half Height", paramIndex: 2, min: 0.01, step: 0.01 },
   ],
   roundCone: [
-    { label: "Bottom R", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Top R", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Height", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Bottom R", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Top R", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Height", paramIndex: 2, min: 0.01, step: 0.01 },
   ],
   solidAngle: [
-    { label: "Angle °", paramIndex: 0, min: 1, max: 179, step: 5 },
-    { label: "Radius", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Angle °", paramIndex: 0, min: 1, max: 179, step: 1 },
+    { label: "Radius", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   cutSphere: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Cut Height", paramIndex: 1, min: -10, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Cut Height", paramIndex: 1, min: -10, step: 0.01 },
   ],
   cutHollowSphere: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Cut Height", paramIndex: 1, min: -10, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Cut Height", paramIndex: 1, min: -10, step: 0.01 },
     { label: "Thickness", paramIndex: 2, min: 0.005, step: 0.01 },
   ],
   deathStar: [
-    { label: "Sphere R", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Carve R", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Offset", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Sphere R", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Carve R", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Offset", paramIndex: 2, min: 0.01, step: 0.01 },
   ],
   rhombus: [
-    { label: "Half Diag A", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Half Diag B", paramIndex: 1, min: 0.01, step: 0.05 },
-    { label: "Half Height", paramIndex: 2, min: 0.01, step: 0.05 },
+    { label: "Half Diag A", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Half Diag B", paramIndex: 1, min: 0.01, step: 0.01 },
+    { label: "Half Height", paramIndex: 2, min: 0.01, step: 0.01 },
     { label: "Round r", paramIndex: 3, min: 0, step: 0.01 },
   ],
-  octahedron: [{ label: "Size", paramIndex: 0, min: 0.01, step: 0.05 }],
+  octahedron: [{ label: "Size", paramIndex: 0, min: 0.01, step: 0.01 }],
   pyramid: [
-    { label: "Base", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Height", paramIndex: 1, min: 0.01, step: 0.05 },
+    { label: "Base", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Height", paramIndex: 1, min: 0.01, step: 0.01 },
   ],
   vesica: [
-    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Offset", paramIndex: 1, min: 0.005, step: 0.05 },
+    { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Offset", paramIndex: 1, min: 0.005, step: 0.01 },
   ],
   image: [
-    { label: "Size", paramIndex: 0, min: 0.01, step: 0.05 },
-    { label: "Thickness", paramIndex: 1, min: 0.005, step: 0.02 },
+    { label: "Size", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Thickness", paramIndex: 1, min: 0.005, step: 0.01 },
     { label: "Bold", paramIndex: 2, min: -10, step: 0.005 },
   ],
 };
@@ -234,6 +292,7 @@ function OperationFields({ items, showOp }: { items: SceneItem[]; showOp: boolea
           value={smoothK}
           min={0.001}
           step={0.01}
+          fallback={0.1}
           onChange={onSmoothKChange}
         />
       )}
@@ -319,19 +378,19 @@ function GroupProperties({
       <div className="props-section-title" style={{ marginTop: showOp ? "16px" : undefined }}>
         Position
       </div>
-      <NumericInput label="X" value={group.position[0]} step={0.1} decimals={2} onChange={(v) => setPosition(0, v)} />
-      <NumericInput label="Y" value={group.position[1]} step={0.1} decimals={2} onChange={(v) => setPosition(1, v)} />
-      <NumericInput label="Z" value={group.position[2]} step={0.1} decimals={2} onChange={(v) => setPosition(2, v)} />
+      <NumericInput label="X" value={group.position[0]} fallback={0} decimals={2} onChange={(v) => setPosition(0, v)} />
+      <NumericInput label="Y" value={group.position[1]} fallback={0} decimals={2} onChange={(v) => setPosition(1, v)} />
+      <NumericInput label="Z" value={group.position[2]} fallback={0} decimals={2} onChange={(v) => setPosition(2, v)} />
 
       <div className="props-section-title" style={{ marginTop: "16px" }}>Rotation (°)</div>
-      <NumericInput label="Rx" value={group.rotation[0]} step={1} decimals={2} onChange={(v) => setRotation(0, v)} />
-      <NumericInput label="Ry" value={group.rotation[1]} step={1} decimals={2} onChange={(v) => setRotation(1, v)} />
-      <NumericInput label="Rz" value={group.rotation[2]} step={1} decimals={2} onChange={(v) => setRotation(2, v)} />
+      <NumericInput label="Rx" value={group.rotation[0]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(0, v)} />
+      <NumericInput label="Ry" value={group.rotation[1]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(1, v)} />
+      <NumericInput label="Rz" value={group.rotation[2]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(2, v)} />
 
       <div className="props-section-title" style={{ marginTop: "16px" }}>Scale</div>
-      <NumericInput label="Sx" value={group.scale[0]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(0, v)} />
-      <NumericInput label="Sy" value={group.scale[1]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(1, v)} />
-      <NumericInput label="Sz" value={group.scale[2]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(2, v)} />
+      <NumericInput label="Sx" value={group.scale[0]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(0, v)} />
+      <NumericInput label="Sy" value={group.scale[1]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(1, v)} />
+      <NumericInput label="Sz" value={group.scale[2]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(2, v)} />
     </div>
   );
 }
@@ -398,19 +457,19 @@ function LayerProperties({
       <div className="props-section-title" style={{ marginTop: showOp ? "16px" : undefined }}>
         Position
       </div>
-      <NumericInput label="X" value={layer.position[0]} step={0.1} decimals={2} onChange={(v) => setPosition(0, v)} />
-      <NumericInput label="Y" value={layer.position[1]} step={0.1} decimals={2} onChange={(v) => setPosition(1, v)} />
-      <NumericInput label="Z" value={layer.position[2]} step={0.1} decimals={2} onChange={(v) => setPosition(2, v)} />
+      <NumericInput label="X" value={layer.position[0]} fallback={0} decimals={2} onChange={(v) => setPosition(0, v)} />
+      <NumericInput label="Y" value={layer.position[1]} fallback={0} decimals={2} onChange={(v) => setPosition(1, v)} />
+      <NumericInput label="Z" value={layer.position[2]} fallback={0} decimals={2} onChange={(v) => setPosition(2, v)} />
 
       <div className="props-section-title" style={{ marginTop: "16px" }}>Rotation (°)</div>
-      <NumericInput label="Rx" value={layer.rotation[0]} step={1} decimals={2} onChange={(v) => setRotation(0, v)} />
-      <NumericInput label="Ry" value={layer.rotation[1]} step={1} decimals={2} onChange={(v) => setRotation(1, v)} />
-      <NumericInput label="Rz" value={layer.rotation[2]} step={1} decimals={2} onChange={(v) => setRotation(2, v)} />
+      <NumericInput label="Rx" value={layer.rotation[0]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(0, v)} />
+      <NumericInput label="Ry" value={layer.rotation[1]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(1, v)} />
+      <NumericInput label="Rz" value={layer.rotation[2]} step={1} fallback={0} decimals={2} onChange={(v) => setRotation(2, v)} />
 
       <div className="props-section-title" style={{ marginTop: "16px" }}>Scale</div>
-      <NumericInput label="Sx" value={layer.scale[0]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(0, v)} />
-      <NumericInput label="Sy" value={layer.scale[1]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(1, v)} />
-      <NumericInput label="Sz" value={layer.scale[2]} min={0.01} step={0.1} decimals={2} onChange={(v) => setScale(2, v)} />
+      <NumericInput label="Sx" value={layer.scale[0]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(0, v)} />
+      <NumericInput label="Sy" value={layer.scale[1]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(1, v)} />
+      <NumericInput label="Sz" value={layer.scale[2]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(2, v)} />
 
       {sizeFields.length > 0 && (
         <div className="props-section-title" style={{ marginTop: "16px" }}>Size</div>
@@ -424,6 +483,7 @@ function LayerProperties({
           max={f.max}
           step={f.step}
           decimals={f.step < 0.01 ? 3 : 2}
+          fallback={defaultParams(layer.shapeType)[f.paramIndex]}
           onChange={(v) => setParam(f.paramIndex, v)}
         />
       ))}
@@ -434,6 +494,7 @@ function LayerProperties({
           min={0}
           max={IMAGE_ROUND_MAX}
           step={0.005}
+          fallback={0}
           decimals={3}
           onChange={(v) =>
             updateSameShapes((l) => (l.image ? { ...l, image: { ...l.image, round: v } } : l))

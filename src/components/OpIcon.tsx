@@ -20,7 +20,7 @@ export function OpIcon({ op, size = 14 }: { op: OpType; size?: number }) {
   const url = `url("${OP_ICON_URL[op]}")`;
   return (
     <span
-      className="op-icon"
+      className="mask-icon"
       aria-hidden="true"
       style={{ width: size, height: size, maskImage: url, WebkitMaskImage: url }}
     />

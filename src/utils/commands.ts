@@ -1,30 +1,4 @@
-import {
-  Box,
-  Boxes,
-  Copy,
-  Circle,
-  Cone,
-  Cylinder,
-  Diamond,
-  Egg,
-  Frame,
-  Gem,
-  Globe,
-  Hexagon,
-  IceCreamCone,
-  ImagePlus,
-  Link,
-  Moon,
-  Pill,
-  Pizza,
-  Pyramid,
-  Rainbow,
-  Salad,
-  Squircle,
-  Torus,
-  Triangle,
-  type LucideIcon,
-} from "lucide-react";
+import { maskIcon, type IconComponent } from "../components/MaskIcon";
 import {
   useSceneStore,
   wouldExceedDepth,
@@ -35,30 +9,59 @@ import { duplicateSelection } from "../scene/clipboard";
 import { showToast } from "./toast";
 import { isImageFile } from "./decodeImage";
 
-export const SHAPE_ICONS: Record<ShapeType, LucideIcon> = {
-  sphere: Circle,
-  box: Box,
-  torus: Torus,
-  cylinder: Cylinder,
-  capsule: Pill,
-  cone: Cone,
-  roundedBox: Squircle,
-  boxFrame: Frame,
-  cappedTorus: Rainbow,
-  link: Link,
-  hexPrism: Hexagon,
-  triPrism: Triangle,
-  roundedCylinder: Cylinder,
-  roundCone: IceCreamCone,
-  solidAngle: Pizza,
-  cutSphere: Moon,
-  cutHollowSphere: Salad,
-  deathStar: Globe,
-  rhombus: Diamond,
-  octahedron: Gem,
-  pyramid: Pyramid,
-  vesica: Egg,
-  image: ImagePlus,
+const SHAPE_ICON_URLS = import.meta.glob<string>("../assets/shape-icons/*.svg", {
+  query: "?url",
+  import: "default",
+  eager: true,
+});
+
+/** Icons are generated SVGs (flat, toned like the op icons) named after the shape. */
+function shapeIcon(name: string): IconComponent {
+  const url = SHAPE_ICON_URLS[`../assets/shape-icons/${name}.svg`];
+  if (!url) throw new Error(`Missing shape icon: ${name}.svg`);
+  return maskIcon(url);
+}
+
+// Explicit Record: a shape type without an icon fails typecheck.
+export const SHAPE_ICONS: Record<ShapeType, IconComponent> = {
+  sphere: shapeIcon("sphere"),
+  box: shapeIcon("box"),
+  torus: shapeIcon("torus"),
+  cylinder: shapeIcon("cylinder"),
+  capsule: shapeIcon("capsule"),
+  cone: shapeIcon("cone"),
+  roundedBox: shapeIcon("roundedBox"),
+  boxFrame: shapeIcon("boxFrame"),
+  cappedTorus: shapeIcon("cappedTorus"),
+  link: shapeIcon("link"),
+  hexPrism: shapeIcon("hexPrism"),
+  triPrism: shapeIcon("triPrism"),
+  roundedCylinder: shapeIcon("roundedCylinder"),
+  roundCone: shapeIcon("roundCone"),
+  solidAngle: shapeIcon("solidAngle"),
+  cutSphere: shapeIcon("cutSphere"),
+  cutHollowSphere: shapeIcon("cutHollowSphere"),
+  deathStar: shapeIcon("deathStar"),
+  rhombus: shapeIcon("rhombus"),
+  octahedron: shapeIcon("octahedron"),
+  pyramid: shapeIcon("pyramid"),
+  vesica: shapeIcon("vesica"),
+  image: shapeIcon("image"),
+};
+
+export const GROUP_ICON = shapeIcon("group");
+export const IMAGE_ADD_ICON = shapeIcon("imageAdd");
+export const DUPLICATE_ICON = shapeIcon("duplicate");
+export const COPY_LINK_ICON = shapeIcon("copyLink");
+export const COPIED_ICON = shapeIcon("copied");
+export const GIZMO_ICONS = {
+  translate: shapeIcon("gizmoMove"),
+  rotate: shapeIcon("gizmoRotate"),
+  scale: shapeIcon("gizmoScale"),
+};
+export const RENDER_MODE_ICONS = {
+  classic: shapeIcon("renderClassic"),
+  chrome: shapeIcon("renderChrome"),
 };
 
 function shapeEntry(type: ShapeType) {
@@ -66,7 +69,7 @@ function shapeEntry(type: ShapeType) {
 }
 
 /** Toolbar shapes — digit hotkeys 1–6. */
-export const SHAPES: { type: ShapeType; label: string; icon: LucideIcon }[] = (
+export const SHAPES: { type: ShapeType; label: string; icon: IconComponent }[] = (
   ["box", "sphere", "torus", "cylinder", "capsule", "cone"] as ShapeType[]
 ).map(shapeEntry);
 
@@ -116,7 +119,7 @@ export function addGroup() {
 export type Command = {
   id: string;
   label: string;
-  icon: LucideIcon;
+  icon: IconComponent;
   hotkey?: string;
   keywords?: string[];
   run: () => void;
@@ -133,7 +136,7 @@ export const COMMANDS: Command[] = [
   {
     id: "add-image",
     label: "Add Image (logo to SDF)",
-    icon: ImagePlus,
+    icon: IMAGE_ADD_ICON,
     hotkey: IMAGE_HOTKEY,
     keywords: ["image", "logo", "picture", "png", "svg", "import", "extrude"],
     run: () => pickImageFile(),
@@ -148,14 +151,14 @@ export const COMMANDS: Command[] = [
   {
     id: "add-group",
     label: "Add Object (group)",
-    icon: Boxes,
+    icon: GROUP_ICON,
     keywords: ["group", "container", "folder", "nest"],
     run: addGroup,
   },
   {
     id: "duplicate",
     label: "Duplicate Selected",
-    icon: Copy,
+    icon: DUPLICATE_ICON,
     hotkey: "⌘D",
     keywords: ["copy", "clone", "paste"],
     run: duplicateSelection,

@@ -16,6 +16,11 @@ const THRESHOLD_MIN = 0.02;
 const THRESHOLD_MAX = 0.98;
 /** Hit radius for crop edges/corners, in CSS px. */
 const CROP_HANDLE_PX = 8;
+/** Room around the image so crop handles at its edges are not clipped, in CSS px. */
+const STAGE_INSET = 6;
+/** The crop starts out covering the whole image, so the frame (and the feature) is visible. */
+const FULL_CROP: ImageCrop = { x0: 0, y0: 0, x1: 1, y1: 1 };
+const isFullCrop = (c: ImageCrop) => c.x0 <= 0 && c.y0 <= 0 && c.x1 >= 1 && c.y1 >= 1;
 /** Smallest crop side, as a fraction of the image; below this a drag counts as a click. */
 const CROP_MIN = 0.01;
 
@@ -58,8 +63,7 @@ type Drag =
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
-function gripAt(crop: ImageCrop | null, x: number, y: number, tolX: number, tolY: number): Grip {
-  if (!crop) return { hx: 0, hy: 0, inside: false };
+function gripAt(crop: ImageCrop, x: number, y: number, tolX: number, tolY: number): Grip {
   const nearX = x >= crop.x0 - tolX && x <= crop.x1 + tolX;
   const nearY = y >= crop.y0 - tolY && y <= crop.y1 + tolY;
   let hx: -1 | 0 | 1 = 0;
@@ -76,11 +80,12 @@ function gripAt(crop: ImageCrop | null, x: number, y: number, tolX: number, tolY
   return { hx, hy, inside };
 }
 
-function cursorFor(g: Grip): string {
+/** `movable`: a full-image crop has nowhere to move, so dragging inside draws a new one. */
+function cursorFor(g: Grip, movable: boolean): string {
   if (g.hx && g.hy) return g.hx === g.hy ? "nwse-resize" : "nesw-resize";
   if (g.hx) return "ew-resize";
   if (g.hy) return "ns-resize";
-  return g.inside ? "move" : "crosshair";
+  return g.inside && movable ? "move" : "crosshair";
 }
 
 // ── Dialog body ───────────────────────────────────────────────────────────────
@@ -101,7 +106,7 @@ function ImportBody({
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [threshold, setThreshold] = useState(0.5);
   const [invert, setInvert] = useState(false);
-  const [crop, setCrop] = useState<ImageCrop | null>(null);
+  const [crop, setCrop] = useState<ImageCrop>(FULL_CROP);
   const [busy, setBusy] = useState(false);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [cursor, setCursor] = useState("crosshair");
@@ -173,9 +178,10 @@ function ImportBody({
     setBusy(true);
     // Yield one tick so the button repaints before the synchronous bake.
     setTimeout(() => {
-      const sdf = bakeImageSdf(bitmap, analysis, threshold, invert, crop);
+      const cropped = isFullCrop(crop) ? null : crop;
+      const sdf = bakeImageSdf(bitmap, analysis, threshold, invert, cropped);
       if (!sdf) {
-        showToast(crop ? "Nothing detected inside the crop" : "Nothing detected - adjust the threshold");
+        showToast(cropped ? "Nothing detected inside the crop" : "Nothing detected - adjust the threshold");
         setBusy(false);
         return;
       }
@@ -210,8 +216,8 @@ function ImportBody({
     e.currentTarget.setPointerCapture(e.pointerId);
     const p = pointerNorm(e);
     const g = gripAt(crop, p.x, p.y, p.tolX, p.tolY);
-    if (crop && (g.hx || g.hy)) dragRef.current = { mode: "resize", grip: g, start: crop };
-    else if (crop && g.inside) dragRef.current = { mode: "move", sx: p.x, sy: p.y, start: crop };
+    if (g.hx || g.hy) dragRef.current = { mode: "resize", grip: g, start: crop };
+    else if (g.inside && !isFullCrop(crop)) dragRef.current = { mode: "move", sx: p.x, sy: p.y, start: crop };
     else dragRef.current = { mode: "new", sx: p.x, sy: p.y };
   }
 
@@ -220,7 +226,7 @@ function ImportBody({
     const p = pointerNorm(e);
     const drag = dragRef.current;
     if (!drag) {
-      setCursor(cursorFor(gripAt(crop, p.x, p.y, p.tolX, p.tolY)));
+      setCursor(cursorFor(gripAt(crop, p.x, p.y, p.tolX, p.tolY), !isFullCrop(crop)));
       return;
     }
     if (drag.mode === "new") {
@@ -254,14 +260,17 @@ function ImportBody({
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
-    // A plain click (no meaningful rectangle) clears the crop.
-    if (drag.mode === "new" && crop && (crop.x1 - crop.x0 < CROP_MIN || crop.y1 - crop.y0 < CROP_MIN)) {
-      setCrop(null);
+    // A plain click (no meaningful rectangle) resets the crop to the whole image.
+    if (drag.mode === "new" && (crop.x1 - crop.x0 < CROP_MIN || crop.y1 - crop.y0 < CROP_MIN)) {
+      setCrop(FULL_CROP);
     }
   }
 
   const thresholdFrac = (threshold - THRESHOLD_MIN) / (THRESHOLD_MAX - THRESHOLD_MIN);
-  const fit = analysis && box.w > 0 ? Math.min(box.w / analysis.width, box.h / analysis.height) : 0;
+  const fit =
+    analysis && box.w > 0
+      ? Math.min((box.w - 2 * STAGE_INSET) / analysis.width, (box.h - 2 * STAGE_INSET) / analysis.height)
+      : 0;
   const stageW = analysis ? analysis.width * fit : 0;
   const stageH = analysis ? analysis.height * fit : 0;
 
@@ -294,23 +303,21 @@ function ImportBody({
               onPointerLeave={() => !dragRef.current && setCursor("crosshair")}
             >
               <canvas ref={canvasRef} />
-              {crop && (
-                <div
-                  className="image-crop-box"
-                  style={{
-                    left: `${crop.x0 * 100}%`,
-                    top: `${crop.y0 * 100}%`,
-                    width: `${(crop.x1 - crop.x0) * 100}%`,
-                    height: `${(crop.y1 - crop.y0) * 100}%`,
-                  }}
-                  aria-hidden
-                >
-                  <i className="image-crop-handle" data-corner="nw" />
-                  <i className="image-crop-handle" data-corner="ne" />
-                  <i className="image-crop-handle" data-corner="sw" />
-                  <i className="image-crop-handle" data-corner="se" />
-                </div>
-              )}
+              <div
+                className="image-crop-box"
+                style={{
+                  left: `${crop.x0 * 100}%`,
+                  top: `${crop.y0 * 100}%`,
+                  width: `${(crop.x1 - crop.x0) * 100}%`,
+                  height: `${(crop.y1 - crop.y0) * 100}%`,
+                }}
+                aria-hidden
+              >
+                <i className="image-crop-handle" data-corner="nw" />
+                <i className="image-crop-handle" data-corner="ne" />
+                <i className="image-crop-handle" data-corner="sw" />
+                <i className="image-crop-handle" data-corner="se" />
+              </div>
             </div>
           ) : (
             <span className="image-dialog-hint">Analyzing…</span>
@@ -342,16 +349,16 @@ function ImportBody({
         </label>
         <p className="image-dialog-hint">
           Light area becomes the shape. {analysis?.hasAlpha ? "Using alpha channel." : "Using brightness."}{" "}
-          {crop ? (
+          {!isFullCrop(crop) ? (
             <>
               Cropped -{" "}
-              <button type="button" className="image-dialog-link" onClick={() => setCrop(null)}>
+              <button type="button" className="image-dialog-link" onClick={() => setCrop(FULL_CROP)}>
                 reset
               </button>
               .
             </>
           ) : (
-            "Drag on the preview to crop."
+            "Drag the corners to crop."
           )}
         </p>
         <div className="image-dialog-actions">

@@ -45,7 +45,7 @@ A shape is not registered until **all** of these know it, with the same key:
 - `SHAPE_TYPE_INT` in `shader.ts` — unique dense ints `0..n-1`
 - `sd*` primitive + dispatch `switch` in `shader.ts`
 - TypeGPU / WGSL / GLSL emitters in `generateSdfCode.ts`
-- `SHAPE_ICONS` in `commands.ts` (`Record<ShapeType, …>` will fail typecheck if an icon is missing; toolbar `SHAPES` vs palette `EXTRA_SHAPES` is a separate product choice)
+- `SHAPE_ICONS` in `commands.ts` (`Record<ShapeType, …>` will fail typecheck if an icon is missing; toolbar `SHAPES` vs palette `EXTRA_SHAPES` is a separate product choice). Icons are generated: add the shape to `icons` in `scripts/gen-shape-icons.mjs`, run `node scripts/gen-shape-icons.mjs`
 
 Adding a shape without codegen or without a GPU case is a shippable bug. TypeScript will not notice a missing `switch` arm if there is a default.
 

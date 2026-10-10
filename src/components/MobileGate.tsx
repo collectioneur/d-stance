@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
-import { Check, Link2, Monitor } from "lucide-react";
+import { Monitor } from "lucide-react";
+import { COPIED_ICON, COPY_LINK_ICON } from "../utils/commands";
+import { Wordmark } from "./Wordmark";
 
 /** Full-screen notice for windows too narrow for the editor (phones, split screens). */
 export default function MobileGate() {
@@ -18,13 +20,7 @@ export default function MobileGate() {
   return (
     <div className="mobile-gate">
       <div className="mobile-gate-card">
-        <span className="wordmark" aria-label="d-stance">
-          d
-          <span className="wordmark-dot" aria-hidden="true">
-            -
-          </span>
-          stance
-        </span>
+        <Wordmark />
         <div className="mobile-gate-icon" aria-hidden="true">
           <Monitor size={22} />
         </div>
@@ -34,7 +30,7 @@ export default function MobileGate() {
           computer, or make this window wider.
         </p>
         <button type="button" className="mobile-gate-btn" onClick={copyLink}>
-          {copied ? <Check size={14} /> : <Link2 size={14} />}
+          {copied ? <COPIED_ICON size={14} /> : <COPY_LINK_ICON size={14} />}
           {copied ? "Link copied" : "Copy link"}
         </button>
       </div>
