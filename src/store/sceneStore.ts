@@ -194,6 +194,27 @@ export function wouldExceedImages(root: SceneRoot, sdf: string): boolean {
   return !used.has(sdf) && used.size >= MAX_IMAGES;
 }
 
+export type InsertRejectReason = "cap" | "depth" | "images" | "invalid_parent";
+
+/** Caps checked on a finished tree — simpler than predicting each edit's delta. */
+export function validateRoot(root: SceneRoot): InsertRejectReason | null {
+  if (countInstructions(root.items) > MAX_INSTRUCTIONS) return "cap";
+  if (maxGroupDepth(root.items) > MAX_TRANSFORM_DEPTH) return "depth";
+  if (collectImageSdfs(root.items).size > MAX_IMAGES) return "images";
+  return null;
+}
+
+/** Deep copy with a fresh id on every node, so the copy never aliases its source. */
+export function cloneWithNewIds(item: SceneItem): SceneItem {
+  const copy = structuredClone(item);
+  const reId = (it: SceneItem) => {
+    it.id = crypto.randomUUID();
+    if (it.kind === "group") it.items.forEach(reId);
+  };
+  reId(copy);
+  return copy;
+}
+
 function isObjectGroup(container: SceneContainer): container is ObjectGroup {
   return (container as ObjectGroup).kind === "group";
 }
@@ -391,6 +412,12 @@ interface SceneState {
     image?: ShapeLayer["image"],
   ) => boolean;
   addGroupToContainer: (containerId: string) => boolean;
+  /** Splices ready-made items (fresh ids) into a container and selects the last one. */
+  insertItems: (
+    containerId: string,
+    index: number,
+    items: SceneItem[],
+  ) => InsertRejectReason | null;
   removeItem: (containerId: string, itemId: string) => void;
   updateLayer: (
     containerId: string,
@@ -502,6 +529,29 @@ export const useSceneStore = create<SceneState>()(
           rootSelected: false,
         });
         return true;
+      },
+
+      insertItems: (containerId, index, items) => {
+        const state = get();
+        if (items.length === 0) return null;
+        if (!findContainer(state.root, containerId)) return "invalid_parent";
+
+        const newRoot = mapRootContainer(state.root, containerId, (list) => {
+          const next = [...list];
+          next.splice(index, 0, ...items);
+          return next;
+        });
+        const reason = validateRoot(newRoot);
+        if (reason) return reason;
+
+        const last = items[items.length - 1];
+        set({
+          root: newRoot,
+          selectedContainerId: last.kind === "group" ? last.id : containerId,
+          selectedItemId: last.id,
+          rootSelected: false,
+        });
+        return null;
       },
 
       removeItem: (containerId, itemId) =>

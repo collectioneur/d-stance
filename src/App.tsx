@@ -12,6 +12,7 @@ import { undoScene, redoScene } from "./store/sceneStore";
 import { useGizmoStore } from "./store/gizmoStore";
 import { usePersistence } from "./store/persistence";
 import { openImageImport } from "./utils/commands";
+import { copySelection, duplicateSelection, pasteObjects } from "./scene/clipboard";
 import { isImageFile } from "./utils/decodeImage";
 import { setToastListener } from "./utils/toast";
 
@@ -45,6 +46,10 @@ export default function App() {
         e.preventDefault();
         redoScene();
       }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyD") {
+        e.preventDefault();
+        duplicateSelection();
+      }
 
       if (!e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         const setMode = useGizmoStore.getState().setMode;
@@ -64,19 +69,36 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // Paste or drop an image anywhere → import dialog. Tree DnD carries no
-  // files, so its drops fall through untouched.
+  // Cmd+C copies the selected object; paste or drop an image anywhere →
+  // import dialog, otherwise paste copied objects. Tree DnD carries no files,
+  // so its drops fall through untouched.
   useEffect(() => {
     const imageOf = (files: FileList | undefined | null) =>
       Array.from(files ?? []).find(isImageFile);
+    const isEditing = () => {
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!el?.isContentEditable;
+    };
+    const onCopy = (e: ClipboardEvent) => {
+      // Selected text (code view, labels) copies as text, as usual.
+      const sel = window.getSelection();
+      if (isEditing() || (sel && !sel.isCollapsed)) return;
+      const text = copySelection();
+      if (text && e.clipboardData) {
+        e.preventDefault();
+        e.clipboardData.setData("text/plain", text);
+      }
+    };
     const onPaste = (e: ClipboardEvent) => {
-      const tag = (document.activeElement as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (isEditing()) return;
       const file = imageOf(e.clipboardData?.files);
       if (file) {
         e.preventDefault();
         openImageImport(file);
+        return;
       }
+      if (pasteObjects(e.clipboardData?.getData("text/plain"))) e.preventDefault();
     };
     const onDragOver = (e: DragEvent) => {
       if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
@@ -88,10 +110,12 @@ export default function App() {
         openImageImport(file);
       }
     };
+    window.addEventListener("copy", onCopy);
     window.addEventListener("paste", onPaste);
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("drop", onDrop);
     return () => {
+      window.removeEventListener("copy", onCopy);
       window.removeEventListener("paste", onPaste);
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("drop", onDrop);

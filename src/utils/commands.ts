@@ -1,6 +1,7 @@
 import {
   Box,
   Boxes,
+  Copy,
   Circle,
   Cone,
   Cylinder,
@@ -30,6 +31,7 @@ import {
   shapeLabel,
   type ShapeType,
 } from "../store/sceneStore";
+import { duplicateSelection } from "../scene/clipboard";
 import { showToast } from "./toast";
 import { isImageFile } from "./decodeImage";
 
@@ -149,6 +151,14 @@ export const COMMANDS: Command[] = [
     icon: Boxes,
     keywords: ["group", "container", "folder", "nest"],
     run: addGroup,
+  },
+  {
+    id: "duplicate",
+    label: "Duplicate Selected",
+    icon: Copy,
+    hotkey: "⌘D",
+    keywords: ["copy", "clone", "paste"],
+    run: duplicateSelection,
   },
 ];
 
