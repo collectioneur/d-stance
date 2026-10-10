@@ -22,12 +22,28 @@ const CROP_MIN = 0.01;
 /** Mounted once in App; opened via openImageImport(file) from commands.ts. */
 export default function ImageImportDialog() {
   const [file, setFile] = useState<File | null>(null);
+  // Closing keeps the dialog mounted until its exit animation ends.
+  const [closing, setClosing] = useState(false);
   useEffect(() => {
-    setImageImportListener(setFile);
+    setImageImportListener((next) => {
+      setFile(next);
+      setClosing(false);
+    });
     return () => setImageImportListener(null);
   }, []);
   if (!file) return null;
-  return <ImportBody key={file.name + file.size} file={file} onClose={() => setFile(null)} />;
+  return (
+    <ImportBody
+      key={file.name + file.size}
+      file={file}
+      closing={closing}
+      onClose={() => setClosing(true)}
+      onClosed={() => {
+        setFile(null);
+        setClosing(false);
+      }}
+    />
+  );
 }
 
 // ── Crop interaction ──────────────────────────────────────────────────────────
@@ -69,7 +85,18 @@ function cursorFor(g: Grip): string {
 
 // ── Dialog body ───────────────────────────────────────────────────────────────
 
-function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
+function ImportBody({
+  file,
+  closing,
+  onClose,
+  onClosed,
+}: {
+  file: File;
+  /** Exit animation running: ignore input so Enter can't add the image twice. */
+  closing: boolean;
+  onClose: () => void;
+  onClosed: () => void;
+}) {
   const [bitmap, setBitmap] = useState<ImageBitmap | null>(null);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [threshold, setThreshold] = useState(0.5);
@@ -133,6 +160,7 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (closing) return;
       if (e.key === "Escape") onClose();
       if (e.key === "Enter") confirm();
     };
@@ -238,12 +266,19 @@ function ImportBody({ file, onClose }: { file: File; onClose: () => void }) {
   const stageH = analysis ? analysis.height * fit : 0;
 
   return (
-    <div className="image-dialog-overlay" onClick={onClose}>
+    <div
+      className="image-dialog-overlay"
+      data-state={closing ? "closed" : "open"}
+      onClick={onClose}
+    >
       <div
         className="image-dialog"
         role="dialog"
         aria-label="Import image"
         onClick={(e) => e.stopPropagation()}
+        onAnimationEnd={(e) => {
+          if (closing && e.target === e.currentTarget) onClosed();
+        }}
       >
         <div className="image-dialog-title">Import image as SDF</div>
         <div className="image-dialog-preview" ref={previewRef}>

@@ -50,30 +50,34 @@ export default function RenderModePanel() {
           className={`render-mode-chevron${open ? " render-mode-chevron--open" : ""}`}
         />
       </button>
-      {open && (
-        <div className="render-mode-list" role="listbox">
-          {MODES.map(({ value, label, icon: Icon }) => (
-            <button
-              key={value}
-              className={`render-mode-option${value === renderMode ? " render-mode-option--active" : ""}`}
-              role="option"
-              aria-selected={value === renderMode}
-              onClick={() => {
-                setRenderMode(value);
-                setOpen(false);
-              }}
-            >
-              <span className="shape-btn-icon">
-                <Icon size={14} />
-              </span>
-              <span className="shape-btn-label">{label}</span>
-              {value === renderMode && (
-                <Check size={13} className="render-mode-check" />
-              )}
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Always mounted so it can animate out. */}
+      <div
+        className="render-mode-list motion-pop"
+        data-open={open}
+        aria-hidden={!open}
+        role="listbox"
+      >
+        {MODES.map(({ value, label, icon: Icon }) => (
+          <button
+            key={value}
+            className={`render-mode-option${value === renderMode ? " render-mode-option--active" : ""}`}
+            role="option"
+            aria-selected={value === renderMode}
+            onClick={() => {
+              setRenderMode(value);
+              setOpen(false);
+            }}
+          >
+            <span className="shape-btn-icon">
+              <Icon size={14} />
+            </span>
+            <span className="shape-btn-label">{label}</span>
+            {value === renderMode && (
+              <Check size={13} className="render-mode-check" />
+            )}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

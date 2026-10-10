@@ -66,14 +66,17 @@ function Editor() {
   usePersistence();
   const renderPillRef = useRef<HTMLDivElement>(null);
   const renderPillDocked = useRenderPillDocked(renderPillRef);
-  const [toast, setToast] = useState<string | null>(null);
+  // Message outlives `toastOpen` so the toast can animate out with its text.
+  const [toast, setToast] = useState("");
+  const [toastOpen, setToastOpen] = useState(false);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     setToastListener((message) => {
       setToast(message);
+      setToastOpen(true);
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => setToast(null), 2500);
+      timer = setTimeout(() => setToastOpen(false), 2500);
     });
     return () => {
       setToastListener(null);
@@ -205,26 +208,9 @@ function Editor() {
       <GizmoPanel />
       <CommandPalette />
       <ImageImportDialog />
-      {toast && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 24,
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(20, 20, 20, 0.92)",
-            color: "#f0f0f0",
-            padding: "10px 16px",
-            borderRadius: 8,
-            fontSize: 13,
-            zIndex: 1000,
-            pointerEvents: "none",
-            border: "1px solid rgba(255,255,255,0.12)",
-          }}
-        >
-          {toast}
-        </div>
-      )}
+      <div className="toast motion-pop" data-open={toastOpen} role="status">
+        {toast}
+      </div>
     </>
   );
 }
