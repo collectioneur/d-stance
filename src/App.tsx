@@ -8,6 +8,8 @@ import CommandPalette from "./components/CommandPalette";
 import ImageImportDialog from "./components/ImageImportDialog";
 import RenderModePanel from "./components/panels/RenderModePanel";
 import QualityPanel from "./components/panels/QualityPanel";
+import MobileGate from "./components/MobileGate";
+import { useMediaQuery } from "./hooks/useMediaQuery";
 import { undoScene, redoScene } from "./store/sceneStore";
 import { useGizmoStore } from "./store/gizmoStore";
 import { usePersistence } from "./store/persistence";
@@ -47,7 +49,20 @@ function useRenderPillDocked(pillRef: RefObject<HTMLDivElement | null>): boolean
   return docked;
 }
 
+/** Narrower than this the editor does not fit: show MobileGate instead. */
+const MOBILE_QUERY = "(max-width: 799px)";
+
+/**
+ * The gate replaces the editor outright (not an overlay), so its global
+ * hotkeys can't edit the scene unseen. Checked before WebGPU support so phones
+ * get the mobile message.
+ */
 export default function App() {
+  const narrow = useMediaQuery(MOBILE_QUERY);
+  return narrow ? <MobileGate /> : <Editor />;
+}
+
+function Editor() {
   usePersistence();
   const renderPillRef = useRef<HTMLDivElement>(null);
   const renderPillDocked = useRenderPillDocked(renderPillRef);
