@@ -196,7 +196,7 @@ export function createShader(root: TgpuRoot) {
   const cameraUniforms = root.createUniform(CameraUniforms, {
     time: 0,
     aspect: 1,
-    mouse: d.vec2f(0.3, -0.4),
+    mouse: d.vec2f(0.3, 0.4),
     distance: 2.5,
   });
   const sceneUniforms = root.createUniform(SceneUniforms, {
@@ -1480,7 +1480,9 @@ export function createShader(root: TgpuRoot) {
   // chrome reflections; upgrade path is a real cubemap if art needs it.
   const envColor = (rd: d.v3f): d.v3f => {
     "use gpu";
-    const up = rd.y * 0.5 + 0.5;
+    // World +y is down on screen: "up" in the studio is -y.
+    const dirUp = 0.0 - rd.y;
+    const up = dirUp * 0.5 + 0.5;
     let v = std.mix(0.015, 0.06, up);
 
     const horizLen = std.max(std.length(d.vec2f(rd.x, rd.z)), 0.0001);
@@ -1498,10 +1500,10 @@ export function createShader(root: TgpuRoot) {
       std.pow(a2, 40.0) * (1.0 - std.smoothstep(0.5, 0.85, std.abs(rd.y)));
 
     // Broad overhead softbox
-    const sTop = std.smoothstep(0.35, 0.85, rd.y);
+    const sTop = std.smoothstep(0.35, 0.85, dirUp);
 
     // Faint floor bounce so downward faces aren't dead black
-    const sBot = std.smoothstep(0.3, 0.9, -rd.y);
+    const sBot = std.smoothstep(0.3, 0.9, rd.y);
 
     v += s1 * 3.2 + s2 * 2.2 + sTop * 1.4 + sBot * 0.05;
     return d.vec3f(v, v, v);
@@ -1612,6 +1614,21 @@ export function createShader(root: TgpuRoot) {
     return d.vec2f(RAY_MISS_T + 10.0, iterations);
   };
 
+  // ── Reference grid on the y = 0 plane (Blender-style: lines only) ──
+
+  /** Anti-aliased grid line coverage for grid coords `g` with pixel footprint `w`. */
+  const gridCoverage = (g: d.v2f, w: d.v2f): number => {
+    "use gpu";
+    const a = std.abs(std.fract(g - 0.5) - 0.5) / std.max(w, d.vec2f(0.0001));
+    return 1.0 - std.clamp(std.min(a.x, a.y), 0.0, 1.0);
+  };
+
+  /** Coverage of the single line coord = 0 (a world axis on the grid). */
+  const axisCoverage = (coord: number, w: number): number => {
+    "use gpu";
+    return 1.0 - std.clamp(std.abs(coord) / std.max(w, 0.0001), 0.0, 1.0);
+  };
+
   const rot2D = (angle: number): d.m2x2f => {
     "use gpu";
     const c = std.cos(angle);
@@ -1642,6 +1659,26 @@ export function createShader(root: TgpuRoot) {
     ro = d.vec3f(ro.x, roYZ.x, roYZ.y);
     const rdYZ = rotV * d.vec2f(rd.y, rd.z);
     rd = d.vec3f(rd.x, rdYZ.x, rdYZ.y);
+
+    // Grid plane hit + line coverage. fwidth needs uniform control flow, so
+    // this runs for every pixel before any branching; misses get a far t.
+    const flatRay = std.abs(rd.y) < 0.0001;
+    const tPlaneRaw = (0.0 - ro.y) / std.select(rd.y, d.f32(0.0001), flatRay);
+    const tPlane = std.select(
+      d.f32(RAY_MISS_T + 10.0),
+      tPlaneRaw,
+      !flatRay && tPlaneRaw > 0.0,
+    );
+    const gridP = ro + rd * std.min(tPlane, RAY_MISS_T);
+    const gridXZ = d.vec2f(gridP.x, gridP.z);
+    const minorW = std.fwidth(gridXZ * 4.0);
+    const majorW = std.fwidth(gridXZ);
+    const minorGrid =
+      gridCoverage(gridXZ * 4.0, minorW) *
+      (1.0 - std.smoothstep(0.25, 0.6, std.max(minorW.x, minorW.y)));
+    const majorGrid = gridCoverage(gridXZ, majorW * 1.5);
+    const xAxisLine = axisCoverage(gridXZ.y, majorW.y * 2.0); // z = 0: the X axis
+    const zAxisLine = axisCoverage(gridXZ.x, majorW.x * 2.0); // x = 0: the Z axis
 
     if (isGizmoPickPass) {
       if (gizmoUniforms.$.enabled !== d.u32(1)) {
@@ -1701,7 +1738,8 @@ export function createShader(root: TgpuRoot) {
       if (sceneUniforms.$.renderMode === d.u32(RENDER_MODE_CLASSIC)) {
         // Classic: single light, no secondary marches — cheap.
         const iterations = sceneResult.y;
-        const lightDir = std.normalize(d.vec3f(2.0, 3.0, -1.0));
+        // Key light from screen-top (-y), where the camera looks down from.
+        const lightDir = std.normalize(d.vec3f(2.0, -3.0, -1.0));
         const diff = std.max(std.dot(N, lightDir), 0.0);
         const fresnel = std.pow(1.0 - std.abs(std.dot(N, viewDir)), 3.0) * 0.5;
         const halfDir = std.normalize(lightDir + viewDir);
@@ -1736,7 +1774,7 @@ export function createShader(root: TgpuRoot) {
         const fresnel = 0.55 + 0.45 * std.pow(1.0 - ndv, 5.0);
 
         // Crisp key highlight for extra sparkle
-        const lightDir = std.normalize(d.vec3f(-1.5, 2.5, -2.0));
+        const lightDir = std.normalize(d.vec3f(-1.5, -2.5, -2.0));
         const halfDir = std.normalize(lightDir + viewDir);
         const spec = std.pow(std.max(std.dot(N, halfDir), 0.0), 220.0) * 2.5;
 
@@ -1749,6 +1787,16 @@ export function createShader(root: TgpuRoot) {
           d.vec3f(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2),
         );
       }
+    }
+
+    // Grid lines over the background, and over anything below the plane.
+    if (tPlane <= RAY_MISS_T && (!sceneHit || tPlane < tScene)) {
+      const fade =
+        (1.0 - std.smoothstep(2.0, 7.0, std.length(gridXZ))) *
+        std.smoothstep(0.02, 0.2, std.abs(rd.y));
+      col = std.mix(col, d.vec3f(0.42), (minorGrid * 0.06 + majorGrid * 0.14) * fade);
+      col = std.mix(col, d.vec3f(0.85, 0.3, 0.3), xAxisLine * 0.55 * fade);
+      col = std.mix(col, d.vec3f(0.35, 0.52, 0.9), zAxisLine * 0.55 * fade);
     }
 
     if (outlineVisible) {

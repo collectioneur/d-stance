@@ -71,6 +71,7 @@ import {
   type ScaleDragState,
 } from "./gizmo";
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
+import { SpawnAnimator } from "./spawnAnim";
 import { IMAGE_SDF_EMPTY_HALF, IMAGE_SDF_RES, decodeSdfPng } from "../utils/imageSdf";
 
 type GizmoGpuPickResult = {
@@ -838,7 +839,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let dragStartX = 0;
       let dragStartY = 0;
       let rotX = 0.3;
-      let rotY = -0.4;
+      // Looking down at the scene (+y is down on screen), grid plane in view.
+      let rotY = 0.4;
       let distance = 2.5;
       /** Live orbit preview while dragging; cleared on pointer up. */
       let orbitPreviewMouse: ReturnType<typeof d.vec2f> | null = null;
@@ -1661,6 +1663,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         useRenderStore.getState().renderMode,
       );
       lastRoot = initialState.root;
+      // Grow/shrink added and removed items; the store root stays untouched.
+      const spawnAnim = new SpawnAnimator();
+      let wasAnimating = false;
       lastSelectedIds = initialState.selectedIds;
       lastRootSelected = initialState.rootSelected;
       lastRenderMode = useRenderStore.getState().renderMode;
@@ -1684,14 +1689,18 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           applyQualityPreset(quality);
           lastQuality = quality;
         }
+        if (lastRoot && sceneRoot !== lastRoot) spawnAnim.rootChanged(lastRoot, sceneRoot, now);
+        const drawn = spawnAnim.frame(sceneRoot, now);
         if (
           sceneGpuDirty ||
           sceneRoot !== lastRoot ||
           selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
-          renderMode !== lastRenderMode
+          renderMode !== lastRenderMode ||
+          drawn.animating ||
+          wasAnimating // one more upload to land on the real root
         ) {
-          uploadSceneGpu(sceneRoot, selectedIds, rootSelected, renderMode);
+          uploadSceneGpu(drawn.root, selectedIds, rootSelected, renderMode);
 
           lastRoot = sceneRoot;
           lastSelectedIds = selectedIds;
@@ -1699,6 +1708,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           lastRenderMode = renderMode;
           sceneGpuDirty = false;
         }
+        wasAnimating = drawn.animating;
 
         // Highlight only while dragging; hover feedback stays cursor-only.
         const activeGizmoAxis = gizmoDragging ? gizmoDragAxis : null;
