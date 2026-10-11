@@ -40,3 +40,7 @@ Thumbs.db
 
 # Coverage
 coverage/
+
+# Tests
+test-results/
+playwright-report/

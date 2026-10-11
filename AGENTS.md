@@ -139,10 +139,11 @@ Pitfalls:
 ## After a change
 
 1. `npx tsc -b` (same check as `npm run build`).
-2. If you touched bake / quality / persist / instruction packing / shape registry: keep or add a tiny import-time assert in that module (see `assertBakeParity`, `assertQualityInvariants`). There is no `npm test` yet.
+2. `npm test` (Vitest unit tests, `src/**/*.test.ts`). If you touched bake / quality / persist / instruction packing / shape registry: keep the import-time asserts (`assertBakeParity`, `assertQualityInvariants`) and add a test next to the module. Kitchen-sink fixtures live in `src/test/fixtures.ts`; codegen output is snapshot-tested (update snapshots only for intended output changes: `npx vitest run -u`).
 3. GPU files (`shader.ts`, `bake.ts`, `useGpu.ts`): `npm run inspect:gpu` (Chromium/WebGPU compiles the raymarch pipeline). `tsc` does not compile WGSL. MCP tool: `typegpu_inspector` → `inspect_typegpu` on `src/gpu/shader.inspect.ts`. Then confirm the canvas is not black.
-4. UI: exercise the changed flow in the browser (click/type/drag). Check the other surfaces that read the same store (tree, inspector, gizmo, code export, hash after reload).
-5. New persist field: load an old `v: 4` blob and a blob missing the field.
-6. Image import: `src/utils/imageSdf.ts` runs `assertImageSdf()` on import (EDT + u8 round trip). Exercise paste/drop → dialog → add, then reload from hash.
+4. `npm run test:e2e` (Playwright, `e2e/`). Headless Chromium runs real WebGPU (Metal on macOS); helpers in `e2e/helpers.ts` load a scene through the hash, wait for `canvas[data-ready]`, and measure canvas pixels with the UI hidden. Exported WGSL/GLSL is compiled by the browser in `e2e/export.spec.ts`. Dev builds expose `window.__dstance` (store + scene) for tests.
+5. UI: exercise the changed flow in the browser (click/type/drag). Check the other surfaces that read the same store (tree, inspector, gizmo, code export, hash after reload).
+6. New persist field: load an old `v: 4` blob and a blob missing the field.
+7. Image import: `src/utils/imageSdf.ts` runs `assertImageSdf()` on import (EDT + u8 round trip). Exercise paste/drop → dialog → add, then reload from hash.
 
 Code, commits, and PR text stay normal prose. Do not commit unless asked.

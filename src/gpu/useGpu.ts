@@ -1425,7 +1425,12 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
       /** `additive`: Cmd/Ctrl/Shift-click toggles the hit item in the selection. */
       async function pickAt(clientX: number, clientY: number, additive: boolean) {
-        if (pickInProgress) return;
+        // A hover pick runs on almost every mouse move; a click must wait for
+        // it instead of being dropped (quick move-then-click lost selections).
+        while (pickInProgress) {
+          await new Promise<void>((r) => requestAnimationFrame(() => r()));
+          if (cancelled) return;
+        }
         pickInProgress = true;
 
         try {
@@ -1805,6 +1810,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
         syncCameraUniform();
         pipeline.withColorAttachment({ view: context }).draw(3);
+        // E2E and tooling wait on this; harmless in production.
+        if (!canvas!.dataset.ready) canvas!.dataset.ready = "1";
         animFrameId = requestAnimationFrame(frame);
       }
 
