@@ -148,3 +148,46 @@ export function materialsScene() {
     ],
   };
 }
+
+/** One group per modifier kind, spread on a grid. */
+export function modifiersScene() {
+  const at = (x: number, z: number) => [x, -0.3, z] as V3;
+  return {
+    id: "root",
+    name: "Modifiers",
+    items: [
+      group([layer("sphere", [0.09, 0, 0, 0])], {
+        position: at(-1, -0.6),
+        modifiers: [{ kind: "repeat", spacing: [0.25, 0.25, 0.25], count: [3, 1, 3] }],
+      }),
+      layer("box", [0.12, 0.3, 0.12, 0], { position: at(0, -0.6), modifiers: [{ kind: "twist", amount: 4, axis: 1 }] }),
+      group([layer("capsule", [0.04, 0.12, 0, 0], { position: [0.25, 0, 0] as V3, rotation: [0, 0, 90] as V3 })], {
+        position: at(1, -0.6),
+        modifiers: [{ kind: "polar", count: 8, axis: 1 }],
+      }),
+      group([layer("sphere", [0.12, 0, 0, 0], { position: [0.15, 0, 0] as V3 }), layer("box", [0.05, 0.2, 0.05, 0], { position: [0.15, 0, 0] as V3 })], {
+        position: at(-1, 0.6),
+        modifiers: [{ kind: "mirror", axes: [true, false, false] }],
+      }),
+      group(
+        [
+          layer("sphere", [0.25, 0, 0, 0], { modifiers: [{ kind: "onion", thickness: 0.02 }] }),
+          layer("box", [0.3, 0.3, 0.3, 0], { position: [0, -0.25, 0] as V3, op: "subtract" }),
+        ],
+        { position: at(0, 0.6) },
+      ),
+      layer("cylinder", [0.06, 0.35, 0, 0], { position: at(1, 0.6), rotation: [0, 0, 90] as V3, modifiers: [{ kind: "bend", amount: 2.5, axis: 2 }, { kind: "round", radius: 0.02 }] }),
+    ],
+  };
+}
+
+/** Infinite grid of spheres (repeat count 0) — unbounded scene. */
+export function infiniteScene() {
+  return {
+    id: "root",
+    name: "Infinite",
+    items: [
+      group([layer("sphere", [0.15, 0, 0, 0])], { modifiers: [{ kind: "repeat", spacing: [0.6, 0.6, 0.6], count: [0, 1, 0] }] }),
+    ],
+  };
+}

@@ -16,6 +16,7 @@ Agents break this repo by desyncing **cross-file contracts**, not by missing a T
 | Tree / DnD / add / remove | `src/scene/arboristAdapter.ts`, `countInstructions`, caps in `sceneStore.ts` |
 | Scene SDF codegen / culling / pick / highlight | `src/gpu/sceneCompiler.ts` (+ its tests) and the program cache in `src/gpu/useGpu.ts` |
 | Embed / Shadertoy export | `src/export/` (`embed.ts`, `renderTemplates.ts`, `runtime.js`) |
+| Modifiers (repeat, mirror, polar, twist, bend, elongate, round, onion) | `src/store/modifiers.ts`, `src/sdf/modifierMath.ts` (planner), `src/sdf/itemBounds.ts`, compiler frames, `MODIFIER_*` in `src/sdf/primitives.ts`, codegen `withMods` |
 | Materials / render modes | `src/store/material.ts`, compiler `MAT` slots + `combineStmt`, `shader.ts` (`shadeClassic` / `shadeStudio` / chrome), `src/export/renderTemplates.ts`, `generateMaterialCode` |
 | Save / load / URL hash | `src/store/persistence.ts` (`SCHEMA_VERSION`, `normalizePersisted`) |
 | Quality presets | `src/utils/quality.ts` (`assertQualityInvariants`) |
@@ -76,6 +77,14 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 - Render mode is a pipeline slot (`renderModeSlot`), not a uniform: each mode is its own cached program, so unused modes cost nothing. Programs are keyed by `mode + code`.
 - Fetch the scene info / material **after** march loops (shadow, AO, reflection). Holding it across a loop that inlines the scene SDF cost 2–4× frame time in crowded scenes.
 
+### 2c. Modifiers
+
+- `Modifier[]` on shapes and groups (schema v8, `sanitizeModifiers`). Point modifiers rewrite the evaluation point in list order; distance modifiers (round, onion) rewrite the result. On a group they act in the group's frame (after its transform); on a shape in its local, scaled frame.
+- **One planner:** `planPointModifiers` (via `shapePlan` / `groupPlan` in `itemBounds.ts`) decides neighbor-cell loops for overlapping repeats and the 1/Lipschitz factor of twist / bend. The viewport compiler and the export both call it — never re-derive these decisions elsewhere, or the export stops matching the viewport.
+- In the compiler, a group with point modifiers opens a **frame**: its local point is computed in code (3 affine slots), modifiers run on it, children bake relative to it, and their bound gates are scaled by the frame's distance scale (`misc.w`). Bounds are grown through the modifiers (`expandThrough`, reversed order); infinite repetition is `UNBOUNDED` and the march radius is capped at `MAX_SCENE_RADIUS`.
+- Numbers (spacing, counts, amounts) are values; kinds, axes, mirror axes, neighbor loops and on/off are code.
+- WGSL / GLSL / TypeGPU helper sources live in `primitives.ts` (`MODIFIER_*`); the compiler prefixes them `ds_`. Export helper names are reserved (`RESERVED` in generateSdfCode).
+
 ### 2b. Embed export
 
 - `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
@@ -103,7 +112,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 7` (v4–v6 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 8` (v4–v7 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.

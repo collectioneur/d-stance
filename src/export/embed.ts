@@ -19,10 +19,9 @@ import {
   type SceneFns,
 } from "./renderTemplates";
 import { generateMaterialCode, generateSdfCode, PLACEHOLDER } from "../utils/generateSdfCode";
-import { maxAbsScale, sceneBoundRadius, sceneFitSphere, shapeBoundRadius } from "../gpu/bounds";
-import { itemLocalToWorldPosition } from "../gpu/gizmo";
+import { sceneFloorY, sceneFrameSphere, sceneMarchRadius } from "../sdf/itemBounds";
 import { IMAGE_SDF_PREFIX } from "../utils/imageSdf";
-import type { ObjectGroup, SceneItem, SceneRoot } from "../store/sceneStore";
+import type { SceneItem, SceneRoot } from "../store/sceneStore";
 import type {
   ExportBackground,
   ExportFormat,
@@ -97,17 +96,17 @@ const runtimeInline = runtimeSource.replace(/^export function mount/m, "function
 
 export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport {
   const quality = QUALITY[opts.quality];
-  const fit = sceneFitSphere(root.items);
+  const fit = sceneFrameSphere(root.items);
   const constants: RenderConstants = {
     style: opts.style,
     background: opts.background,
     maxSteps: quality.maxSteps,
     reflSteps: quality.reflSteps,
     shadowSteps: quality.shadowSteps,
-    bounds: root.items.length > 0 ? sceneBoundRadius(root.items) + 0.05 : 0,
-    floorY: floorY(root.items),
-    floorCenter: fit?.center ?? [0, 0, 0],
-    floorReach: Math.max(fit?.radius ?? 1, 0.2),
+    bounds: root.items.length > 0 ? sceneMarchRadius(root.items) : 0,
+    floorY: sceneFloorY(root.items),
+    floorCenter: fit?.c ?? [0, 0, 0],
+    floorReach: Math.max(fit?.r ?? 1, 0.2),
   };
   const fns = sceneFns(root);
   const images = collectImages(root.items);
@@ -182,15 +181,16 @@ const HALF_FOV = Math.PI / 4;
 
 function exportView(root: SceneRoot, opts: EmbedOptions): ExportView {
   const { rotX, rotY, distance } = opts.view;
-  const sphere = opts.framing === "fit" ? sceneFitSphere(root.items) : null;
+  // Unbounded scenes (infinite repeat) keep the editor's view.
+  const sphere = opts.framing === "fit" ? sceneFrameSphere(root.items) : null;
   if (!sphere) return { rotX, rotY, distance, target: [0, 0, 0] };
   const round = (v: number) => Math.round(v * 1e5) / 1e5;
-  const radius = round(Math.max(sphere.radius, 0.05));
+  const radius = round(Math.max(sphere.r, 0.05));
   return {
     rotX,
     rotY,
     distance: round((radius * 1.1) / Math.sin(HALF_FOV)),
-    target: sphere.center.map(round) as [number, number, number],
+    target: sphere.c.map(round) as [number, number, number],
     fit: radius,
   };
 }
@@ -215,24 +215,6 @@ function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
       materialName: mat.fnName,
     },
   };
-}
-
-/** Lowest point of the scene (+Y is down): where the studio floor goes. */
-function floorY(items: SceneItem[]): number {
-  let y = -Infinity;
-  const walk = (list: SceneItem[], ancestors: ObjectGroup[]) => {
-    for (const item of list) {
-      if (item.kind === "group") {
-        walk(item.items, [...ancestors, item]);
-        continue;
-      }
-      let r = shapeBoundRadius(item);
-      for (const g of ancestors) r *= maxAbsScale(g);
-      y = Math.max(y, itemLocalToWorldPosition(item.position, ancestors)[1] + r);
-    }
-  };
-  walk(items, []);
-  return Number.isFinite(y) ? Math.round(y * 1e4) / 1e4 : 0;
 }
 
 function collectImages(items: SceneItem[], out: string[] = []): string[] {
