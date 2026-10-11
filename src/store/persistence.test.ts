@@ -1,0 +1,68 @@
+import { describe, expect, test } from "vitest";
+import { decodeHash, encodeHash, SCHEMA_VERSION, type PersistedScene } from "./persistence";
+import { zeroCounters } from "./sceneStore";
+import { FAKE_IMAGE_SDF, kitchenSink, scene, shape } from "../test/fixtures";
+
+function blob(v: number, root: PersistedScene["root"]): string {
+  return encodeHash({ v, root, counters: zeroCounters(), groupCounter: 0 });
+}
+
+function rawBlob(obj: unknown): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(obj))));
+}
+
+describe("persistence", () => {
+  test("round-trips the current schema", () => {
+    const root = kitchenSink();
+    const decoded = decodeHash(blob(SCHEMA_VERSION, root));
+    expect(decoded?.root).toEqual(root);
+  });
+
+  test("accepts old v4/v5 blobs", () => {
+    const root = scene([shape("sphere", { id: "a" })]);
+    expect(decodeHash(blob(4, root))?.root.items).toHaveLength(1);
+    expect(decodeHash(blob(5, root))?.root.items).toHaveLength(1);
+  });
+
+  test("rejects unknown versions and garbage", () => {
+    const root = scene([shape("sphere")]);
+    expect(decodeHash(blob(3, root))).toBeNull();
+    expect(decodeHash(blob(999, root))).toBeNull();
+    expect(decodeHash("not base64 at all!!")).toBeNull();
+    expect(decodeHash(rawBlob(null))).toBeNull();
+    expect(decodeHash(rawBlob("string"))).toBeNull();
+  });
+
+  test("fills missing scale and clamps hostile scale", () => {
+    const s = shape("box", { id: "a" }) as unknown as Record<string, unknown>;
+    delete s.scale;
+    const z = shape("box", { id: "b", scale: [0, -3, 1e-9] });
+    const bad = shape("box", { id: "c" }) as unknown as Record<string, unknown>;
+    bad.scale = ["x", null, 1];
+    const decoded = decodeHash(
+      rawBlob({ v: SCHEMA_VERSION, root: { id: "r", name: "S", items: [s, z, bad] }, counters: {}, groupCounter: 0 }),
+    );
+    const items = decoded!.root.items;
+    expect(items[0].scale).toEqual([1, 1, 1]);
+    expect(items[1].scale).toEqual([0.01, 3, 0.01]);
+    expect(items[2].scale).toEqual([1, 1, 1]);
+  });
+
+  test("drops image layers without a valid baked SDF", () => {
+    const good = shape("image", { id: "good", image: { sdf: FAKE_IMAGE_SDF } });
+    const bad = shape("image", { id: "bad", image: { sdf: "javascript:alert(1)" } });
+    const none = shape("image", { id: "none" });
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([good, bad, none])));
+    expect(decoded!.root.items.map((i) => i.id)).toEqual(["good"]);
+  });
+
+  test("strips image payload from non-image layers and bad round values", () => {
+    const sphere = shape("sphere", { id: "s" }) as unknown as Record<string, unknown>;
+    sphere.image = { sdf: FAKE_IMAGE_SDF };
+    const img = shape("image", { id: "i", image: { sdf: FAKE_IMAGE_SDF, round: -1 } });
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([sphere as never, img])));
+    const [s, i] = decoded!.root.items;
+    expect("image" in s).toBe(false);
+    expect((i as { image: { round?: number } }).image.round).toBeUndefined();
+  });
+});
