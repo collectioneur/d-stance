@@ -20,6 +20,8 @@ import {
   ChevronRight,
   Plus,
   Wand2,
+  Activity,
+  MousePointerClick,
   X,
 } from "lucide-react";
 import { GROUP_ICON, SHAPE_ICONS, TEXT_ICON } from "../../utils/commands";
@@ -126,6 +128,16 @@ function SceneNode({
         <NodeRenameInput node={node} />
       ) : (
         <span className="scene-item-name">{data.name}</span>
+      )}
+      {data.anim && !isEditing && (
+        <span className="scene-item-mods" title="Animated">
+          <Activity size={11} />
+        </span>
+      )}
+      {data.ix && !isEditing && (
+        <span className="scene-item-mods" title="Reacts to hover, click or pointer">
+          <MousePointerClick size={11} />
+        </span>
       )}
       {data.mods && !isEditing && (
         <span className="scene-item-mods" title={`${data.mods} modifier${data.mods > 1 ? "s" : ""}`}>

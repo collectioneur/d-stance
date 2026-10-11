@@ -14,6 +14,8 @@ import {
 } from "../store/sceneStore";
 import { colorToHex } from "../store/material";
 import { activeModifiers } from "../store/modifiers";
+import { activeTracks } from "../store/animation";
+import { activeReactions } from "../store/interaction";
 
 export type ArboristNode = {
   id: string;
@@ -27,12 +29,20 @@ export type ArboristNode = {
   color?: string;
   /** Number of active modifiers (tree badge). */
   mods?: number;
+  /** Has active animation tracks (tree badge). */
+  anim?: boolean;
+  /** Reacts to hover / click / pointer (tree badge). */
+  ix?: boolean;
   children?: ArboristNode[];
 };
 
-function modsBadge(item: SceneItem): { mods?: number } {
+function modsBadge(item: SceneItem): { mods?: number; anim?: boolean; ix?: boolean } {
   const n = activeModifiers(item.modifiers).length;
-  return n > 0 ? { mods: n } : {};
+  return {
+    ...(n > 0 ? { mods: n } : {}),
+    ...(activeTracks(item.animation).length > 0 ? { anim: true } : {}),
+    ...(activeReactions(item.interaction).length > 0 ? { ix: true } : {}),
+  };
 }
 
 export function sceneItemToArborist(item: SceneItem): ArboristNode {

@@ -14,6 +14,8 @@ import {
   RENDER_MODE_NORMALS,
   RENDER_MODE_STUDIO,
   RENDER_MODE_VOLUME,
+  ACCUM_FORMAT,
+  accumLayout,
 } from "./shader";
 import {
   useSceneStore,
@@ -211,7 +213,16 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       // previous program keeps drawing (with its own values) until the new
       // one is ready, so structural edits never stall a frame.
       type ScenePipeline = ReturnType<typeof shader.createScenePipeline>;
-      type Program = { code: string; pipeline: ScenePipeline; ready: boolean; failed: boolean };
+      type Program = {
+        code: string;
+        pipeline: ScenePipeline;
+        ready: boolean;
+        failed: boolean;
+        /** Same program drawing into the anti-aliasing accumulator (compiled on first need). */
+        accum: { pipeline: ScenePipeline; ready: boolean; failed: boolean } | null;
+        /** What to build `accum` from. */
+        source: { code: string; mode: RenderMode };
+      };
       const programs = new Map<string, Program>(); // insertion order = LRU
       /** Counters for tests and perf probes. */
       const stats = { compiles: 0, draws: 0 };
@@ -248,6 +259,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           pipeline: shader.createScenePipeline(code, modeId(mode)),
           ready: false,
           failed: false,
+          accum: null,
+          source: { code, mode },
         };
         stats.compiles++;
         programs.set(key, prog);
@@ -265,6 +278,73 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           if (k !== active?.program.code && k !== key) programs.delete(k);
         }
         return prog;
+      }
+
+      /** The program's accumulating pipeline once compiled (null while compiling or failed). */
+      function accumPipeline(prog: Program): ScenePipeline | null {
+        if (!prog.accum) {
+          const accum = { pipeline: shader.createScenePipeline(prog.source.code, modeId(prog.source.mode), true), ready: false, failed: false };
+          prog.accum = accum;
+          accum.pipeline.initAsync().then(
+            () => {
+              accum.ready = true;
+            },
+            (err: unknown) => {
+              accum.failed = true;
+              console.error("anti-aliasing pipeline failed to compile", err);
+            },
+          );
+        }
+        return prog.accum.ready ? prog.accum.pipeline : null;
+      }
+
+      // ── Progressive anti-aliasing ──
+      // While the view holds still, jittered samples are averaged into an
+      // rgba16float texture (blend constant 1/n: a running mean) and blitted to
+      // the canvas. Any change starts over at one sample, so editing is never slower.
+      const { blitPipeline } = shader;
+      const makeAccumTexture = (width: number, height: number) =>
+        root.createTexture({ size: [width, height] as [number, number], format: ACCUM_FORMAT }).$usage("sampled", "render");
+      let accumTexture = makeAccumTexture(1, 1);
+      let accumView = root.unwrap(accumTexture).createView();
+      let accumBindGroup = root.createBindGroup(accumLayout, { accum: accumTexture.createView(d.texture2d(d.f32)) });
+      let accumSamples = 0;
+      /** Sub-pixel offset of the sample being drawn (uv units), written by syncCameraUniform. */
+      let jitter: [number, number] = [0, 0];
+
+      function resizeAccum(width: number, height: number) {
+        accumTexture.destroy();
+        accumTexture = makeAccumTexture(width, height);
+        accumView = root.unwrap(accumTexture).createView();
+        accumBindGroup = root.createBindGroup(accumLayout, { accum: accumTexture.createView(d.texture2d(d.f32)) });
+        accumSamples = 0;
+      }
+
+      /** Radical inverse in `base`: a low-discrepancy sequence over [0, 1). */
+      function halton(i: number, base: number): number {
+        let f = 1;
+        let r = 0;
+        for (let n = i; n > 0; n = Math.floor(n / base)) {
+          f /= base;
+          r += f * (n % base);
+        }
+        return r;
+      }
+
+      /** Draws sample `i` (0 = unjittered) into the accumulator and shows the average. */
+      function drawAccumSample(pipeline: ScenePipeline, i: number) {
+        jitter = i === 0 ? [0, 0] : [(halton(i, 2) - 0.5) / canvas!.width, (halton(i, 3) - 0.5) / canvas!.height];
+        syncCameraUniform();
+        const encoder = root.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [{ view: accumView, loadOp: i === 0 ? "clear" : "load", clearValue: [0, 0, 0, 1], storeOp: "store" }],
+        });
+        const w = 1 / (i + 1);
+        pass.setBlendConstant([w, w, w, w]);
+        pipeline.with(pass).draw(3);
+        pass.end();
+        root.device.queue.submit([encoder.finish()]);
+        blitPipeline.with(accumBindGroup).withColorAttachment({ view: context }).draw(3);
       }
 
       /** Highlight strength per node: selection 1, hover cross-fade 0..1. */
@@ -398,8 +478,29 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let rotX = DEFAULT_VIEW.rotX;
       let rotY = DEFAULT_VIEW.rotY;
       let distance = DEFAULT_VIEW.distance;
-      useViewStore.setState({ ...DEFAULT_VIEW });
+      useViewStore.setState({ ...DEFAULT_VIEW, request: null });
       const publishView = () => useViewStore.setState({ rotX, rotY, distance });
+      /** Camera glide toward a requested view (requestView), eased over ~0.45 s. */
+      let viewGlide: { from: [number, number, number]; to: [number, number, number]; start: number } | null = null;
+      const unsubViewRequest = useViewStore.subscribe((state) => {
+        if (!state.request) return;
+        const to = state.request;
+        useViewStore.setState({ request: null });
+        // Turn the short way round.
+        const wrap = (a: number, b: number) => b + Math.round((a - b) / (Math.PI * 2)) * Math.PI * 2;
+        viewGlide = { from: [rotX, rotY, distance], to: [wrap(rotX, to.rotX), to.rotY, to.distance], start: performance.now() };
+      });
+      function stepViewGlide(now: number) {
+        if (!viewGlide) return;
+        const t = Math.min(1, (now - viewGlide.start) / 450);
+        const k = 1 - (1 - t) ** 3;
+        [rotX, rotY, distance] = viewGlide.from.map((f, i) => f + (viewGlide!.to[i] - f) * k) as [number, number, number];
+        syncCameraUniform();
+        if (t >= 1) {
+          viewGlide = null;
+          publishView();
+        }
+      }
       // Wheel zoom fires in bursts: publish once it settles.
       let publishTimer: ReturnType<typeof setTimeout> | undefined;
       const publishViewSoon = () => {
@@ -1553,6 +1654,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         canvas!.height = canvas!.clientHeight * dpr;
         if (canvas!.width > 0 && canvas!.height > 0) {
           resizePickTarget(canvas!.width, canvas!.height);
+          resizeAccum(canvas!.width, canvas!.height);
           syncCameraUniform();
         }
       }
@@ -1567,6 +1669,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           aspect,
           mouse,
           distance,
+          jitter: d.vec2f(jitter[0], jitter[1]),
         });
       }
 
@@ -1586,6 +1689,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let lastDrawnRoot: SceneRoot | null = null;
       let sceneAnimated = false;
       let lastTrying = false;
+      /** Nothing left to draw for the current image (tests wait on it). */
+      let settled = false;
       let lastSliceY = 0;
       let animatedFor: SceneRoot | null = null;
       let lastTick = performance.now();
@@ -1600,6 +1705,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           return;
         }
         lastFrameTime = now;
+        stepViewGlide(now);
 
         const { root: sceneRoot, selectedIds, rootSelected } =
           useSceneStore.getState();
@@ -1659,10 +1765,25 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           useGizmoStore.getState().mode, activeGizmoAxis, imagesVersion, trying, useBrushStore.getState().active,
           active?.program.code.length, quality,
         ].join("|");
-        if (active && (dataChanged || view !== lastView || drawn.root !== lastDrawnRoot || active !== lastActive)) {
-          updateGizmoUniforms(sceneRoot, distance, activeGizmoAxis);
-          syncCameraUniform();
-          active.program.pipeline.withColorAttachment({ view: context }).draw(3);
+        const changed = !!active && (dataChanged || view !== lastView || drawn.root !== lastDrawnRoot || active !== lastActive);
+        const aaSamples = QUALITY_PRESETS[quality].aaSamples;
+        const accum = active && aaSamples > 1 ? accumPipeline(active.program) : null;
+        if (changed) accumSamples = 0;
+        if (active && (changed || (accum && accumSamples < aaSamples))) {
+          if (changed) updateGizmoUniforms(sceneRoot, distance, activeGizmoAxis);
+          if (accum) {
+            drawAccumSample(accum, accumSamples);
+            accumSamples++;
+            // Done: picks and the next change aim through pixel centers again.
+            if (accumSamples >= aaSamples) {
+              jitter = [0, 0];
+              syncCameraUniform();
+            }
+          } else {
+            jitter = [0, 0];
+            syncCameraUniform();
+            active.program.pipeline.withColorAttachment({ view: context }).draw(3);
+          }
           stats.draws++;
           lastView = view;
           lastDrawnRoot = drawn.root;
@@ -1670,6 +1791,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           // E2E and tooling wait on this; harmless in production.
           if (!canvas!.dataset.ready) canvas!.dataset.ready = "1";
         }
+        settled = !!active && !changed && (!accum || accumSamples >= aaSamples) && !(aaSamples > 1 && !active.program.accum?.ready && !active.program.accum?.failed);
         animFrameId = requestAnimationFrame(frame);
       }
 
@@ -1700,6 +1822,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
               return { total: performance.now() - t0, codeKb: latest.code.length / 1024 };
             },
             stats: () => ({ ...stats }),
+            /** The image on screen is final: no change pending, anti-aliasing done. */
+            settled: () => settled,
             /** Raw depth-pick bytes and decoded ray distance at a client point. */
             async depthProbe(x: number, y: number, skip = 0) {
               return withPick(async () => {
@@ -1721,6 +1845,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       registeredCleanup = () => {
         clearTimeout(publishTimer);
         unsubGizmoMode();
+        unsubViewRequest();
         observer.disconnect();
         cancelAnimationFrame(animFrameId);
         canvas.removeEventListener("pointerdown", onPointerDown);

@@ -30,12 +30,51 @@ type NumberProps = {
 };
 
 export function NumericInput({ label, ...field }: NumberProps & { label: string }) {
+  const scrub = useScrub(field);
   return (
     <div className="prop-row">
-      <label className="prop-label">{label}</label>
+      <label className={`prop-label${field.value !== null ? " prop-label--scrub" : ""}`} title="Drag to change (Shift ×10, Alt ×0.1)" {...scrub}>
+        {label}
+      </label>
       <NumberField {...field} ariaLabel={label} />
     </div>
   );
+}
+
+/**
+ * Drag a field's label sideways to change its value: one step per 2 px,
+ * Shift ×10, Alt ×0.1; the whole drag is one undo step. Pointer lock keeps
+ * long drags going past the screen edge.
+ */
+function useScrub({ value, min, max, step = 0.01, decimals, onChange }: NumberProps) {
+  const drag = useRef<{ start: number; moved: number } | null>(null);
+  const round = (n: number) => (decimals != null ? roundTo(n, decimals) : n);
+  const end = (el: Element) => {
+    if (!drag.current) return;
+    drag.current = null;
+    if (document.pointerLockElement === el) document.exitPointerLock();
+    resumeHistory();
+  };
+  return {
+    onPointerDown: (e: React.PointerEvent<HTMLLabelElement>) => {
+      if (e.button !== 0 || value === null) return;
+      e.preventDefault();
+      drag.current = { start: value, moved: 0 };
+      pauseHistory();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      e.currentTarget.requestPointerLock?.()?.catch?.(() => {});
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLLabelElement>) => {
+      const d = drag.current;
+      if (!d) return;
+      const scale = e.shiftKey ? 10 : e.altKey ? 0.1 : 1;
+      d.moved += e.movementX * scale;
+      const next = Math.min(max ?? Infinity, Math.max(min ?? -Infinity, round(Number((d.start + (d.moved / 2) * step).toFixed(10)))));
+      onChange(next);
+    },
+    onPointerUp: (e: React.PointerEvent<HTMLLabelElement>) => end(e.currentTarget),
+    onPointerCancel: (e: React.PointerEvent<HTMLLabelElement>) => end(e.currentTarget),
+  };
 }
 
 /** The bare input of NumericInput, for compact rows (x / y / z triples). */

@@ -163,6 +163,10 @@ canvas {
 }
 
 .wordmark {
+  border: none;
+  background: none;
+  cursor: pointer;
+  transition: color var(--transition-fast);
   font-family: var(--font-ui);
   font-size: 14px;
   font-weight: 550;
@@ -171,6 +175,10 @@ canvas {
   line-height: 1;
   white-space: nowrap;
   padding: 0 2px;
+}
+
+.wordmark:hover {
+  color: var(--text-1);
 }
 
 /* The "d": rendered mark, sized to the ascender and sitting on the baseline. */
@@ -2727,4 +2735,204 @@ canvas {
 .brush-ring--carve {
   border-style: dashed;
   border-color: rgba(255, 190, 150, 0.9);
+}
+
+/* Examples: welcome card over an empty scene, and the gallery dialog */
+.welcome {
+  --motion-dy: 10px;
+  position: fixed;
+  z-index: 9;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.welcome[data-open="true"] .welcome-card {
+  pointer-events: auto;
+}
+
+.welcome-card {
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  padding: 18px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur-panel);
+  -webkit-backdrop-filter: var(--blur-panel);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.welcome-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.welcome-title {
+  color: var(--text-1);
+  font-size: var(--text-md, 15px);
+  font-weight: 600;
+}
+
+.welcome-skip {
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.welcome-skip:hover {
+  color: var(--accent-text);
+}
+
+.welcome-tips {
+  margin: 12px 0 0;
+  color: var(--text-4);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+
+.welcome-tips kbd,
+.shortcuts kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.examples-dialog {
+  width: 640px;
+}
+
+.examples-note {
+  margin: 0;
+  color: var(--text-4);
+  font-size: var(--text-xs);
+}
+
+.examples-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.example-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.example-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-1px);
+}
+
+.example-card img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  margin-bottom: 6px;
+  background: #0e0e0e;
+}
+
+.example-card-title {
+  padding: 0 10px;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.example-card-blurb {
+  padding: 0 10px;
+  color: var(--text-4);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+@media (max-width: 640px) {
+  .examples-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Keyboard shortcuts (?) */
+.shortcuts {
+  width: 620px;
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+}
+
+.shortcuts h3 {
+  margin: 0 0 6px;
+  color: var(--text-4);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.shortcuts dl {
+  margin: 0;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.shortcuts-row dt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-width: 128px;
+}
+
+.shortcuts-row dd {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 640px) {
+  .shortcuts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Number fields: drag the label to scrub */
+.prop-label--scrub {
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+.prop-label--scrub:hover {
+  color: var(--text-1);
 }

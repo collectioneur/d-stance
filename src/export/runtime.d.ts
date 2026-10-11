@@ -33,6 +33,8 @@ export interface MountOptions {
   /** Play the scene's animation (default true; off under prefers-reduced-motion). */
   animate?: boolean;
   maxDpr?: number;
+  /** Anti-aliasing samples averaged while the view holds still (default 16, 1 = off). */
+  aa?: number;
   backend?: "auto" | "webgpu" | "webgl2";
 }
 

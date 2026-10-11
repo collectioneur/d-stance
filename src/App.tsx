@@ -8,6 +8,8 @@ import TimelinePanel from "./components/panels/TimelinePanel";
 import TryBanner from "./components/panels/TryBanner";
 import InspectPanel from "./components/panels/InspectPanel";
 import SculptBar, { BrushRing } from "./components/panels/SculptBar";
+import ExamplesGallery from "./components/ExamplesGallery";
+import ShortcutsOverlay from "./components/ShortcutsOverlay";
 import CommandPalette from "./components/CommandPalette";
 import ImageImportDialog from "./components/ImageImportDialog";
 import RenderModePanel from "./components/panels/RenderModePanel";
@@ -215,6 +217,8 @@ function Editor() {
       <InspectPanel />
       <SculptBar />
       <BrushRing />
+      <ExamplesGallery />
+      <ShortcutsOverlay />
       <CommandPalette />
       <ImageImportDialog />
       <div className="toast motion-pop" data-open={toastOpen} role="status">

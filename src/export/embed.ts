@@ -63,7 +63,7 @@ export interface EmbedExport {
   shadertoyDropped: number;
   /** Raw scene object handed to `mount` (tests, previews). */
   scene: { wgsl: string; glsl: string; images: string[]; view: ExportView; loop?: number; interact?: EmbedInteract };
-  mountOptions: { autoRotate: number; maxDpr: number };
+  mountOptions: { autoRotate: number; maxDpr: number; aa: number };
 }
 
 /** What the runtime needs to drive reactions (absent when nothing reacts). */
@@ -77,10 +77,10 @@ export interface EmbedInteract {
 }
 
 /** "balanced" is the editor's default preset ("high"): the embed looks like the viewport. */
-const QUALITY: Record<ExportQuality, { maxSteps: number; reflSteps: number; shadowSteps: number; maxDpr: number }> = {
-  fast: { maxSteps: 32, reflSteps: 12, shadowSteps: 16, maxDpr: 1.5 },
-  balanced: { maxSteps: 48, reflSteps: 24, shadowSteps: 24, maxDpr: 2 },
-  best: { maxSteps: 96, reflSteps: 32, shadowSteps: 32, maxDpr: 3 },
+const QUALITY: Record<ExportQuality, { maxSteps: number; reflSteps: number; shadowSteps: number; maxDpr: number; aa: number }> = {
+  fast: { maxSteps: 32, reflSteps: 12, shadowSteps: 16, maxDpr: 1.5, aa: 4 },
+  balanced: { maxSteps: 48, reflSteps: 24, shadowSteps: 24, maxDpr: 2, aa: 16 },
+  best: { maxSteps: 96, reflSteps: 32, shadowSteps: 32, maxDpr: 3, aa: 32 },
 };
 
 const AUTO_ROTATE: Record<ExportMotion, number> = { still: 0, slow: 0.15, spin: 0.5 };
@@ -205,7 +205,7 @@ export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport 
       ? { interact: { parent: slots.parent, hoverable: slots.hoverable, clickable: slots.clickable, pointer: slots.pointer } }
       : {}),
   };
-  const mountOptions = { autoRotate: AUTO_ROTATE[opts.motion], maxDpr: quality.maxDpr };
+  const mountOptions = { autoRotate: AUTO_ROTATE[opts.motion], maxDpr: quality.maxDpr, aa: quality.aa };
   // Stable per scene, distinct between scenes sharing a page.
   const id = `dstance-${slug(root.name)}-${hash(scene.wgsl + images.join("")).toString(36)}`;
 

@@ -17,7 +17,8 @@ async function makeEmbed(page: Page, root: unknown, opts: Partial<Opts> = {}) {
 
 async function waitDrawn(page: Page, selector = "canvas") {
   await expect(page.locator(selector)).toHaveAttribute("data-backend", /webgpu|webgl2/);
-  await page.waitForTimeout(300);
+  // Anti-aliasing finishes a moment after the first frame (still scenes).
+  await expect(page.locator(selector)).toHaveAttribute("data-settled", "1", { timeout: 5000 }).catch(() => {});
 }
 
 /** Renders the embed's scene with the runtime directly, forcing a backend. */

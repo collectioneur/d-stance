@@ -23,6 +23,8 @@ const CameraUniforms = d.struct({
   aspect: d.f32,
   mouse: d.vec2f,
   distance: d.f32,
+  /** Sub-pixel offset of this sample, in uv units (progressive anti-aliasing). */
+  jitter: d.vec2f,
 });
 
 const SceneUniforms = d.struct({
@@ -126,6 +128,10 @@ const renderModeSlot = tgpu.slot(RENDER_MODE_CLASSIC);
 const sceneSdfSlot = tgpu.slot<(p: d.v3f) => number>();
 /** Generated scene info at a surface point. */
 const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.InferGPU<typeof SceneInfo>>();
+/** Progressive anti-aliasing: samples are averaged here, then blitted to the canvas. */
+export const ACCUM_FORMAT = "rgba16float";
+export const accumLayout = tgpu.bindGroupLayout({ accum: { texture: d.texture2d(d.f32) } });
+
 /** Fractal noise of the compiled scene's helpers (volume detail). */
 const noiseSlot = tgpu.slot<(p: d.v3f) => number>();
 
@@ -135,6 +141,7 @@ export function createShader(root: TgpuRoot) {
     aspect: 1,
     mouse: d.vec2f(0.3, 0.4),
     distance: 2.5,
+    jitter: d.vec2f(0, 0),
   });
   const sceneUniforms = root.createUniform(SceneUniforms, {
     boundsRadius: 0,
@@ -932,7 +939,7 @@ export function createShader(root: TgpuRoot) {
     const isScenePickPass = pickPass === d.u32(PICK_PASS_SCENE);
     const isGizmoPickPass = pickPass === d.u32(PICK_PASS_GIZMO);
     const isDepthPickPass = pickPass === d.u32(PICK_PASS_DEPTH);
-    const sampleUv = d.vec2f(uv.x, uv.y);
+    const sampleUv = uv + cameraUniforms.$.jitter;
     const uvn = sampleUv * 2.0 - d.vec2f(1.0, 1.0);
     const uvCorrected = d.vec2f(uvn.x * cameraUniforms.$.aspect, uvn.y);
     let ro = d.vec3f(0, 0, 0 - cameraUniforms.$.distance);
@@ -1219,8 +1226,10 @@ export function createShader(root: TgpuRoot) {
   /**
    * Render pipeline for one compiled scene (sceneCompiler.ts `code`). The
    * caller owns caching and async init; buffers above are shared by all.
+   * `accumulate`: draws into the rgba16float accumulation texture, blended by
+   * the pass's blend constant (1 / sample count: a running average).
    */
-  function createScenePipeline(code: string, renderMode: number) {
+  function createScenePipeline(code: string, renderMode: number, accumulate = false) {
     const decl = tgpu["~unstable"].declare(code).$uses({
       [DATA_IDENT]: sceneData,
       [STROKE_IDENT]: strokeData,
@@ -1246,11 +1255,36 @@ export function createShader(root: TgpuRoot) {
       .createRenderPipeline({
         vertex: fullScreenTriangle,
         fragment,
+        ...(accumulate
+          ? {
+              targets: {
+                format: ACCUM_FORMAT,
+                blend: {
+                  color: { srcFactor: "constant", dstFactor: "one-minus-constant", operation: "add" },
+                  alpha: { srcFactor: "constant", dstFactor: "one-minus-constant", operation: "add" },
+                },
+              },
+            }
+          : {}),
       });
   }
 
+  /** Copies the accumulation texture to the canvas, pixel for pixel. */
+  const blitFragment = tgpu.fragmentFn({ in: { uv: d.vec2f }, out: d.vec4f })(({ uv }) => {
+    "use gpu";
+    const size = std.textureDimensions(accumLayout.$.accum);
+    const px = d.vec2i(std.min(uv * d.vec2f(size), d.vec2f(size) - 1.0));
+    return std.textureLoad(accumLayout.$.accum, px, 0);
+  });
+  const blitPipeline = root.createRenderPipeline({
+    vertex: fullScreenTriangle,
+    fragment: blitFragment,
+    targets: { format: navigator.gpu.getPreferredCanvasFormat() },
+  });
+
   return {
     createScenePipeline,
+    blitPipeline,
     cameraUniforms,
     sceneUniforms,
     gizmoUniforms,
