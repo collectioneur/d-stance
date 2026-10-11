@@ -234,3 +234,26 @@ describe("scene compiler modifiers", () => {
     expect(a).toBe(b);
   });
 });
+
+describe("scene compiler formulas", () => {
+  test("formula shapes compile to one function per distinct source", () => {
+    const out = compile(
+      scene([
+        shape("formula", { formula: "length(x, y, z) - 0.2" }),
+        shape("formula", { formula: "length(x, y, z) - 0.2" }),
+        shape("formula", { formula: "smin(x, y, 0.1) + fbm(x, y, z)" }),
+      ]),
+    );
+    expect(out.code.match(/fn ds_formula\d+\(/g)).toHaveLength(2);
+    expect(out.code).toContain("ds_smin(x, y, 0.1)");
+    expect(out.code).toContain("ds_fbm3(vec3f(x, y, z), 4.0)");
+  });
+
+  test("editing a formula changes the code; size and safety do not", () => {
+    const a = compile(scene([shape("formula", { formula: "length(x, y, z) - 0.2", params: [0.5, 0.5, 0, 0] })])).code;
+    const b = compile(scene([shape("formula", { formula: "length(x, y, z) - 0.3", params: [0.5, 0.5, 0, 0] })])).code;
+    const c = compile(scene([shape("formula", { formula: "length(x, y, z) - 0.2", params: [0.9, 0.2, 0, 0] })])).code;
+    expect(a).not.toBe(b);
+    expect(a).toBe(c);
+  });
+});

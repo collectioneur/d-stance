@@ -46,7 +46,27 @@ export function expandThrough(m: Modifier, c: Vec3, r: number): { c: Vec3; r: nu
       return { c, r: r + m.radius };
     case "onion":
       return { c, r: r + m.thickness };
+    case "noise":
+      return { c, r: r + noiseReach(m) };
   }
+}
+
+/** Largest displacement fbm3 can produce (its sum is about ±1.4 at most). */
+export function noiseReach(m: Extract<Modifier, { kind: "noise" }>): number {
+  return m.amplitude * 1.4;
+}
+
+/**
+ * 1 / Lipschitz of the distance modifiers: noise adds a field whose slope is
+ * about amplitude · scale · 1.6 per octave (empirical — the strict bound is
+ * ~2× and would halve marching speed for no visible gain).
+ */
+export function postInvLipschitz(mods: Modifier[]): number {
+  let invL = 1;
+  for (const m of mods) {
+    if (m.kind === "noise") invL /= 1 + m.amplitude * m.scale * 1.6 * m.octaves;
+  }
+  return invL;
 }
 
 /**
