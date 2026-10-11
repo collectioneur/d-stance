@@ -151,3 +151,28 @@ export async function waitForProgram(page: Page) {
   await page.waitForFunction(() => (window as unknown as { __dstance: { gpu: { synced(): boolean } } }).__dstance?.gpu?.synced());
   await waitForFrames(page, 2);
 }
+
+/** Bakes a ring-shaped image SDF in the page (real PNG data URL, like an import). */
+export async function bakeTestImage(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const { analyzeImage, bakeImageSdf } = await import("/src/utils/imageSdf.ts");
+    const c = new OffscreenCanvas(128, 128);
+    const g = c.getContext("2d")!;
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, 128, 128);
+    g.strokeStyle = "#000";
+    g.lineWidth = 18;
+    g.beginPath();
+    g.arc(64, 64, 40, 0, Math.PI * 2);
+    g.stroke();
+    const bmp = await createImageBitmap(c);
+    const a = analyzeImage(bmp);
+    return bakeImageSdf(bmp, a, a.threshold, a.invert)!;
+  });
+}
+
+/** Serves `html` at a same-origin URL (secure context for WebGPU) and opens it. */
+export async function openHtml(page: Page, html: string, path = "/__embed-test.html") {
+  await page.route(`**${path}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto(path);
+}
