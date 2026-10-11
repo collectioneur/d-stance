@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type ExportLook = "editor" | "classic" | "chrome";
+export type ExportLook = "editor" | "classic" | "chrome" | "studio";
 export type ExportBackground = "studio" | "transparent";
 export type ExportMotion = "still" | "slow" | "spin";
 export type ExportQuality = "fast" | "balanced" | "best";

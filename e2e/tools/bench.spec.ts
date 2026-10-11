@@ -13,7 +13,7 @@ const scenes: [string, () => unknown][] = [
   ["union120", () => crowdScene(120, false)],
   ["union250", () => crowdScene(250, false)],
 ];
-for (const mode of ["classic", "chrome"]) {
+for (const mode of ["classic", "chrome", "studio"]) {
   for (const [name, make] of scenes) {
     test(`bench ${name} ${mode}`, async ({ page }) => {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);
