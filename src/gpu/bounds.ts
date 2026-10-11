@@ -1,5 +1,4 @@
 import type { ObjectGroup, SceneItem, ShapeLayer } from "../store/sceneStore";
-import { itemLocalToWorldPosition } from "./gizmo";
 
 /** Conservative shape bound radius in its own local space (rotation-invariant). */
 export function shapeBoundRadius(layer: ShapeLayer): number {
@@ -104,41 +103,4 @@ export function maxAbsScale(group: ObjectGroup): number {
     Math.abs(group.scale[1]),
     Math.abs(group.scale[2]),
   );
-}
-
-/**
- * Tight-ish world bounding sphere of every shape (center of the box around
- * the shapes' own bound spheres + farthest reach). For framing, not culling.
- */
-export function sceneFitSphere(items: SceneItem[]): { center: [number, number, number]; radius: number } | null {
-  const spheres: { c: [number, number, number]; r: number }[] = [];
-  const walk = (list: SceneItem[], ancestors: ObjectGroup[]) => {
-    for (const item of list) {
-      if (item.kind === "group") {
-        walk(item.items, [...ancestors, item]);
-        continue;
-      }
-      let r = shapeBoundRadius(item);
-      for (const g of ancestors) r *= maxAbsScale(g);
-      spheres.push({ c: itemLocalToWorldPosition(item.position, ancestors) as [number, number, number], r });
-    }
-  };
-  walk(items, []);
-  if (spheres.length === 0) return null;
-  // Center of the box around all spheres: tighter than the centroid when
-  // shapes cluster on one side.
-  const lo = [Infinity, Infinity, Infinity];
-  const hi = [-Infinity, -Infinity, -Infinity];
-  for (const { c, r } of spheres) {
-    for (let k = 0; k < 3; k++) {
-      lo[k] = Math.min(lo[k], c[k] - r);
-      hi[k] = Math.max(hi[k], c[k] + r);
-    }
-  }
-  const center: [number, number, number] = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as [number, number, number];
-  let radius = 0;
-  for (const { c, r } of spheres) {
-    radius = Math.max(radius, Math.hypot(c[0] - center[0], c[1] - center[1], c[2] - center[2]) + r);
-  }
-  return { center, radius };
 }
