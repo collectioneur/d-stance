@@ -108,3 +108,18 @@ describe("persistence v8 modifiers", () => {
     expect(decodeHash(blob(7, scene([shape("sphere")])))?.root.items).toHaveLength(1);
   });
 });
+
+describe("persistence v9 formulas", () => {
+  test("formula shapes keep valid sources, broken ones fall back, others drop the field", () => {
+    const ok = shape("formula", { id: "ok", formula: "length(x, y, z) - 0.2" });
+    const bad = shape("formula", { id: "bad", formula: "evil(" });
+    const missing = shape("formula", { id: "missing" });
+    const stray = shape("box", { id: "stray", formula: "x" });
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad, missing, stray])));
+    const [a, b, c, d] = decoded!.root.items as { formula?: string }[];
+    expect(a.formula).toBe("length(x, y, z) - 0.2");
+    expect(b.formula).toBe("length(x, y, z) - 0.4");
+    expect(c.formula).toBe("length(x, y, z) - 0.4");
+    expect("formula" in d).toBe(false);
+  });
+});
