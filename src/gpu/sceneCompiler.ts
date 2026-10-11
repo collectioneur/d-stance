@@ -19,6 +19,7 @@
  * TypeGPU generates for the rest of the shader.
  */
 import { MODIFIER_WGSL, NOISE_WGSL, WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
+import { MAX_STROKE_DATA, STROKE_CHUNK, packStroke, strokeChunkCount, strokeCount } from "../sdf/stroke";
 import {
   ALL_SHAPE_TYPES,
   type ObjectGroup,
@@ -52,6 +53,8 @@ export const GLOW_BAND_HI = 0.035;
 
 /** Data identifier inside generated WGSL; useGpu binds it via `$uses`. */
 export const DATA_IDENT = "dsData";
+/** Read-only storage array of packed stroke data (src/sdf/stroke.ts). */
+export const STROKE_IDENT = "dsStroke";
 /** Scene uniforms inside generated WGSL (`dsScene.time` = animation clock). */
 export const SCENE_IDENT = "dsScene";
 export const IMAGE_TEX_IDENT = "dsImageTex";
@@ -69,6 +72,8 @@ export interface CompiledScene {
   markIndex: Map<string, number>;
   /** Conservative origin-centered scene bounding radius. */
   boundsRadius: number;
+  /** Packed stroke data (vec4s) for the `dsStroke` buffer; empty without strokes. */
+  strokes: Float32Array<ArrayBuffer>;
 }
 
 export interface CompileOptions {
@@ -159,6 +164,7 @@ const LEAF_SLOTS = 8; // rows+offset ×3, params, misc, bound, material ×2
 /** Leaf material slots: (sRGB color, roughness), (metalness, emission, _, _). */
 const MAT = 6;
 const IMAGE_EXTRA_SLOTS = 1; // round, invert, layer
+const STROKE_EXTRA_SLOTS = 1; // chunk base, chunks, point base, points (into dsStroke)
 const GROUP_SLOTS = 2; // misc, bound
 /** The march never needs to look farther than this for the scene sphere. */
 const MAX_SCENE_RADIUS = 100;
@@ -196,6 +202,8 @@ class Builder {
   markIndex = new Map<string, number>();
   /** Formula source → generated function name (identical formulas share one). */
   formulas = new Map<string, string>();
+  /** Packed stroke data, appended per stroke leaf in tree order. */
+  strokes: number[] = [];
 
   constructor(private opts: CompileOptions) {}
 
@@ -286,7 +294,8 @@ class Builder {
     inherited: Material,
   ): LeafNode {
     const image = layer.shapeType === "image";
-    const base = this.alloc(LEAF_SLOTS + (image ? IMAGE_EXTRA_SLOTS : 0));
+    const stroke = layer.shapeType === "stroke";
+    const base = this.alloc(LEAF_SLOTS + (image ? IMAGE_EXTRA_SLOTS : stroke ? STROKE_EXTRA_SLOTS : 0));
     const mods = activeModifiers(layer.modifiers);
     const baked = bakeShape(ctx, layer.position, layer.rotation, layer.scale);
     // Shape modifiers run in the shape's local (scaled) frame, around its origin.
@@ -312,6 +321,14 @@ class Builder {
       const round = Math.max(0, layer.image?.round ?? 0);
       const layerIdx = layer.image ? this.opts.imageLayer(layer.image.sdf) : 0;
       this.set(base + LEAF_SLOTS, round, w > 0.5 ? 1 : 0, layerIdx, layer.image ? 1 : 0);
+    }
+    if (stroke) {
+      // Offsets are data, not code: strokes grow while painting without a recompile.
+      const chunkBase = this.strokes.length / 4;
+      const count = strokeCount(layer.stroke);
+      const chunks = strokeChunkCount(count);
+      if (layer.stroke) this.strokes.push(...packStroke(layer.stroke));
+      this.set(base + LEAF_SLOTS, chunkBase, chunks, chunkBase + chunks, count);
     }
     this.markIndex.set(layer.id, (base + 4) * 4 + 2);
     this.leafIds.push(layer.id);
@@ -517,12 +534,19 @@ const CALL_SYNTAX = {
   vec3: (x: string, y: string, z: string) => `vec3f(${x}, ${y}, ${z})`,
 };
 
-/** Primitive call at local point expression `lp` (no factor). */
-function leafCall(node: LeafNode, lp: string): string {
+/**
+ * Primitive call at local point expression `lp` (no factor). `limit`: an
+ * upper bound that still matters to the caller (strokes stop searching past it).
+ */
+function leafCall(node: LeafNode, lp: string, limit = "1e10"): string {
   const b = node.base;
   const P = slot(b + 3);
   if (node.layer.shapeType === "image") return `ds_sdImage(${lp}, ${P}, ${slot(b + LEAF_SLOTS)})`;
   if (node.layer.shapeType === "formula") return `${node.formulaFn}(${lp}, ${P}.x, ${P}.y, ${SCENE_IDENT}.time)`;
+  // The stroke being painted hides from the sculpt depth pick (it must not stack on itself).
+  if (node.layer.shapeType === "stroke") {
+    return `select(ds_sdStroke(${lp}, ${slot(b + LEAF_SLOTS)}, ${P}.x, ${limit}), 1e10, ${SCENE_IDENT}.skipLeaf == ${node.pickId}u)`;
+  }
   const params = [`${P}.x`, `${P}.y`, `${P}.z`, `${P}.w`] as const;
   // Prefer a swizzle when a primitive takes the first three params as a vector.
   const call = primitiveCall(node.layer.shapeType, lp, params, {
@@ -597,6 +621,9 @@ class Emitter {
   lines: string[] = [];
   private n = 0;
 
+  /** Bound handed to the next stroke leaf by combineInto (see ds_sdStroke). */
+  private strokeLimit: string | null = null;
+
   /** `info`: also track materials and highlight / pick marks (once-per-pixel pass). */
   constructor(private info: boolean) {}
 
@@ -641,8 +668,11 @@ class Emitter {
   combineInto(acc: Val, node: IrNode, depth: number, frame: Frame) {
     const op = nodeOp(node);
     const k = node.kind === "chunk" ? "" : `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
+    const stroke = node.kind === "leaf" && node.layer.shapeType === "stroke";
     if (op !== "union" && op !== "sUnion") {
       if (node.kind === "chunk") throw new Error("chunks are hard union");
+      // A cut matters only where the stroke is closer than −acc (+ k when smooth).
+      if (stroke && (op === "subtract" || op === "sSubtract")) this.strokeLimit = op === "subtract" ? `-${acc.d}` : `${k} - ${acc.d}`;
       this.combineStmt(op, acc, this.node(node, depth, false, frame), k, depth);
       return;
     }
@@ -650,6 +680,7 @@ class Emitter {
     if (op === "sUnion") gate += ` + ${k}`;
     if (this.info) gate += ` + ${f(GLOW_BAND_HI)}`;
     this.push(depth, `if (${this.bound(node, frame)} < ${gate}) {`);
+    if (stroke) this.strokeLimit = gate;
     if (node.kind === "chunk") {
       for (const m of node.members) this.combineInto(acc, m, depth + 1, frame);
     } else {
@@ -718,13 +749,16 @@ class Emitter {
     const mat = `ds_mat(${b + MAT}u)`;
     const xf = `ds_xf(${frame.p}, ${b}u)`;
     const factor = `${slot(b + 4)}.x`;
+    // The bound is in result units; the stroke searches in its own.
+    const limit = this.strokeLimit && node.post.length === 0 ? `(${this.strokeLimit}) / ${factor}` : "1e10";
+    this.strokeLimit = null;
     if (node.steps.length === 0 && node.post.length === 0) {
-      return { d: `${leafCall(node, xf)} * ${factor}`, m: mat };
+      return { d: `${leafCall(node, xf, limit)} * ${factor}`, m: mat };
     }
     const q0 = this.fresh("q");
     this.push(depth, `let ${q0} = ${xf};`);
     return this.withSteps(node.steps, q0, depth, (q) => {
-      let e = leafCall(node, q);
+      let e = leafCall(node, q, limit);
       for (const s of node.post) e = postExpr(s, e, q0);
       return { d: `${e} * ${factor}`, m: mat };
     });
@@ -786,7 +820,39 @@ class Emitter {
   }
 }
 
-const RUNTIME_WGSL = `fn ds_xf(p: vec3f, i: u32) -> vec3f {
+const RUNTIME_WGSL = `// Sculpt stroke (src/sdf/stroke.ts): X = (chunk base, chunks, point base, points) in ${STROKE_IDENT}.
+fn ds_strokeSeg(p: vec3f, a0: vec4f, b0: vec4f, thickness: f32) -> f32 {
+  // Next to a break (radius ≤ 0) the segment is a sphere on its live end.
+  if (a0.w <= 0.0 && b0.w <= 0.0) { return 1e10; }
+  let a = select(a0, b0, a0.w <= 0.0);
+  let b = select(b0, a, b0.w <= 0.0);
+  let pa = p - a.xyz;
+  let ba = b.xyz - a.xyz;
+  let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+  return length(pa - ba * h) - mix(a.w, b.w, h) * thickness;
+}
+
+// limit: the caller's result cannot change unless the stroke is closer than
+// this (union: acc + k, subtract: k − acc), so chunks beyond it are skipped.
+fn ds_sdStroke(p: vec3f, X: vec4f, thickness: f32, limit: f32) -> f32 {
+  let chunkBase = u32(X.x);
+  let chunks = u32(X.y);
+  let pointBase = u32(X.z);
+  let count = u32(X.w);
+  let segs = select(count - 1u, count, count <= 1u);
+  var best = max(limit, 1e-4);
+  for (var c = 0u; c < chunks; c++) {
+    let s = ${STROKE_IDENT}[chunkBase + c];
+    if (length(p - s.xyz) - s.w * max(thickness, 1.0) > best) { continue; }
+    let end = min(c * ${STROKE_CHUNK}u + ${STROKE_CHUNK}u, segs);
+    for (var i = c * ${STROKE_CHUNK}u; i < end; i++) {
+      best = min(best, ds_strokeSeg(p, ${STROKE_IDENT}[pointBase + i], ${STROKE_IDENT}[pointBase + min(i + 1u, count - 1u)], thickness));
+    }
+  }
+  return best;
+}
+
+fn ds_xf(p: vec3f, i: u32) -> vec3f {
   let a = ${D}[i];
   let b = ${D}[i + 1u];
   let c = ${D}[i + 2u];
@@ -896,6 +962,9 @@ ${info.lines.join("\n")}
   if (builder.slots > DATA_SLOTS) {
     throw new Error(`scene needs ${builder.slots} data slots (max ${DATA_SLOTS})`);
   }
+  if (builder.strokes.length / 4 > MAX_STROKE_DATA) {
+    throw new Error(`scene needs ${builder.strokes.length / 4} stroke slots (max ${MAX_STROKE_DATA})`);
+  }
 
   return {
     code,
@@ -904,6 +973,7 @@ ${info.lines.join("\n")}
     leafIds: builder.leafIds,
     markIndex: builder.markIndex,
     boundsRadius: sceneRadius(ir),
+    strokes: new Float32Array(builder.strokes),
   };
 }
 

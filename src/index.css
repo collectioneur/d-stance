@@ -2609,3 +2609,122 @@ canvas {
   justify-content: space-between;
   color: var(--text-4);
 }
+
+/* Sculpt: brush bar (bottom center) and the ring at the cursor */
+.sculpt-dock {
+  position: fixed;
+  z-index: 10;
+  bottom: var(--space-3);
+  left: 50%;
+  translate: -50%;
+}
+
+.sculpt-bar {
+  --motion-dy: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 6px 0 4px;
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur-panel);
+  -webkit-backdrop-filter: var(--blur-panel);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.38);
+  user-select: none;
+}
+
+.sculpt-modes {
+  border: none;
+  background: none;
+}
+
+.sculpt-modes .segmented-btn {
+  min-width: 56px;
+}
+
+.sculpt-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sculpt-field input {
+  width: 84px;
+  accent-color: var(--scale-10);
+}
+
+.sculpt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.sculpt-toggle--on {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.sculpt-hint {
+  color: var(--text-4);
+}
+
+.sculpt-done {
+  height: 28px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent-strong);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sculpt-done:hover {
+  background: var(--accent-border);
+}
+
+.shape-btn--on {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.brush-ring {
+  position: fixed;
+  z-index: 5;
+  left: 0;
+  top: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+
+.brush-ring[data-visible="true"] {
+  opacity: 1;
+}
+
+.brush-ring--carve {
+  border-style: dashed;
+  border-color: rgba(255, 190, 150, 0.9);
+}

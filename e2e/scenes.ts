@@ -274,3 +274,47 @@ export function interactionScene() {
     ],
   };
 }
+
+/** Stroke points (x, y, z, r) along a curve. */
+function strokePoints(n: number, at: (t: number) => [number, number, number, number]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) out.push(...at(i / (n - 1)).map((v) => Math.round(v * 1e4) / 1e4));
+  return out;
+}
+
+/** A ball with a clay spiral wound around it and a carved groove, plus a free stroke. */
+export function sculptScene() {
+  const spiral = strokePoints(90, (t) => {
+    const a = t * Math.PI * 6;
+    const y = -0.42 + t * 0.84;
+    const rr = Math.sqrt(Math.max(0.0001, 0.42 * 0.42 - y * y)) + 0.02;
+    return [Math.cos(a) * rr, y, Math.sin(a) * rr, 0.035 + 0.015 * Math.sin(t * Math.PI)];
+  });
+  const groove = strokePoints(40, (t) => {
+    const a = -0.6 + t * 1.2;
+    return [Math.sin(a) * 0.42, 0.05, -Math.cos(a) * 0.42, 0.05];
+  });
+  const free = strokePoints(60, (t) => [0.75 + 0.25 * Math.sin(t * Math.PI * 2), -0.5 + t * 0.8, 0.1 * Math.cos(t * 9), 0.03 + 0.04 * t]);
+  return {
+    id: "root",
+    name: "Sculpt",
+    items: [
+      {
+        kind: "group",
+        id: "ball-sculpt",
+        name: "Ball sculpt",
+        position: [0, 0, 0] as V3,
+        rotation: [0, 0, 0] as V3,
+        scale: [1, 1, 1] as V3,
+        op: "union",
+        smoothK: 0.1,
+        items: [
+          layer("sphere", [0.4, 0, 0, 0], { id: "ball", name: "Ball", material: { color: [0.85, 0.55, 0.4], roughness: 0.5, metalness: 0, emission: 0 } }),
+          layer("stroke", [1, 0, 0, 0], { id: "clay", name: "Ball · clay", op: "sUnion", smoothK: 0.04, stroke: { points: spiral } }),
+          layer("stroke", [1, 0, 0, 0], { id: "carve", name: "Ball · carve", op: "sSubtract", smoothK: 0.02, stroke: { points: groove } }),
+        ],
+      },
+      layer("stroke", [1, 0, 0, 0], { id: "free", name: "Stroke", stroke: { points: free } }),
+    ],
+  };
+}

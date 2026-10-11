@@ -346,6 +346,29 @@ function imagePlate(dx = 0, dy = 0, s = 1) {
 }
 icons.image = () => ({ layers: imagePlate() });
 
+/** Sculpt stroke: a tapered tube swinging across, lit along its top edge. */
+icons.stroke = () => {
+  const spine = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40;
+    spine.push([-1.05 + 2.1 * t, 0.45 * Math.sin(t * Math.PI * 1.6 - 0.4), 0.12 + 0.22 * Math.sin(t * Math.PI)]);
+  }
+  const side = (sign) => spine.map(([x, y, r], i) => {
+    const [x2, y2] = spine[Math.min(i + 1, spine.length - 1)];
+    const [x0, y0] = spine[Math.max(i - 1, 0)];
+    const dx = x2 - x0, dy = y2 - y0, l = Math.hypot(dx, dy) || 1;
+    return [x - (dy / l) * r * sign, y + (dx / l) * r * sign];
+  });
+  const tube = [...side(1), ...side(-1).reverse()];
+  const lit = [...side(1), ...spine.map(([x, y], i) => [x, y + 0.02]).reverse()];
+  return {
+    layers: [
+      { rings: [tube], tone: M },
+      { rings: [lit], tone: S, clip: [tube] },
+    ],
+  };
+};
+
 /** Text layer: a solid "T" extruded towards the lower right, like the image plate. */
 icons.text = () => {
   const front = [[-1.05, -0.95], [0.95, -0.95], [0.95, -0.5], [0.2, -0.5], [0.2, 0.95], [-0.3, 0.95], [-0.3, -0.5], [-1.05, -0.5]];
@@ -629,6 +652,7 @@ const EXTRUDED = {
   duplicate: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   copyLink: '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',
   copied: '<path d="M20 6 9 17l-5-5"/>',
+  sculpt: '<path d="m11 10 3 3"/><path d="M6.5 21A3.5 3.5 0 1 0 3 17.5a2.62 2.62 0 0 1-.708 1.792A1 1 0 0 0 3 21z"/><path d="M9.969 17.031 21.378 5.624a1 1 0 0 0-3.002-3.002L6.967 14.031"/>',
 };
 function emitExtruded(el, depth = 1.4, steps = 7) {
   const back = Array.from({ length: steps }, (_, i) => `<g transform="translate(${f2((depth * (i + 1)) / steps)} ${f2((depth * (i + 1)) / steps)})">${el}</g>`).join("");

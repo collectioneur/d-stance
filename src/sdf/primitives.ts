@@ -242,6 +242,7 @@ const sdGyroid = (p: d.v3f, size: number, cell: number, thickness: number): numb
   return std.max(g, std.length(std.max(b, d.vec3f(0.0))) + std.min(std.max(b.x, std.max(b.y, b.z)), 0.0));
 };`,
   formula: "", // generated per formula (src/sdf/formula.ts)
+  stroke: "", // generated per stroke (src/sdf/stroke.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // √(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -458,6 +459,7 @@ fn sdGyroid(p: vec3f, size: f32, cell: f32, thickness: f32) -> f32 {
   return max(g, length(max(b, vec3f(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
 }`,
   formula: "", // generated per formula (src/sdf/formula.ts)
+  stroke: "", // generated per stroke (src/sdf/stroke.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -672,6 +674,7 @@ float sdGyroid(vec3 p, float size, float cell, float thickness) {
   return max(g, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
 }`,
   formula: "", // generated per formula (src/sdf/formula.ts)
+  stroke: "", // generated per stroke (src/sdf/stroke.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -699,7 +702,7 @@ export interface CallSyntax {
 }
 
 /** Function name of a primitive in every language (`sphere` → `sdSphere`). */
-export function primitiveFnName(shape: Exclude<ShapeType, "image" | "formula">): string {
+export function primitiveFnName(shape: Exclude<ShapeType, "image" | "formula" | "stroke">): string {
   return `sd${shape[0].toUpperCase()}${shape.slice(1)}`;
 }
 
@@ -709,7 +712,7 @@ export function primitiveFnName(shape: Exclude<ShapeType, "image" | "formula">):
  * editor). Param meaning per shape: see DEFAULT_PARAMS in sceneStore.ts.
  */
 export function primitiveCall(
-  shape: Exclude<ShapeType, "image" | "formula">,
+  shape: Exclude<ShapeType, "image" | "formula" | "stroke">,
   lp: string,
   P: readonly [string, string, string, string],
   syn: CallSyntax,

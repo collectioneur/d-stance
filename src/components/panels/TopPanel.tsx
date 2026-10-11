@@ -9,11 +9,13 @@ import {
   IMAGE_HOTKEY,
   TEXT_HOTKEY,
   TEXT_ICON,
+  SCULPT_ICON,
   addText,
   SHAPES,
   addShape,
   pickImageFile,
 } from "../../utils/commands";
+import { useBrushStore } from "../../scene/sculpt";
 import { openPalette } from "../CommandPalette";
 import { Wordmark } from "../Wordmark";
 
@@ -23,6 +25,8 @@ const paletteKey = isMac ? "⌘K" : "Ctrl+K";
 export default function TopPanel() {
   const canUndo = useStore(temporalStore, (s) => s.pastStates.length > 0);
   const canRedo = useStore(temporalStore, (s) => s.futureStates.length > 0);
+  const sculpting = useBrushStore((s) => s.active);
+  const setSculpting = useBrushStore((s) => s.setActive);
 
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -92,6 +96,15 @@ export default function TopPanel() {
         >
           <TEXT_ICON size={15} />
           <span className="shape-btn-key">{TEXT_HOTKEY}</span>
+        </button>
+        <button
+          className={`shape-btn shape-btn--icon${sculpting ? " shape-btn--on" : ""}`}
+          onClick={() => setSculpting(!sculpting)}
+          aria-pressed={sculpting}
+          title="Sculpt: paint clay onto shapes or carve them (B)"
+        >
+          <SCULPT_ICON size={15} />
+          <span className="shape-btn-key">B</span>
         </button>
         <button
           className="shape-btn shape-btn--icon"

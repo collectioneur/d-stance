@@ -25,6 +25,7 @@ import {
 } from "../sdf/primitives";
 import { POINT_MODIFIERS, activeModifiers, type Modifier } from "../store/modifiers";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
+import { STROKE_HELPERS, strokeFunction, type Stroke } from "../sdf/stroke";
 import type { ModifierPlan } from "../sdf/modifierMath";
 import {
   formulaFunction,
@@ -266,6 +267,8 @@ interface ShapeRhs {
   post: PostMod[];
   /** Generated function for shapeType "formula". */
   formulaFn?: string;
+  /** Generated function for shapeType "stroke". */
+  strokeFn?: string;
 }
 interface VarRhs {
   kind: "var";
@@ -306,6 +309,8 @@ interface Ir {
   usesAnimNoise: boolean;
   /** Formula functions: [name, parsed source]. */
   formulas: [string, ReturnType<typeof parseFormula> & { ok: true }][];
+  /** Stroke functions: [name, stroke], one per stroke layer. */
+  strokes: [string, Stroke][];
   /** Distinct baked image SDF data URLs, in order of first use. */
   images: string[];
 }
@@ -356,6 +361,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null, ix?: Interactiv
     return { ...base, id: slot !== undefined ? slot + 1 : (inherited.id ?? 0) };
   };
   const formulaList: Ir["formulas"] = [];
+  const strokeList: Ir["strokes"] = [];
   let accN = 0;
   let ptN = 0;
   const emit = (stmt: Stmt) => sink.push(stmt);
@@ -392,6 +398,11 @@ function buildIr(root: SceneRoot, selectedItemId: string | null, ix?: Interactiv
       imageIndex = images.indexOf(layer.image.sdf);
       if (imageIndex < 0) imageIndex = images.push(layer.image.sdf) - 1;
     }
+    let strokeFn: string | undefined;
+    if (layer.shapeType === "stroke" && layer.stroke) {
+      strokeFn = `stroke${strokeList.length}`;
+      strokeList.push([strokeFn, layer.stroke]);
+    }
     let formulaFn: string | undefined;
     if (layer.shapeType === "formula") {
       const src = sanitizeFormula(layer.formula);
@@ -413,6 +424,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null, ix?: Interactiv
       material: owned(layer, V, inherited),
       post: [],
       formulaFn,
+      strokeFn,
     };
   }
 
@@ -584,6 +596,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null, ix?: Interactiv
     interactive: !!ix,
     usesAnimNoise,
     formulas: formulaList,
+    strokes: strokeList,
     images,
   };
 }
@@ -731,12 +744,19 @@ function shapeLocalPoint(syn: Syntax, rhs: ShapeRhs): string {
   return lp;
 }
 
-function shapeCall(syn: Syntax, rhs: ShapeRhs, time: string): string {
+/**
+ * `limit`: how close the shape must be to still change the running result
+ * (strokes stop searching past it; see strokeFunction). In result units.
+ */
+function shapeCall(syn: Syntax, rhs: ShapeRhs, time: string, limit?: string): string {
   const lp = shapeLocalPoint(syn, rhs);
   const P = rhs.params.map((p) => fmtEx(p, syn));
   let call: string;
   if (rhs.shape === "formula") {
     call = `${rhs.formulaFn}(${lp}, ${P[0]}, ${P[1]}, ${time})`;
+  } else if (rhs.shape === "stroke") {
+    const lim = limit && rhs.post.length === 0 ? (isOneEx(rhs.factor) ? limit : `(${limit}) / ${fmtEx(rhs.factor, syn)}`) : "1e10";
+    call = rhs.strokeFn ? `${rhs.strokeFn}(${lp}, ${P[0]}, ${lim})` : fmt(1e10);
   } else if (rhs.shape === "image") {
     call =
       rhs.imageIndex < 0
@@ -790,7 +810,7 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
   const pad = "  ".repeat(depth);
   const push = (line: string) => out.push(pad + line);
   const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn!.lit(rhs.material, syn));
-  const rhsExpr = (syn: Syntax, rhs: Rhs) => (rhs.kind === "var" ? rhs.name : shapeCall(syn, rhs, time));
+  const rhsExpr = (syn: Syntax, rhs: Rhs, limit?: string) => (rhs.kind === "var" ? rhs.name : shapeCall(syn, rhs, time, limit));
   for (const stmt of stmts) {
     switch (stmt.t) {
       case "point":
@@ -807,8 +827,9 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         if (msyn) push(msyn.defMat(matName(stmt.name), mat(stmt.rhs)));
         break;
       case "combine": {
+        const limit = combineLimit(syn, stmt.name, stmt.op, stmt.k);
         if (!msyn) {
-          push(syn.assignStmt(stmt.name, combineExpr(syn, stmt.name, stmt.op, stmt.k, rhsExpr(syn, stmt.rhs))));
+          push(syn.assignStmt(stmt.name, combineExpr(syn, stmt.name, stmt.op, stmt.k, rhsExpr(syn, stmt.rhs, limit))));
           break;
         }
         const a = stmt.name;
@@ -820,7 +841,7 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         else if (stmt.op === "sUnion") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(${a}, t, ${k}));`;
         else if (stmt.op === "sIntersect") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(-${a}, -t, ${k}));`;
         push(
-          `  { ${msyn.tempF("t", rhsExpr(syn, stmt.rhs))} ${msyn.tempM("tm", mat(stmt.rhs))}${update} ${a} = ${combineExpr(syn, a, stmt.op, stmt.k, "t")}; }`,
+          `  { ${msyn.tempF("t", rhsExpr(syn, stmt.rhs, limit))} ${msyn.tempM("tm", mat(stmt.rhs))}${update} ${a} = ${combineExpr(syn, a, stmt.op, stmt.k, "t")}; }`,
         );
         break;
       }
@@ -844,6 +865,23 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         push(syn.assignStmt(stmt.name, postModExpr(syn, stmt.mod, stmt.name, time)));
         break;
     }
+  }
+}
+
+/** Past this distance the right operand cannot change `acc ⊕ b` (null: no such bound). */
+function combineLimit(syn: Syntax, acc: string, op: OpType, kEx: Ex): string | undefined {
+  const k = fmtEx(kEx, syn);
+  switch (op) {
+    case "union":
+      return acc;
+    case "sUnion":
+      return `${acc} + ${k}`;
+    case "subtract":
+      return `-${acc}`;
+    case "sSubtract":
+      return `${k} - ${acc}`;
+    default:
+      return undefined;
   }
 }
 
@@ -905,6 +943,8 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   if (ir.usesModifiers) helpers.push(syn.helpers.modifiers);
   // Last: formulas may call smin / noise.
   for (const [name, parsed] of ir.formulas) helpers.push(formulaFunction(name, parsed.ast, syn.lang));
+  if (ir.strokes.length > 0) helpers.push(STROKE_HELPERS[syn.lang]);
+  for (const [name, stroke] of ir.strokes) helpers.push(strokeFunction(name, stroke, syn.lang));
 
   return [...helpers, `${syn.fnOpen(fnName, ir.animated)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
 }
@@ -1075,6 +1115,7 @@ const RESERVED = new Set([
   "fbm3",
   "valueNoised2",
   "terrainHeight",
+  "strokeSeg",
 ]);
 
 function sdfFnName(nodeName: string): string {

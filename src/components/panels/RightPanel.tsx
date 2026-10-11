@@ -143,6 +143,7 @@ const SIZE_FIELDS: Record<string, SizeField[]> = {
     { label: "Size", paramIndex: 0, min: 0.01, step: 0.05 },
     { label: "Safety", paramIndex: 1, min: 0.05, max: 1, step: 0.05 },
   ],
+  stroke: [{ label: "Thickness", paramIndex: 0, min: 0.05, max: 5, step: 0.05 }],
   image: [
     { label: "Size", paramIndex: 0, min: 0.01, step: 0.01 },
     { label: "Thickness", paramIndex: 1, min: 0.005, step: 0.01 },

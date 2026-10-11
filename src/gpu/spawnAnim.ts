@@ -44,6 +44,28 @@ function topLevel(items: SceneItem[], ids: Set<string>, out: string[] = []): str
   return out;
 }
 
+function findById(items: SceneItem[], id: string): SceneItem | null {
+  for (const item of items) {
+    if (item.id === id) return item;
+    if (item.kind === "group") {
+      const found = findById(item.items, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether item `id` (in `items`) holds anything from `other`: wrapping or
+ * unwrapping existing shapes is a restructure, not an add or a delete.
+ */
+function holdsAny(items: SceneItem[], id: string, other: Set<string>): boolean {
+  const item = findById(items, id);
+  if (!item || item.kind !== "group") return false;
+  for (const child of collectIds(item.items)) if (other.has(child)) return true;
+  return false;
+}
+
 function scaleItems(items: SceneItem[], factors: Map<string, number>): SceneItem[] {
   return items.map((item) => {
     const f = factors.get(item.id);
@@ -59,9 +81,13 @@ export class SpawnAnimator {
   private appear = new Map<string, number>();
   private vanish: { ids: string[]; start: number; from: SceneRoot; after: SceneRoot } | null = null;
 
-  /** Call when the store root changes (not for the first root). */
-  rootChanged(prev: SceneRoot, next: SceneRoot, now: number): void {
+  /**
+   * Call when the store root changes (not for the first root). `quiet`:
+   * the change animates nothing (live edits such as sculpt strokes).
+   */
+  rootChanged(prev: SceneRoot, next: SceneRoot, now: number, quiet = false): void {
     this.vanish = null;
+    if (quiet) return;
     const before = collectIds(prev.items);
     const after = collectIds(next.items);
     const added = new Set([...after].filter((id) => !before.has(id)));
@@ -69,11 +95,12 @@ export class SpawnAnimator {
 
     for (const id of this.appear.keys()) if (!after.has(id)) this.appear.delete(id);
     if (added.size > 0 && added.size <= MAX_ANIMATED) {
-      for (const id of topLevel(next.items, added)) this.appear.set(id, now);
+      for (const id of topLevel(next.items, added)) if (!holdsAny(next.items, id, before)) this.appear.set(id, now);
     }
     // Pure removals only: drawing `prev` must not hide any other change.
     if (removed.size > 0 && added.size === 0 && removed.size <= MAX_ANIMATED) {
-      this.vanish = { ids: topLevel(prev.items, removed), start: now, from: prev, after: next };
+      const ids = topLevel(prev.items, removed).filter((id) => !holdsAny(prev.items, id, after));
+      if (ids.length > 0) this.vanish = { ids, start: now, from: prev, after: next };
     }
   }
 
