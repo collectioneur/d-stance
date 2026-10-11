@@ -24,7 +24,7 @@ const CameraUniforms = d.struct({
 
 const SceneUniforms = d.struct({
   boundsRadius: d.f32, // conservative world-space bounding sphere of scene
-  renderMode: d.u32, // RENDER_MODE_CLASSIC | RENDER_MODE_CHROME
+  _pad0: d.u32,
   selectAll: d.u32, // 1 = scene root selected: every surface glows
   _pad1: d.f32,
   boundsCenter: d.vec3f,
@@ -54,7 +54,7 @@ const PickUniforms = d.struct({
 const QualityUniforms = d.struct({
   maxSteps: d.f32,
   reflSteps: d.f32,
-  outlineSteps: d.f32,
+  shadowSteps: d.f32,
   /**
    * Always 0. Loop bounds built from it are opaque to the shader compiler, so
    * loops that call the (large, generated) scene SDF stay loops instead of
@@ -82,11 +82,30 @@ export const PICK_PASS_GIZMO = 2;
 export const RENDER_MODE_CLASSIC = 0;
 /** Reflective chrome shading (reflection march + AO + tonemap). */
 export const RENDER_MODE_CHROME = 1;
+/** Physically based materials, soft shadows, AO, floor shadow. */
+export const RENDER_MODE_STUDIO = 2;
+
+/** What the generated scene knows about a surface point (ds_sceneInfo). */
+export const SceneInfo = d.struct({
+  glow: d.f32, // selection / hover highlight 0..1
+  id: d.f32, // pick id (leaf index + 1), 0 = none
+  color: d.vec3f, // sRGB albedo, blended through the CSG
+  roughness: d.f32,
+  metalness: d.f32,
+  emission: d.f32,
+});
+
+/**
+ * Render mode is baked per pipeline (each mode is its own cached program), so
+ * the driver never sees the other modes' code: a smaller shader with less
+ * register pressure, and Studio's extra SDF call sites cost nothing elsewhere.
+ */
+const renderModeSlot = tgpu.slot(RENDER_MODE_CLASSIC);
 
 /** Generated scene SDF: world point → signed distance. */
 const sceneSdfSlot = tgpu.slot<(p: d.v3f) => number>();
-/** Generated scene info at a surface point: (glow, pick id, |d| of pick, 0). */
-const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.v4f>();
+/** Generated scene info at a surface point. */
+const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.InferGPU<typeof SceneInfo>>();
 
 export function createShader(root: TgpuRoot) {
   const cameraUniforms = root.createUniform(CameraUniforms, {
@@ -97,7 +116,7 @@ export function createShader(root: TgpuRoot) {
   });
   const sceneUniforms = root.createUniform(SceneUniforms, {
     boundsRadius: 0,
-    renderMode: RENDER_MODE_CHROME,
+    _pad0: 0,
     selectAll: 0,
     _pad1: 0,
     boundsCenter: d.vec3f(0, 0, 0),
@@ -122,7 +141,7 @@ export function createShader(root: TgpuRoot) {
   const qualityUniforms = root.createUniform(QualityUniforms, {
     maxSteps: 48,
     reflSteps: 24,
-    outlineSteps: 24,
+    shadowSteps: 24,
     zero: 0,
   });
 
@@ -558,6 +577,121 @@ export function createShader(root: TgpuRoot) {
     return std.normalize(n);
   };
 
+  // ── Materials ──────────────────────────────────────────────────────────────
+
+  /** Soft shadow toward `rd` (IQ): 1 = lit, 0 = occluded. */
+  const softShadow = (ro: d.v3f, rd: d.v3f): number => {
+    "use gpu";
+    const span = rayBounds(ro, rd);
+    if (span.y < 0.0) {
+      return 1.0;
+    }
+    let res = d.f32(1.0);
+    let t = std.max(span.x, 0.02);
+    for (let i = d.f32(0.0); i < qualityUniforms.$.shadowSteps; i += d.f32(1.0)) {
+      const h = sdScene(ro + rd * t);
+      res = std.min(res, (8.0 * h) / t);
+      t += std.clamp(h, 0.01, 0.2);
+      if (res < 0.002 || t > span.y) {
+        break;
+      }
+    }
+    const r = std.clamp(res, 0.0, 1.0);
+    return r * r * (3.0 - 2.0 * r);
+  };
+
+  /** Chrome reflections take the hue of the material (gray stays neutral). */
+  const chromeTint = (c: d.v3f): d.v3f => {
+    "use gpu";
+    const hi = std.max(c.x, std.max(c.y, c.z));
+    const lo = std.min(c.x, std.min(c.y, c.z));
+    const sat = std.select(d.f32(0.0), (hi - lo) / hi, hi > 0.001);
+    return std.mix(d.vec3f(1.0), c / std.max(hi, 0.001), sat);
+  };
+
+  /** Classic: one key light, iteration AO; tuned so the default material matches the original gray. */
+  const shadeClassic = (N: d.v3f, viewDir: d.v3f, iterations: number, info: d.InferGPU<typeof SceneInfo>): d.v3f => {
+    "use gpu";
+    const lightDir = std.normalize(d.vec3f(2.0, -3.0, -1.0));
+    const diff = std.max(std.dot(N, lightDir), 0.0);
+    const fresnel = std.pow(1.0 - std.abs(std.dot(N, viewDir)), 3.0) * 0.5;
+    const halfDir = std.normalize(lightDir + viewDir);
+    // roughness 0.5 → exponent 64, strength 1.5 (the original look).
+    const shininess = std.exp2(9.0 - 6.0 * info.roughness);
+    const spec = std.pow(std.max(std.dot(N, halfDir), 0.0), shininess) * 3.0 * (1.0 - info.roughness);
+    const ao = 1.0 - std.clamp(iterations / 64.0, 0.0, 1.0) * 0.4;
+    // The output is sqrt-encoded, so square the sRGB pick (≈ linear) and
+    // rescale so the default gray (0.72) lands exactly where it always did.
+    const base = (info.color * info.color) / 0.72;
+    const specCol = std.mix(d.vec3f(1.0), base, info.metalness);
+    const diffCol = base * (1.0 - info.metalness * 0.85);
+    const lit = (diffCol * (diff * 0.8 + 0.2) + specCol * spec + base * fresnel) * ao + base * info.emission;
+    return std.sqrt(std.max(lit, d.vec3f(0.0)));
+  };
+
+  /**
+   * Physically based shading: GGX key light with soft shadow, sky + studio
+   * reflections, AO. Shadow and AO (geometry only) run before the material is
+   * fetched: holding scene info across a march loop costs registers.
+   * Returns (color, glow) via SceneShade.
+   */
+  const shadeStudio = (pos: d.v3f, N: d.v3f, rd: d.v3f): d.v4f => {
+    "use gpu";
+    const V = rd * -1.0;
+    const L = std.normalize(d.vec3f(-1.2, -3.0, -1.6));
+    const NdotL = std.max(std.dot(N, L), 0.0);
+    let shadow = d.f32(0.0);
+    if (NdotL > 0.0) {
+      shadow = softShadow(pos + N * 0.003, L);
+    }
+    const ao = calcAO(pos, N);
+
+    const info = sceneInfoSlot.$(pos);
+    const albedo = std.pow(std.max(info.color, d.vec3f(0.0)), d.vec3f(2.2));
+    const rough = std.clamp(info.roughness, 0.045, 1.0);
+    const metal = std.clamp(info.metalness, 0.0, 1.0);
+    const F0 = std.mix(d.vec3f(0.04), albedo, metal);
+    const NdotV = std.max(std.dot(N, V), 0.0001);
+
+    let col = albedo * info.emission;
+    if (NdotL > 0.0) {
+      const a2 = rough * rough * rough * rough;
+      const H = std.normalize(L + V);
+      const NdotH = std.max(std.dot(N, H), 0.0);
+      const VdotH = std.max(std.dot(V, H), 0.0);
+      const dd = NdotH * NdotH * (a2 - 1.0) + 1.0;
+      const D = a2 / (3.14159265 * dd * dd);
+      const k = ((rough + 1.0) * (rough + 1.0)) / 8.0;
+      const G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+      const F = F0 + (d.vec3f(1.0) - F0) * std.pow(1.0 - VdotH, 5.0);
+      const spec = (F * (D * G)) / std.max(4.0 * NdotV * NdotL, 0.0001);
+      const kd = (d.vec3f(1.0) - F) * (1.0 - metal);
+      col = col + ((kd * albedo) / 3.14159265 + spec) * (2.6 * NdotL * shadow);
+    }
+    // Hemisphere sky for diffuse ambient ("up" is −Y).
+    const upness = 0.5 - 0.5 * N.y;
+    const sky = std.mix(d.vec3f(0.035, 0.035, 0.04), d.vec3f(0.3, 0.31, 0.34), upness);
+    col = col + albedo * (1.0 - metal) * sky * ao;
+    const Fr = F0 + (std.max(d.vec3f(1.0 - rough), F0) - F0) * std.pow(1.0 - NdotV, 5.0);
+    const glow = info.glow;
+
+    // Reflections: studio softboxes, blurred toward the room tone with
+    // roughness; smooth surfaces also see the scene itself.
+    const R = std.reflect(rd, N);
+    let env = envColor(R);
+    if (rough < 0.35 && qualityUniforms.$.reflSteps > d.f32(0.0)) {
+      const reflRo = pos + N * 0.003;
+      const refl = rayMarchReflection(reflRo, R);
+      if (refl.x <= RAY_MISS_T) {
+        const pRefl = reflRo + R * refl.x;
+        env = envColor(std.reflect(R, calcNormalCheap(pRefl, refl.y))) * 0.5;
+      }
+    }
+    env = std.mix(env, d.vec3f(0.1), std.clamp(rough * 1.3, 0.0, 1.0));
+    col = col + env * Fr * ao;
+    return d.vec4f(std.pow(acesTonemap(col), d.vec3f(1.0 / 2.2)), glow);
+  };
+
   const rayMarch = (ro: d.v3f, rd: d.v3f): d.v2f => {
     "use gpu";
     // Bounding-sphere gate: rays that miss the scene skip marching entirely,
@@ -677,7 +811,7 @@ export function createShader(root: TgpuRoot) {
       }
       const hitP = ro + rd * tPick;
       // 16-bit id; low byte in R and B so BGRA and RGBA targets read the same.
-      const id = sceneInfoSlot.$(hitP).y;
+      const id = sceneInfoSlot.$(hitP).id;
       const hi = std.floor(id / 256.0);
       const lo = (id - hi * 256.0) / 255.0;
       return d.vec4f(lo, hi / 255.0, lo, 1.0);
@@ -700,26 +834,18 @@ export function createShader(root: TgpuRoot) {
       const N = calcNormal(pos);
       const viewDir = d.vec3f(-rd.x, -rd.y, -rd.z);
 
-      if (sceneUniforms.$.renderMode === d.u32(RENDER_MODE_CLASSIC)) {
+      // The scene info (material, glow) is fetched as late as possible: holding
+      // it across a march loop that inlines the scene SDF costs registers.
+      let glow = d.f32(0.0);
+      if (renderModeSlot.$ === RENDER_MODE_CLASSIC) {
         // Classic: single light, no secondary marches — cheap.
-        const iterations = sceneResult.y;
-        // Key light from screen-top (-y), where the camera looks down from.
-        const lightDir = std.normalize(d.vec3f(2.0, -3.0, -1.0));
-        const diff = std.max(std.dot(N, lightDir), 0.0);
-        const fresnel = std.pow(1.0 - std.abs(std.dot(N, viewDir)), 3.0) * 0.5;
-        const halfDir = std.normalize(lightDir + viewDir);
-        const spec = std.pow(std.max(std.dot(N, halfDir), 0.0), 64.0) * 1.5;
-        const ao = 1.0 - std.clamp(iterations / 64.0, 0.0, 1.0) * 0.4;
-        const baseColor = d.vec3f(0.72, 0.72, 0.72);
-        col = std.sqrt(
-          std.max(
-            (baseColor * (diff * 0.8 + 0.2) +
-              d.vec3f(1.0, 1.0, 1.0) * spec +
-              baseColor * fresnel) *
-              ao,
-            d.vec3f(0.0),
-          ),
-        );
+        const info = sceneInfoSlot.$(pos);
+        col = shadeClassic(N, viewDir, sceneResult.y, info);
+        glow = info.glow;
+      } else if (renderModeSlot.$ === RENDER_MODE_STUDIO) {
+        const shaded = shadeStudio(pos, N, rd);
+        col = d.vec3f(shaded.x, shaded.y, shaded.z);
+        glow = shaded.w;
       } else {
         // Chrome: one real reflection bounce sees the scene itself.
         const R = std.reflect(rd, N);
@@ -744,24 +870,44 @@ export function createShader(root: TgpuRoot) {
         const spec = std.pow(std.max(std.dot(N, halfDir), 0.0), 220.0) * 2.5;
 
         const ao = calcAO(pos, N);
+        const info = sceneInfoSlot.$(pos);
+        glow = info.glow;
         const hdr =
-          (reflCol * fresnel + d.vec3f(spec, spec, spec)) *
-          std.mix(0.5, 1.0, ao);
-        col = std.pow(
-          acesTonemap(hdr),
-          d.vec3f(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2),
-        );
+          (reflCol * fresnel + d.vec3f(spec, spec, spec)) * std.mix(0.5, 1.0, ao) +
+          info.color * info.emission;
+        // Tint after tonemapping so bright reflections keep the metal's hue.
+        col =
+          std.pow(acesTonemap(hdr), d.vec3f(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)) *
+          chromeTint(info.color);
       }
 
       // Glow: a soft fresnel rim on selected shapes (constant) and on the
       // hovered one (cross-fading with the one just left); fades across joins.
-      let glow = sceneInfoSlot.$(pos).x;
       if (sceneUniforms.$.selectAll === d.u32(1)) {
         glow = d.f32(1.0);
       }
       if (glow > 0.0) {
         const rim = std.pow(1.0 - std.max(std.dot(N, viewDir), 0.0), 2.5);
         col = col + d.vec3f(0.55, 0.66, 0.85) * ((rim * 0.5 + 0.1) * glow);
+      }
+    }
+
+    // Studio floor: the grid plane catches the key light's soft shadow and
+    // contact occlusion around the scene (background pixels only).
+    if (
+      renderModeSlot.$ === RENDER_MODE_STUDIO &&
+      !sceneHit &&
+      tPlane <= RAY_MISS_T
+    ) {
+      const reach = sceneUniforms.$.boundsRadius;
+      const near = 1.0 - std.smoothstep(reach * 0.6, reach * 2.2, std.length(gridXZ));
+      if (near > 0.001) {
+        const floorP = d.vec3f(gridP.x, -0.002, gridP.z);
+        const L = std.normalize(d.vec3f(-1.2, -3.0, -1.6));
+        const shadow = softShadow(floorP, L);
+        const occl = calcAO(floorP, d.vec3f(0.0, -1.0, 0.0));
+        const lightness = std.mix(0.35, 1.0, shadow) * std.mix(0.45, 1.0, occl);
+        col = col * std.mix(1.0, lightness, near * 0.9) + d.vec3f(0.035) * (near * lightness);
       }
     }
 
@@ -807,7 +953,7 @@ export function createShader(root: TgpuRoot) {
    * Render pipeline for one compiled scene (sceneCompiler.ts `code`). The
    * caller owns caching and async init; buffers above are shared by all.
    */
-  function createScenePipeline(code: string) {
+  function createScenePipeline(code: string, renderMode: number) {
     const decl = tgpu["~unstable"].declare(code).$uses({
       [DATA_IDENT]: sceneData,
       [IMAGE_TEX_IDENT]: imageSdfView,
@@ -816,12 +962,14 @@ export function createShader(root: TgpuRoot) {
     const sdf = tgpu.fn([d.vec3f], d.f32)`(p) { DS_SCENE return ds_sdScene(p); }`.$uses({
       DS_SCENE: decl,
     });
-    const info = tgpu.fn([d.vec3f], d.vec4f)`(p) { DS_SCENE return ds_sceneInfo(p); }`.$uses({
-      DS_SCENE: decl,
-    });
+    const info = tgpu.fn([d.vec3f], SceneInfo)`(p) {
+      DS_SCENE let i = ds_sceneInfo(p);
+      return Info(i.glow, i.id, i.color, i.roughness, i.metalness, i.emission);
+    }`.$uses({ DS_SCENE: decl, Info: SceneInfo });
     return root
       .with(sceneSdfSlot, sdf)
       .with(sceneInfoSlot, info)
+      .with(renderModeSlot, renderMode)
       .createRenderPipeline({
         vertex: fullScreenTriangle,
         fragment,

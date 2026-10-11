@@ -126,6 +126,9 @@ function SceneNode({
       ) : (
         <span className="scene-item-name">{data.name}</span>
       )}
+      {data.color && !isEditing && (
+        <span className="scene-item-color" style={{ background: data.color }} aria-hidden />
+      )}
       {showOp && data.op && (
         <span className="scene-item-icon scene-item-icon--op" title={data.op}>
           <OpIcon op={data.op} />

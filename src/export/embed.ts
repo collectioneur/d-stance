@@ -10,11 +10,19 @@
  * shading; runtime.js is inlined verbatim and picks WebGPU or WebGL2.
  */
 import runtimeSource from "./runtime.js?raw";
-import { renderGlsl, renderShadertoy, renderWgsl, type RenderConstants } from "./renderTemplates";
-import { generateSdfCode, PLACEHOLDER } from "../utils/generateSdfCode";
-import { sceneBoundRadius, sceneFitSphere } from "../gpu/bounds";
+import {
+  renderGlsl,
+  renderShadertoy,
+  renderWgsl,
+  type EmbedStyle,
+  type RenderConstants,
+  type SceneFns,
+} from "./renderTemplates";
+import { generateMaterialCode, generateSdfCode, PLACEHOLDER } from "../utils/generateSdfCode";
+import { maxAbsScale, sceneBoundRadius, sceneFitSphere, shapeBoundRadius } from "../gpu/bounds";
+import { itemLocalToWorldPosition } from "../gpu/gizmo";
 import { IMAGE_SDF_PREFIX } from "../utils/imageSdf";
-import type { SceneItem, SceneRoot } from "../store/sceneStore";
+import type { ObjectGroup, SceneItem, SceneRoot } from "../store/sceneStore";
 import type {
   ExportBackground,
   ExportFormat,
@@ -25,7 +33,7 @@ import type {
 import type { ViewState } from "../store/viewStore";
 
 export interface EmbedOptions {
-  style: "classic" | "chrome";
+  style: EmbedStyle;
   background: ExportBackground;
   motion: ExportMotion;
   quality: ExportQuality;
@@ -49,10 +57,10 @@ export interface EmbedExport {
 }
 
 /** "balanced" is the editor's default preset ("high"): the embed looks like the viewport. */
-const QUALITY: Record<ExportQuality, { maxSteps: number; reflSteps: number; maxDpr: number }> = {
-  fast: { maxSteps: 32, reflSteps: 12, maxDpr: 1.5 },
-  balanced: { maxSteps: 48, reflSteps: 24, maxDpr: 2 },
-  best: { maxSteps: 96, reflSteps: 32, maxDpr: 3 },
+const QUALITY: Record<ExportQuality, { maxSteps: number; reflSteps: number; shadowSteps: number; maxDpr: number }> = {
+  fast: { maxSteps: 32, reflSteps: 12, shadowSteps: 16, maxDpr: 1.5 },
+  balanced: { maxSteps: 48, reflSteps: 24, shadowSteps: 24, maxDpr: 2 },
+  best: { maxSteps: 96, reflSteps: 32, shadowSteps: 32, maxDpr: 3 },
 };
 
 const AUTO_ROTATE: Record<ExportMotion, number> = { still: 0, slow: 0.15, spin: 0.5 };
@@ -88,28 +96,25 @@ function slug(name: string): string {
 const runtimeInline = runtimeSource.replace(/^export function mount/m, "function mount");
 
 export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport {
-  const sdf = generateSdfCode(root, null);
-  const fnName = sdf.fnName;
   const quality = QUALITY[opts.quality];
+  const fit = sceneFitSphere(root.items);
   const constants: RenderConstants = {
     style: opts.style,
     background: opts.background,
     maxSteps: quality.maxSteps,
     reflSteps: quality.reflSteps,
+    shadowSteps: quality.shadowSteps,
     bounds: root.items.length > 0 ? sceneBoundRadius(root.items) + 0.05 : 0,
+    floorY: floorY(root.items),
+    floorCenter: fit?.center ?? [0, 0, 0],
+    floorReach: Math.max(fit?.radius ?? 1, 0.2),
   };
-  // An empty scene still needs a valid SDF function to compile.
-  const emptyWgsl = `fn ${fnName}(p: vec3f) -> f32 {\n  return 1e10;\n}`;
-  const emptyGlsl = `float ${fnName}(vec3 p) {\n  return 1e10;\n}`;
-  const hasShapes = sdf.wgsl !== PLACEHOLDER;
-  const sceneWgsl = hasShapes ? sdf.wgsl.replace(DATA_URL_LINE, "") : emptyWgsl;
-  const sceneGlsl = hasShapes ? sdf.glsl.replace(DATA_URL_LINE, "") : emptyGlsl;
-
+  const fns = sceneFns(root);
   const images = collectImages(root.items);
   const view = exportView(root, opts);
   const scene = {
-    wgsl: renderWgsl(sceneWgsl, fnName, constants),
-    glsl: renderGlsl(sceneGlsl, fnName, constants),
+    wgsl: renderWgsl(fns.wgsl, constants),
+    glsl: renderGlsl(fns.glsl, constants),
     images,
     view,
   };
@@ -155,14 +160,8 @@ ${html.replace(' style="display:block;width:100%;height:420px"', "")}</body>
 `;
 
   const dropped = countImages(root.items);
-  const toy = dropped > 0 ? generateSdfCode({ ...root, items: withoutImages(root.items) }, null) : sdf;
-  const toyHasShapes = toy.glsl !== PLACEHOLDER;
-  const shadertoy = renderShadertoy(
-    toyHasShapes ? toy.glsl : `float ${toy.fnName}(vec3 p) {\n  return 1e10;\n}`,
-    toy.fnName,
-    constants,
-    view,
-  );
+  const toyFns = dropped > 0 ? sceneFns({ ...root, items: withoutImages(root.items) }) : fns;
+  const shadertoy = renderShadertoy(toyFns.glsl, constants, view);
 
   return {
     html,
@@ -194,6 +193,46 @@ function exportView(root: SceneRoot, opts: EmbedOptions): ExportView {
     target: sphere.center.map(round) as [number, number, number],
     fit: radius,
   };
+}
+
+/** Scene SDF + material functions per language; empty scenes get stubs that compile. */
+function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
+  const sdf = generateSdfCode(root, null);
+  const mat = generateMaterialCode(root);
+  const empty = sdf.wgsl === PLACEHOLDER;
+  const name = sdf.fnName;
+  return {
+    wgsl: {
+      sdf: empty ? `fn ${name}(p: vec3f) -> f32 {\n  return 1e10;\n}` : sdf.wgsl.replace(DATA_URL_LINE, ""),
+      sdfName: name,
+      material: mat.wgsl,
+      materialName: mat.fnName,
+    },
+    glsl: {
+      sdf: empty ? `float ${name}(vec3 p) {\n  return 1e10;\n}` : sdf.glsl.replace(DATA_URL_LINE, ""),
+      sdfName: name,
+      material: mat.glsl,
+      materialName: mat.fnName,
+    },
+  };
+}
+
+/** Lowest point of the scene (+Y is down): where the studio floor goes. */
+function floorY(items: SceneItem[]): number {
+  let y = -Infinity;
+  const walk = (list: SceneItem[], ancestors: ObjectGroup[]) => {
+    for (const item of list) {
+      if (item.kind === "group") {
+        walk(item.items, [...ancestors, item]);
+        continue;
+      }
+      let r = shapeBoundRadius(item);
+      for (const g of ancestors) r *= maxAbsScale(g);
+      y = Math.max(y, itemLocalToWorldPosition(item.position, ancestors)[1] + r);
+    }
+  };
+  walk(items, []);
+  return Number.isFinite(y) ? Math.round(y * 1e4) / 1e4 : 0;
 }
 
 function collectImages(items: SceneItem[], out: string[] = []): string[] {

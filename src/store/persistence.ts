@@ -8,14 +8,16 @@ import {
 } from "./sceneStore";
 import { temporalStore } from "./sceneStore";
 import { isImageSdfDataUrl } from "../utils/imageSdf";
+import { sanitizeMaterial } from "./material";
 
 /**
  * v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image".
  * v6: `image.round` (edge rounding radius, optional, default 0).
+ * v7: optional `material` on layers and groups.
  */
-export const SCHEMA_VERSION = 6;
-/** v4/v5 are strict subsets of v6 (no image layers / no `image.round`), so they load as-is. */
-const ACCEPTED_VERSIONS = new Set([4, 5, SCHEMA_VERSION]);
+export const SCHEMA_VERSION = 7;
+/** v4–v6 are strict subsets of v7 (each only lacks optional fields), so they load as-is. */
+const ACCEPTED_VERSIONS = new Set([4, 5, 6, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -30,6 +32,7 @@ type LooseItem = {
   shapeType?: unknown;
   scale?: unknown;
   image?: unknown;
+  material?: unknown;
   items?: unknown;
 };
 
@@ -70,6 +73,11 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
         item.scale = (item.scale as number[]).map((n) =>
           Math.max(0.01, Math.abs(n)),
         );
+      }
+      if ("material" in item) {
+        const material = sanitizeMaterial(item.material);
+        if (material) item.material = material;
+        else delete item.material;
       }
       if (item.kind === "group" && Array.isArray(item.items)) {
         item.items = fixItems(item.items as LooseItem[]);

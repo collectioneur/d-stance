@@ -8,6 +8,7 @@ import {
   type ShapeType,
 } from "../store/sceneStore";
 import { IMAGE_SDF_RES, IMAGE_SDF_STEP_PX } from "./imageSdf";
+import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { GLSL_HELPERS, TG_HELPERS, WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
 
 export type CodeLang = "typegpu" | "wgsl" | "glsl";
@@ -62,6 +63,8 @@ interface ShapeRhs {
   imageIndex: number;
   /** Edge rounding radius for shape "image" (local units). */
   imageRound: number;
+  /** Own material, else nearest ancestor group's, else the default. */
+  material: Material;
 }
 interface VarRhs {
   kind: "var";
@@ -112,7 +115,13 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   let accN = 0;
   let ptN = 0;
 
-  function shapeRhs(layer: ShapeLayer, point: string, accScl: V3, dropPos: boolean): ShapeRhs {
+  function shapeRhs(
+    layer: ShapeLayer,
+    point: string,
+    accScl: V3,
+    dropPos: boolean,
+    inherited: Material,
+  ): ShapeRhs {
     usedShapes.add(layer.shapeType);
     const rot = isZero(layer.rotation) ? null : toRad(layer.rotation);
     if (rot) usesRotation = true;
@@ -133,6 +142,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       params: layer.params,
       imageIndex,
       imageRound: Math.max(0, layer.image?.round ?? 0),
+      material: layer.material ?? inherited,
     };
   }
 
@@ -147,15 +157,15 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     return name;
   }
 
-  function walkItems(items: SceneItem[], point: string, accScl: V3): string | null {
+  function walkItems(items: SceneItem[], point: string, accScl: V3, inherited: Material): string | null {
     let acc: string | null = null;
     for (const item of items) {
       let rhs: Rhs | null = null;
       if (item.kind === "layer") {
-        rhs = shapeRhs(item, point, accScl, false);
+        rhs = shapeRhs(item, point, accScl, false, inherited);
       } else if (item.items.length > 0) {
         const childPoint = groupPoint(item, point, false);
-        const childAcc = walkItems(item.items, childPoint, mulV(accScl, item.scale));
+        const childAcc = walkItems(item.items, childPoint, mulV(accScl, item.scale), item.material ?? inherited);
         if (childAcc) rhs = { kind: "var", name: childAcc };
       }
       if (!rhs) continue;
@@ -171,16 +181,31 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   }
 
   const selected = selectedItemId ? findItemIn(root.items, selectedItemId) : null;
+  const inheritedAt = (id: string) => {
+    let found: Material = DEFAULT_MATERIAL;
+    const walk = (items: SceneItem[], inherited: Material): boolean => {
+      for (const item of items) {
+        if (item.id === id) {
+          found = inherited;
+          return true;
+        }
+        if (item.kind === "group" && walk(item.items, item.material ?? inherited)) return true;
+      }
+      return false;
+    };
+    walk(root.items, DEFAULT_MATERIAL);
+    return found;
+  };
   let result: string | null;
   if (selected?.kind === "layer") {
     const acc = `d${accN++}`;
-    stmts.push({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true) });
+    stmts.push({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true, inheritedAt(selected.id)) });
     result = acc;
   } else if (selected?.kind === "group") {
     const point = groupPoint(selected, "p", true);
-    result = walkItems(selected.items, point, selected.scale);
+    result = walkItems(selected.items, point, selected.scale, selected.material ?? inheritedAt(selected.id));
   } else {
-    result = walkItems(root.items, "p", [1, 1, 1]);
+    result = walkItems(root.items, "p", [1, 1, 1], DEFAULT_MATERIAL);
   }
 
   return { stmts, result, usedShapes, usesRotation, usesSmin, images };
@@ -388,6 +413,102 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   return [...helpers, `${syn.fnOpen(fnName)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
 }
 
+// ── Material function (embed renderer) ──────────────────────────────────────
+// Recomputes the same CSG and carries the material along it, mirroring the
+// viewport (sceneCompiler.ts combineStmt): union / intersect take the winning
+// operand's material, smooth ops blend with the smooth-min weight, subtracts
+// keep the cut shape's material. Evaluated once per pixel at the hit.
+
+interface MaterialSyntax {
+  decl: string;
+  lit(m: Material): string;
+  defMat(name: string, expr: string): string;
+  tempF(name: string, expr: string): string;
+  tempM(name: string, expr: string): string;
+  fnOpen(fn: string): string;
+}
+
+const WGSL_MAT: MaterialSyntax = {
+  decl: `struct SdfMaterial {
+  color: vec3f,   // sRGB
+  roughness: f32,
+  metalness: f32,
+  emission: f32,
+}
+
+fn mixMaterial(a: SdfMaterial, b: SdfMaterial, t: f32) -> SdfMaterial {
+  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t));
+}
+
+// Weight of b in smin(a, b, k): 0 = all a, 1 = all b.
+fn sminWeight(a: f32, b: f32, k: f32) -> f32 {
+  return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
+}`,
+  lit: (m) =>
+    `SdfMaterial(vec3f(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmt(m.emission)})`,
+  defMat: (n, e) => `  var ${n} = ${e};`,
+  tempF: (n, e) => `let ${n} = ${e};`,
+  tempM: (n, e) => `let ${n} = ${e};`,
+  fnOpen: (fn) => `fn ${fn}(p: vec3f) -> SdfMaterial {`,
+};
+
+const GLSL_MAT: MaterialSyntax = {
+  decl: `struct SdfMaterial {
+  vec3 color; // sRGB
+  float roughness;
+  float metalness;
+  float emission;
+};
+
+SdfMaterial mixMaterial(SdfMaterial a, SdfMaterial b, float t) {
+  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t));
+}
+
+// Weight of b in smin(a, b, k): 0 = all a, 1 = all b.
+float sminWeight(float a, float b, float k) {
+  return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
+}`,
+  lit: (m) =>
+    `SdfMaterial(vec3(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmt(m.emission)})`,
+  defMat: (n, e) => `  SdfMaterial ${n} = ${e};`,
+  tempF: (n, e) => `float ${n} = ${e};`,
+  tempM: (n, e) => `SdfMaterial ${n} = ${e};`,
+  fnOpen: (fn) => `SdfMaterial ${fn}(vec3 p) {`,
+};
+
+const matName = (acc: string) => `m${acc.slice(1)}`;
+
+function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSyntax): string {
+  const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn.lit(rhs.material));
+  const body: string[] = [];
+  if (!ir.result) {
+    body.push(`  return ${msyn.lit(DEFAULT_MATERIAL)};`);
+  } else {
+    for (const stmt of ir.stmts) {
+      if (stmt.t === "point") {
+        body.push(syn.pointStmt(stmt.name, pointExpr(syn, stmt)));
+      } else if (stmt.t === "def") {
+        body.push(syn.defStmt(stmt.name, rhsExpr(syn, stmt.rhs)));
+        body.push(msyn.defMat(matName(stmt.name), mat(stmt.rhs)));
+      } else {
+        const a = stmt.name;
+        const m = matName(a);
+        const k = fmt(stmt.k);
+        let update = "";
+        if (stmt.op === "union") update = ` if (t < ${a}) { ${m} = tm; }`;
+        else if (stmt.op === "intersect") update = ` if (t > ${a}) { ${m} = tm; }`;
+        else if (stmt.op === "sUnion") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(${a}, t, ${k}));`;
+        else if (stmt.op === "sIntersect") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(-${a}, -t, ${k}));`;
+        body.push(
+          `  { ${msyn.tempF("t", rhsExpr(syn, stmt.rhs))} ${msyn.tempM("tm", mat(stmt.rhs))}${update} ${a} = ${combineExpr(syn, a, stmt.op, stmt.k, "t")}; }`,
+        );
+      }
+    }
+    body.push(`  return ${matName(ir.result)};`);
+  }
+  return [msyn.decl, `${msyn.fnOpen(fnName)}\n${body.join("\n")}\n}`].join("\n\n");
+}
+
 const TG_SYNTAX: Syntax = {
   vec3: (v) => `d.vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `d.vec2f(${fmt(x)}, ${fmt(y)})`,
@@ -462,5 +583,26 @@ export function generateSdfCode(root: SceneRoot, selectedItemId: string | null):
     typegpu: render(ir, fnName, TG_SYNTAX),
     wgsl: render(ir, fnName, WGSL_SYNTAX),
     glsl: render(ir, fnName, GLSL_SYNTAX),
+  };
+}
+
+export interface GeneratedMaterial {
+  /** `${sdfFnName}Material(p)` → SdfMaterial at a surface point. */
+  fnName: string;
+  wgsl: string;
+  glsl: string;
+}
+
+/**
+ * Material function for the whole scene, pairing with `generateSdfCode(root,
+ * null)`'s SDF (same name + "Material"). Needs that SDF's helpers in scope.
+ */
+export function generateMaterialCode(root: SceneRoot): GeneratedMaterial {
+  const fnName = `${sdfFnName(root.name)}Material`;
+  const ir = buildIr(root, null);
+  return {
+    fnName,
+    wgsl: renderMaterial(ir, fnName, WGSL_SYNTAX, WGSL_MAT),
+    glsl: renderMaterial(ir, fnName, GLSL_SYNTAX, GLSL_MAT),
   };
 }

@@ -7,7 +7,8 @@ export type QualityPreset = {
   dprCap: number;
   maxSteps: number;
   reflSteps: number;
-  outlineSteps: number;
+  /** Soft-shadow march steps (Studio render mode). */
+  shadowSteps: number;
   fpsCap: number;
 };
 
@@ -18,7 +19,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     dprCap: 0.6,
     maxSteps: 24,
     reflSteps: 0,
-    outlineSteps: 12,
+    shadowSteps: 12,
     fpsCap: 60,
   },
   {
@@ -27,7 +28,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     dprCap: 0.9,
     maxSteps: 32,
     reflSteps: 12,
-    outlineSteps: 16,
+    shadowSteps: 16,
     fpsCap: 60,
   },
   {
@@ -36,7 +37,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     dprCap: 1.2,
     maxSteps: 40,
     reflSteps: 18,
-    outlineSteps: 20,
+    shadowSteps: 20,
     fpsCap: 60,
   },
   {
@@ -45,7 +46,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     dprCap: 1.5,
     maxSteps: 48,
     reflSteps: 24,
-    outlineSteps: 24,
+    shadowSteps: 24,
     fpsCap: 60,
   },
   {
@@ -54,7 +55,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     dprCap: Infinity,
     maxSteps: 96,
     reflSteps: 32,
-    outlineSteps: 32,
+    shadowSteps: 32,
     fpsCap: 60,
   },
 ] as const;
@@ -100,8 +101,8 @@ export function assertQualityInvariants(): void {
     if (cur.reflSteps < prev.reflSteps) {
       throw new Error(`reflSteps not monotonic at ${cur.id}`);
     }
-    if (cur.outlineSteps <= prev.outlineSteps) {
-      throw new Error(`outlineSteps not monotonic at ${cur.id}`);
+    if (cur.shadowSteps <= prev.shadowSteps) {
+      throw new Error(`shadowSteps not monotonic at ${cur.id}`);
     }
     if (cur.fpsCap < prev.fpsCap) {
       throw new Error(`fpsCap not monotonic at ${cur.id}`);

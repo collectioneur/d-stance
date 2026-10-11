@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { generateSdfCode, PLACEHOLDER } from "./generateSdfCode";
+import { generateMaterialCode, generateSdfCode, PLACEHOLDER } from "./generateSdfCode";
 import { group, kitchenSink, scene, shape } from "../test/fixtures";
 
 describe("generateSdfCode", () => {
@@ -54,5 +54,43 @@ describe("generateSdfCode", () => {
     const pos = wgsl.indexOf("- vec3f(0.0, 1.0, 0.0)");
     expect(rot).toBeGreaterThan(-1);
     expect(pos).toBeGreaterThan(rot);
+  });
+});
+
+describe("generateMaterialCode", () => {
+  test("default material when nothing is set", () => {
+    const out = generateMaterialCode(scene([shape("sphere")], "Plain"));
+    expect(out.fnName).toBe("sdPlainMaterial");
+    expect(out.wgsl).toContain("var m0 = SdfMaterial(vec3f(0.72, 0.72, 0.72), 0.5, 0.0, 0.0);");
+    expect(out.wgsl).toContain("return m0;");
+  });
+
+  test("each op carries materials like the viewport", () => {
+    const m = (r: number) => ({ color: [r, 0, 0] as [number, number, number], roughness: 0.5, metalness: 0, emission: 0 });
+    const root = scene([
+      shape("box", { material: m(0.1) }),
+      shape("sphere", { op: "union", material: m(0.2) }),
+      shape("sphere", { op: "subtract", material: m(0.3) }),
+      shape("sphere", { op: "intersect", material: m(0.4) }),
+      shape("sphere", { op: "sUnion", material: m(0.5) }),
+      shape("sphere", { op: "sIntersect", material: m(0.6) }),
+    ]);
+    const wgsl = generateMaterialCode(root).wgsl;
+    expect(wgsl).toContain("if (t < d0) { m0 = tm; }");
+    expect(wgsl).toContain("if (t > d0) { m0 = tm; }");
+    expect(wgsl).toContain("m0 = mixMaterial(m0, tm, sminWeight(d0, t, 0.1));");
+    expect(wgsl).toContain("m0 = mixMaterial(m0, tm, sminWeight(-d0, -t, 0.1));");
+    // subtract: the cut keeps the body's material
+    const subLine = wgsl.split("\n").find((l) => l.includes("vec3f(0.3, 0.0, 0.0)"))!;
+    expect(subLine).not.toContain("m0 = tm");
+  });
+
+  test("group materials apply to children without their own", () => {
+    const blue = { color: [0, 0, 1] as [number, number, number], roughness: 0.5, metalness: 0, emission: 0 };
+    const own = { color: [0, 1, 0] as [number, number, number], roughness: 0.5, metalness: 0, emission: 0 };
+    const out = generateMaterialCode(scene([group([shape("sphere"), shape("box", { material: own })], { material: blue })]));
+    expect(out.wgsl).toContain("vec3f(0.0, 0.0, 1.0)");
+    expect(out.wgsl).toContain("vec3f(0.0, 1.0, 0.0)");
+    expect(out.glsl).toContain("SdfMaterial m0 = SdfMaterial(vec3(0.0, 0.0, 1.0)");
   });
 });

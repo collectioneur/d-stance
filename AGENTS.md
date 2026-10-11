@@ -16,6 +16,7 @@ Agents break this repo by desyncing **cross-file contracts**, not by missing a T
 | Tree / DnD / add / remove | `src/scene/arboristAdapter.ts`, `countInstructions`, caps in `sceneStore.ts` |
 | Scene SDF codegen / culling / pick / highlight | `src/gpu/sceneCompiler.ts` (+ its tests) and the program cache in `src/gpu/useGpu.ts` |
 | Embed / Shadertoy export | `src/export/` (`embed.ts`, `renderTemplates.ts`, `runtime.js`) |
+| Materials / render modes | `src/store/material.ts`, compiler `MAT` slots + `combineStmt`, `shader.ts` (`shadeClassic` / `shadeStudio` / chrome), `src/export/renderTemplates.ts`, `generateMaterialCode` |
 | Save / load / URL hash | `src/store/persistence.ts` (`SCHEMA_VERSION`, `normalizePersisted`) |
 | Quality presets | `src/utils/quality.ts` (`assertQualityInvariants`) |
 | UI | Changed flow in the browser. Screenshot ≠ verification. |
@@ -59,7 +60,7 @@ A shape is not registered until **all** of these know it, with the same key:
 - Values are vec4f slots in `dsData` (uniform, `DATA_SLOTS` = 4096 = 64 KiB). Leaf: 3 rows (+offset in `.w`), params, misc `(factor, smoothK, highlight, _)`, bound sphere, image extras. Group: misc, bound. Chunk: bound.
 - GPU eval per leaf: `q = (row0·p, row1·p, row2·p) + offset`, `dist = sd(q, params) * factor`.
 - Culling: union / sUnion siblings are gated by their bounding sphere against the running result (`bound < acc (+k)`); subtract / intersect children always evaluate. The head of a list may stand in its sphere beyond `CULL_DIST` only if every op up to the root is hard union. Long hard-union runs are split into list-order chunks (positions never change the code). A bound radius that is too small silently clips geometry — see `bounds.ts`.
-- `ds_sceneInfo` (evaluated once per pixel at the hit) gives highlight glow and the pick id. Pick ids are 16-bit: low byte in R and B, high byte in G (`readPickIdFromBytes`).
+- `ds_sceneInfo` (evaluated once per pixel at the hit) gives highlight glow, the pick id and the blended material (`DsInfo` → TypeGPU `SceneInfo`). Pick ids are 16-bit: low byte in R and B, high byte in G (`readPickIdFromBytes`).
 - Generated helpers are prefixed `ds_` so they cannot collide with names TypeGPU generates.
 - The program on screen keeps its own `CompiledScene`: values are uploaded only when they match the active program; pick ids resolve against the program that drew them.
 - Frames are drawn only when an input changed (camera, size, values, program, gizmo mode, images). Anything new that changes the image must feed that signature in `frame()`.
@@ -67,6 +68,13 @@ A shape is not registered until **all** of these know it, with the same key:
 Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake.ts`) into `row0/1/2`, `offset`, `factor`.
 
 Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` live in `sdImageField` (`src/sdf/primitives.ts`, shared by viewport and export) and `imageSdf.ts`; change one, change both. The layer's `params[3]` is the invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`); the compiler writes `(round, invert, layer, hasImage)` into the leaf's extra slot. Texture layers are assigned per distinct `image.sdf` string by `syncImageSlots` before every compile.
+
+### 2a. Materials and render modes
+
+- `Material` (`src/store/material.ts`): sRGB `color`, `roughness`, `metalness`, `emission`. Optional on shapes and groups; a shape without one uses the nearest ancestor group's, then `DEFAULT_MATERIAL` (0.72 gray — the editor's original look; Classic/Chrome with the default must stay pixel-identical to before materials). Persisted since schema v7, sanitized by `sanitizeMaterial`.
+- Materials are values (leaf slots `MAT`, `MAT+1`), never code. They travel through the CSG only in the info pass: union/intersect take the winner, smooth ops blend with the smooth-min weight, subtract keeps the body's material. The export's `generateMaterialCode` must follow the same rules.
+- Render mode is a pipeline slot (`renderModeSlot`), not a uniform: each mode is its own cached program, so unused modes cost nothing. Programs are keyed by `mode + code`.
+- Fetch the scene info / material **after** march loops (shadow, AO, reflection). Holding it across a loop that inlines the scene SDF cost 2–4× frame time in crowded scenes.
 
 ### 2b. Embed export
 
@@ -95,7 +103,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 6` (v4/v5 still accepted: strict subsets; v6 adds optional `image.round`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 7` (v4–v6 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.

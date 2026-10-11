@@ -5,7 +5,7 @@ import {
   QUALITY_PRESET_COUNT,
 } from "../utils/quality";
 
-export type RenderMode = "classic" | "chrome";
+export type RenderMode = "classic" | "chrome" | "studio";
 
 interface RenderState {
   renderMode: RenderMode;

@@ -115,3 +115,36 @@ export function crowdScene(count: number, mixed = true) {
   );
   return { id: "root", name: "Crowd", items };
 }
+
+/** Materials showcase: colors, metals, emission, a smooth blend and a cut. */
+export function materialsScene() {
+  const mat = (color: [number, number, number], roughness: number, metalness: number, emission = 0) => ({
+    color,
+    roughness,
+    metalness,
+    emission,
+  });
+  return {
+    id: "root",
+    name: "Materials",
+    items: [
+      layer("sphere", [0.22, 0, 0, 0], { position: [-0.7, -0.22, -0.3] as V3, material: mat([0.86, 0.22, 0.2], 0.25, 0) }),
+      layer("torus", [0.2, 0.07, 0, 0], { position: [0, -0.25, -0.35] as V3, rotation: [70, 0, 0] as V3, material: mat([1, 0.78, 0.34], 0.2, 1) }),
+      layer("capsule", [0.08, 0.15, 0, 0], { position: [0.7, -0.25, -0.3] as V3, material: mat([0.25, 0.85, 1], 0.4, 0, 2.5) }),
+      group(
+        [
+          layer("box", [0.18, 0.18, 0.18, 0], { material: mat([0.2, 0.35, 0.95], 0.4, 0) }),
+          layer("sphere", [0.2, 0, 0, 0], { position: [0.25, -0.1, 0] as V3, op: "sUnion", smoothK: 0.2, material: mat([1, 0.85, 0.1], 0.4, 0) }),
+        ],
+        { position: [-0.45, -0.22, 0.4] as V3 },
+      ),
+      group(
+        [
+          layer("box", [0.2, 0.2, 0.2, 0], { material: mat([0.86, 0.22, 0.2], 0.5, 0) }),
+          layer("sphere", [0.25, 0, 0, 0], { position: [0.12, -0.12, -0.12] as V3, op: "subtract", material: mat([0.1, 0.9, 0.2], 0.5, 0) }),
+        ],
+        { position: [0.45, -0.22, 0.4] as V3, rotation: [0, 30, 0] as V3 },
+      ),
+    ],
+  };
+}
