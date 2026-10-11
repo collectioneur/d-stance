@@ -71,19 +71,18 @@ export type SceneRoot = {
 
 export type SceneContainer = SceneRoot | ObjectGroup;
 
+/**
+ * Scene size budget, counted by `countInstructions` (shapes plus the CSG ops
+ * joining them). Keeps the compiled shader's size, compile time and data
+ * slots (sceneCompiler.ts DATA_SLOTS) in a range that stays interactive.
+ */
 export const MAX_INSTRUCTIONS = 256;
 export const UNDO_LIMIT = 100;
-/** GPU objectInfo buffer slots — only root slot [0] is used for scene render. */
-export const MAX_GPU_OBJECTS = 8;
-/** Max pickable scene items (IDs encoded in 1 byte: 1–255). */
-export const MAX_PICK_OBJECTS = 255;
-/** Packed instruction capacity for the pick CSG buffer (separate from scene). */
-export const MAX_PICK_INSTRUCTIONS = 1024;
-/** Max nested group transform stack depth in shader. */
+/** Max nested group depth (UI and drag-and-drop limit). */
 export const MAX_TRANSFORM_DEPTH = 16;
 /** Distinct image SDF textures per scene (layers of the GPU texture array). */
 export const MAX_IMAGES = 8;
-/** Upper bound for `image.round`; the GPU packs it into params.w (see packImageParams). */
+/** Upper bound for `image.round` (inspector slider range). */
 export const IMAGE_ROUND_MAX = 10;
 
 const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
