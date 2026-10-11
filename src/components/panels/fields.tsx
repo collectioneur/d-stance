@@ -17,17 +17,7 @@ export function common<T>(values: T[]): T | null {
  * (Shift ×10), Enter applies, Escape restores the value at focus. A "mixed"
  * field left empty changes nothing.
  */
-export function NumericInput({
-  label,
-  value,
-  min,
-  max,
-  step = 0.01,
-  decimals,
-  fallback,
-  onChange,
-}: {
-  label: string;
+type NumberProps = {
   /** null = selected items disagree. */
   value: number | null;
   min?: number;
@@ -37,7 +27,29 @@ export function NumericInput({
   /** Value restored when the field is left empty or invalid. */
   fallback?: number;
   onChange: (v: number) => void;
-}) {
+};
+
+export function NumericInput({ label, ...field }: NumberProps & { label: string }) {
+  return (
+    <div className="prop-row">
+      <label className="prop-label">{label}</label>
+      <NumberField {...field} ariaLabel={label} />
+    </div>
+  );
+}
+
+/** The bare input of NumericInput, for compact rows (x / y / z triples). */
+export function NumberField({
+  value,
+  min,
+  max,
+  step = 0.01,
+  decimals,
+  fallback,
+  onChange,
+  ariaLabel,
+  className,
+}: NumberProps & { ariaLabel: string; className?: string }) {
   const [draft, setDraft] = useState<string | null>(null);
   const atFocus = useRef<number | null>(null);
 
@@ -79,10 +91,9 @@ export function NumericInput({
   }
 
   return (
-    <div className="prop-row">
-      <label className="prop-label">{label}</label>
       <input
-        className="prop-input"
+        className={`prop-input${className ? ` ${className}` : ""}`}
+        aria-label={ariaLabel}
         type="number"
         inputMode="decimal"
         value={draft ?? shown}
@@ -104,6 +115,5 @@ export function NumericInput({
           if (n !== null) commit(n);
         }}
       />
-    </div>
   );
 }

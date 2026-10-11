@@ -15,6 +15,7 @@ import { OpIcon } from "../OpIcon";
 import CodeView from "./CodeView";
 import { NumericInput, common } from "./fields";
 import { MaterialFields } from "./MaterialFields";
+import { ModifierFields } from "./ModifierFields";
 
 // ── Shape size field definitions ──────────────────────────────────────────────
 
@@ -287,6 +288,7 @@ function GroupProperties({
       <NumericInput label="Sy" value={group.scale[1]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(1, v)} />
       <NumericInput label="Sz" value={group.scale[2]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(2, v)} />
 
+      {shared.length === 1 && <ModifierFields item={group} />}
       <MaterialFields items={shared} />
     </div>
   );
@@ -414,6 +416,7 @@ function LayerProperties({
         </div>
       )}
 
+      {shared.length === 1 && <ModifierFields item={layer} />}
       <MaterialFields items={shared} />
     </div>
   );
