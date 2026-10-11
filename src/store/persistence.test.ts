@@ -89,3 +89,22 @@ describe("persistence v7 materials", () => {
     expect(decoded?.root.items[0].material).toBeUndefined();
   });
 });
+
+describe("persistence v8 modifiers", () => {
+  test("keeps valid modifier stacks, drops junk", () => {
+    const a = shape("sphere", { id: "a", modifiers: [{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1] }] });
+    const b = shape("box", { id: "b" }) as unknown as Record<string, unknown>;
+    b.modifiers = [{ kind: "nope" }, { kind: "round", radius: -2 }];
+    const c = shape("box", { id: "c" }) as unknown as Record<string, unknown>;
+    c.modifiers = "twist";
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([a, b as never, c as never])));
+    const [x, y, z] = decoded!.root.items;
+    expect(x.modifiers).toEqual([{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1] }]);
+    expect(y.modifiers).toEqual([{ kind: "round", radius: 0 }]);
+    expect("modifiers" in z).toBe(false);
+  });
+
+  test("v7 blobs still load", () => {
+    expect(decodeHash(blob(7, scene([shape("sphere")])))?.root.items).toHaveLength(1);
+  });
+});
