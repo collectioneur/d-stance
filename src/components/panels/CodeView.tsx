@@ -1,17 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSceneStore } from "../../store/sceneStore";
+import { useRenderStore } from "../../store/renderStore";
+import { useExportStore } from "../../store/exportStore";
+import { useViewStore } from "../../store/viewStore";
 import { generateSdfCode, type CodeLang } from "../../utils/generateSdfCode";
+import { exportFileName, generateEmbed } from "../../export/embed";
 import { IMAGE_SDF_PREFIX } from "../../utils/imageSdf";
+import { EmbedPanel } from "./EmbedPanel";
 
 // Baked image PNGs are tens of KB per line: show an ellipsis, copy the real thing.
 const DATA_URL_RE = new RegExp(`${IMAGE_SDF_PREFIX}[A-Za-z0-9+/=]+`, "g");
 const elide = (code: string) => code.replace(DATA_URL_RE, `${IMAGE_SDF_PREFIX}…`);
 
-const LANGS: { id: CodeLang; label: string; shiki: string }[] = [
-  { id: "typegpu", label: "TypeGPU", shiki: "typescript" },
-  { id: "wgsl", label: "WGSL", shiki: "wgsl" },
-  { id: "glsl", label: "GLSL", shiki: "glsl" },
+type Tab = "embed" | "shadertoy" | CodeLang;
+
+/** Embed / Shadertoy export the whole scene; the SDF tabs follow the selection. */
+const LANGS: { id: Tab; label: string; shiki: string; title: string }[] = [
+  { id: "embed", label: "Embed", shiki: "html", title: "Drop-in scene for any web page" },
+  { id: "shadertoy", label: "Shadertoy", shiki: "glsl", title: "Paste into Shadertoy's Image tab" },
+  { id: "typegpu", label: "TypeGPU", shiki: "typescript", title: "SDF function (selection or scene)" },
+  { id: "wgsl", label: "WGSL", shiki: "wgsl", title: "SDF function (selection or scene)" },
+  { id: "glsl", label: "GLSL", shiki: "glsl", title: "SDF function (selection or scene)" },
 ];
+
+const LS_TAB = "d-stance_code_tab";
+
+function loadTab(): Tab {
+  try {
+    const t = localStorage.getItem(LS_TAB);
+    if (LANGS.some((l) => l.id === t)) return t as Tab;
+  } catch {
+    /* ignore */
+  }
+  return "embed";
+}
 
 // ── Lazy shiki highlighter (loaded on first Code tab open) ───────────────────
 
@@ -21,17 +43,19 @@ let highlighterPromise: Promise<Highlighter> | null = null;
 
 function getHighlighter(): Promise<Highlighter> {
   highlighterPromise ??= (async () => {
-    const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, ts, wgsl, glsl, theme] =
+    const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, ts, wgsl, glsl, html, js, theme] =
       await Promise.all([
         import("shiki/core"),
         import("shiki/engine/javascript"),
         import("@shikijs/langs/typescript"),
         import("@shikijs/langs/wgsl"),
         import("@shikijs/langs/glsl"),
+        import("@shikijs/langs/html"),
+        import("@shikijs/langs/javascript"),
         import("@shikijs/themes/github-dark-default"),
       ]);
     return createHighlighterCore({
-      langs: [ts.default, wgsl.default, glsl.default],
+      langs: [ts.default, wgsl.default, glsl.default, html.default, js.default],
       themes: [theme.default],
       engine: createJavaScriptRegexEngine({ forgiving: true }),
     });
@@ -42,17 +66,61 @@ function getHighlighter(): Promise<Highlighter> {
 export default function CodeView() {
   const root = useSceneStore((s) => s.root);
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
-  const [lang, setLang] = useState<CodeLang>("typegpu");
+  const renderMode = useRenderStore((s) => s.renderMode);
+  const view = useViewStore();
+  const { look, background, motion, quality, format, framing } = useExportStore();
+  const [lang, setLangState] = useState<Tab>(loadTab);
   const [copied, setCopied] = useState(false);
   const [html, setHtml] = useState<string | null>(null);
 
-  const generated = useMemo(() => generateSdfCode(root, selectedItemId), [root, selectedItemId]);
-  const code = generated[lang];
-  const shown = useMemo(() => elide(code), [code]);
+  const setLang = (t: Tab) => {
+    setLangState(t);
+    try {
+      localStorage.setItem(LS_TAB, t);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const isScene = lang === "embed" || lang === "shadertoy";
+  const generated = useMemo(
+    () => (isScene ? null : generateSdfCode(root, selectedItemId)),
+    [isScene, root, selectedItemId],
+  );
+  const exp = useMemo(
+    () =>
+      isScene
+        ? generateEmbed(root, {
+            style: look === "editor" ? renderMode : look,
+            background,
+            motion,
+            quality,
+            framing,
+            view: { rotX: view.rotX, rotY: view.rotY, distance: view.distance },
+          })
+        : null,
+    [isScene, root, look, renderMode, background, motion, quality, framing, view.rotX, view.rotY, view.distance],
+  );
+  const code = exp
+    ? lang === "shadertoy"
+      ? exp.shadertoy
+      : format === "module"
+        ? exp.module
+        : exp.html
+    : generated![lang as CodeLang];
+  const shikiLang =
+    lang === "embed" && format === "module" ? "javascript" : LANGS.find((l) => l.id === lang)!.shiki;
+  const shownNow = useMemo(() => elide(code), [code]);
+  // Highlighting a full embed takes a while: wait until edits settle.
+  const [shown, setShown] = useState(shownNow);
+  useEffect(() => {
+    if (shown === shownNow) return;
+    const id = setTimeout(() => setShown(shownNow), isScene ? 250 : 0);
+    return () => clearTimeout(id);
+  }, [shownNow, shown, isScene]);
 
   useEffect(() => {
     let cancelled = false;
-    const shikiLang = LANGS.find((l) => l.id === lang)!.shiki;
     getHighlighter().then(
       (hl) => {
         if (!cancelled)
@@ -65,7 +133,7 @@ export default function CodeView() {
     return () => {
       cancelled = true;
     };
-  }, [shown, lang]);
+  }, [shown, shikiLang]);
 
   useEffect(() => {
     if (!copied) return;
@@ -96,7 +164,7 @@ export default function CodeView() {
     strip.scrollLeft = drag.current.startScroll - dx;
   }
 
-  function selectLang(id: CodeLang) {
+  function selectLang(id: Tab) {
     if (drag.current.moved) return;
     setLang(id);
   }
@@ -113,12 +181,20 @@ export default function CodeView() {
           <button
             key={l.id}
             className={`code-lang${lang === l.id ? " code-lang--active" : ""}`}
+            title={l.title}
             onClick={() => selectLang(l.id)}
           >
             {l.label}
           </button>
         ))}
       </div>
+      {lang === "embed" && exp && <EmbedPanel exp={exp} fileName={exportFileName(root, format)} />}
+      {lang === "shadertoy" && exp && exp.shadertoyDropped > 0 && (
+        <p className="code-note">
+          {exp.shadertoyDropped} image layer{exp.shadertoyDropped > 1 ? "s are" : " is"} left out — Shadertoy
+          cannot load custom textures.
+        </p>
+      )}
       <div className="code-body">
         <button
           className="code-copy-btn"
@@ -126,10 +202,10 @@ export default function CodeView() {
         >
           {copied ? "Copied!" : "Copy"}
         </button>
-        {html ? (
+        {html && shown === shownNow ? (
           <div className="code-pre" dangerouslySetInnerHTML={{ __html: html }} />
         ) : (
-          <pre className="code-pre">{shown}</pre>
+          <pre className="code-pre">{shownNow}</pre>
         )}
       </div>
     </div>

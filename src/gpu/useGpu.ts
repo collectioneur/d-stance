@@ -20,6 +20,7 @@ import {
 } from "../store/sceneStore";
 import { useGizmoStore } from "../store/gizmoStore";
 import { useRenderStore, type RenderMode } from "../store/renderStore";
+import { DEFAULT_VIEW, useViewStore } from "../store/viewStore";
 import { QUALITY_PRESETS, dprForPreset } from "../utils/quality";
 import { clientToPickPixel, getCanvasAspect } from "./camera";
 import {
@@ -328,10 +329,18 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let dragged = false;
       let dragStartX = 0;
       let dragStartY = 0;
-      let rotX = 0.3;
       // Looking down at the scene (+y is down on screen), grid plane in view.
-      let rotY = 0.4;
-      let distance = 2.5;
+      let rotX = DEFAULT_VIEW.rotX;
+      let rotY = DEFAULT_VIEW.rotY;
+      let distance = DEFAULT_VIEW.distance;
+      useViewStore.setState({ ...DEFAULT_VIEW });
+      const publishView = () => useViewStore.setState({ rotX, rotY, distance });
+      // Wheel zoom fires in bursts: publish once it settles.
+      let publishTimer: ReturnType<typeof setTimeout> | undefined;
+      const publishViewSoon = () => {
+        clearTimeout(publishTimer);
+        publishTimer = setTimeout(publishView, 250);
+      };
       /** Live orbit preview while dragging; cleared on pointer up. */
       let orbitPreviewMouse: ReturnType<typeof d.vec2f> | null = null;
       let orbitPreviewRot: [number, number] | null = null;
@@ -1100,6 +1109,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         if (dragged) {
           rotX += ((e.clientX - dragStartX) / window.innerWidth) * Math.PI * 2;
           rotY += ((e.clientY - dragStartY) / window.innerHeight) * Math.PI * 2;
+          publishView();
           orbitPreviewMouse = null;
           orbitPreviewRot = null;
           updateGizmoHover(e.clientX, e.clientY);
@@ -1115,6 +1125,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           0.5,
           Math.min(20.0, distance * Math.exp(px * 0.0001)),
         );
+        publishViewSoon();
         syncCameraUniform();
       };
 
@@ -1274,6 +1285,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       }
 
       registeredCleanup = () => {
+        clearTimeout(publishTimer);
         unsubGizmoMode();
         observer.disconnect();
         cancelAnimationFrame(animFrameId);
