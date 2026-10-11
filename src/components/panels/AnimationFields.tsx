@@ -17,7 +17,7 @@ import { NumberField } from "./fields";
 import { effectiveMaterial } from "./MaterialFields";
 
 /** Properties an item can animate (shapes add their size params). */
-function targetsFor(item: SceneItem): TrackTarget[] {
+export function targetsFor(item: SceneItem): TrackTarget[] {
   const base: TrackTarget[] = ["position.x", "position.y", "position.z", "rotation.x", "rotation.y", "rotation.z", "scale"];
   if (item.kind === "layer") base.push("param0", "param1", "param2", "param3");
   base.push("smoothK", "emission");

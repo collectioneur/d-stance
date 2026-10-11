@@ -1,6 +1,7 @@
 import type { Material, Modifier, ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
 import { defaultParams } from "../store/sceneStore";
 import type { Track } from "../store/animation";
+import type { Reaction } from "../store/interaction";
 
 type V3 = [number, number, number];
 
@@ -27,6 +28,7 @@ export function shape(
     ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
     ...(opts.formula ? { formula: opts.formula } : {}),
     ...(opts.animation ? { animation: opts.animation } : {}),
+    ...(opts.interaction ? { interaction: opts.interaction } : {}),
   };
 }
 
@@ -43,6 +45,7 @@ export function group(
     material: Material;
     modifiers: Modifier[];
     animation: Track[];
+    interaction: Reaction[];
   }> = {},
 ): ObjectGroup {
   return {
@@ -57,6 +60,7 @@ export function group(
     ...(opts.material ? { material: opts.material } : {}),
     ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
     ...(opts.animation ? { animation: opts.animation } : {}),
+    ...(opts.interaction ? { interaction: opts.interaction } : {}),
     items,
   };
 }

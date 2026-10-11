@@ -142,3 +142,20 @@ describe("persistence v10 animation", () => {
     expect(decodeHash(blob(9, scene([shape("sphere")])))?.root.items).toHaveLength(1);
   });
 });
+
+describe("persistence v11 interaction", () => {
+  test("reactions are sanitized; hostile ones drop", () => {
+    const ok = shape("sphere", { id: "ok", interaction: [{ trigger: "hover", target: "scale", amount: 0.2 }] });
+    const bad = { ...shape("box", { id: "bad" }), interaction: [{ trigger: "eval", target: "scale" }, { trigger: "click", target: "emission", amount: 2 }] };
+    const junk = { ...shape("box", { id: "junk" }), interaction: { trigger: "hover" } };
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad as never, junk as never])));
+    const [a, b, c] = decoded!.root.items;
+    expect(a.interaction).toEqual(ok.interaction);
+    expect(b.interaction).toEqual([{ trigger: "click", target: "emission", amount: 2 }]);
+    expect("interaction" in c).toBe(false);
+  });
+
+  test("v10 blobs still load", () => {
+    expect(decodeHash(blob(10, scene([shape("sphere")])))?.root.items).toHaveLength(1);
+  });
+});

@@ -12,6 +12,7 @@ import { sanitizeMaterial } from "./material";
 import { sanitizeModifiers } from "./modifiers";
 import { sanitizeFormula } from "../sdf/formula";
 import { sanitizeTracks } from "./animation";
+import { sanitizeReactions } from "./interaction";
 
 /**
  * v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image".
@@ -20,10 +21,11 @@ import { sanitizeTracks } from "./animation";
  * v8: optional `modifiers` on layers and groups.
  * v9: shape types "terrain", "gyroid", "formula" (+ `formula` source), noise modifier.
  * v10: optional `animation` tracks on layers and groups; noise `speed`.
+ * v11: optional `interaction` reactions on layers and groups.
  */
-export const SCHEMA_VERSION = 10;
-/** v4–v9 are strict subsets of v10 (each only lacks optional fields / kinds), so they load as-is. */
-const ACCEPTED_VERSIONS = new Set([4, 5, 6, 7, 8, 9, SCHEMA_VERSION]);
+export const SCHEMA_VERSION = 11;
+/** v4–v10 are strict subsets of v11 (each only lacks optional fields / kinds), so they load as-is. */
+const ACCEPTED_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -42,6 +44,7 @@ type LooseItem = {
   modifiers?: unknown;
   formula?: unknown;
   animation?: unknown;
+  interaction?: unknown;
   items?: unknown;
 };
 
@@ -96,6 +99,11 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
         const tracks = sanitizeTracks(item.animation);
         if (tracks) item.animation = tracks;
         else delete item.animation;
+      }
+      if ("interaction" in item) {
+        const reactions = sanitizeReactions(item.interaction);
+        if (reactions) item.interaction = reactions;
+        else delete item.interaction;
       }
       if ("modifiers" in item) {
         const modifiers = sanitizeModifiers(item.modifiers);

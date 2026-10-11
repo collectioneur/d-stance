@@ -38,8 +38,10 @@ export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract"
 import type { Material } from "./material";
 import type { Modifier } from "./modifiers";
 import type { Track } from "./animation";
+import type { Reaction } from "./interaction";
 export type { Material } from "./material";
 export type { Track } from "./animation";
+export type { Reaction } from "./interaction";
 export type { Modifier } from "./modifiers";
 
 export type ShapeLayer = {
@@ -65,6 +67,8 @@ export type ShapeLayer = {
   formula?: string;
   /** Procedural animation tracks (src/store/animation.ts). */
   animation?: Track[];
+  /** Reactions to hover / click / pointer (src/store/interaction.ts). */
+  interaction?: Reaction[];
 };
 
 export type ObjectGroup = {
@@ -82,6 +86,8 @@ export type ObjectGroup = {
   modifiers?: Modifier[];
   /** Procedural animation tracks (src/store/animation.ts). */
   animation?: Track[];
+  /** Reactions to hover / click / pointer (src/store/interaction.ts). */
+  interaction?: Reaction[];
   items: SceneItem[];
 };
 
@@ -507,7 +513,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula" | "animation"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula" | "animation" | "interaction"
       >
     >,
   ) => void;
@@ -516,7 +522,7 @@ interface SceneState {
   updateGroup: (
     groupId: string,
     patch: Partial<
-      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material" | "modifiers" | "animation">
+      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material" | "modifiers" | "animation" | "interaction">
     >,
   ) => void;
   updateRootName: (name: string) => void;

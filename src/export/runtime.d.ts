@@ -14,6 +14,15 @@ export interface EmbedScene {
   };
   /** Animated scene: seconds before the clock (the shaders' time) wraps. */
   loop?: number;
+  /** Reactions to hover / click / pointer (index = pick id − 1). */
+  interact?: {
+    /** Nearest interactive ancestor of each item, −1 = none. */
+    parent: number[];
+    hoverable: boolean[];
+    clickable: boolean[];
+    /** Something follows the pointer anywhere on the page. */
+    pointer: boolean;
+  };
 }
 
 export interface MountOptions {
