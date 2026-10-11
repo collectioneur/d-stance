@@ -60,7 +60,7 @@ describe("scene compiler", () => {
     expect(code).not.toMatch(/(?<!ds_)\bsd[A-Z]\w*\(/);
     expect(code).toContain("fn ds_sdSphere(");
     expect(code).toContain("fn ds_sdScene(p: vec3f) -> f32");
-    expect(code).toContain("fn ds_sceneInfo(p: vec3f) -> vec4f");
+    expect(code).toContain("fn ds_sceneInfo(p: vec3f) -> DsInfo");
   });
 
   test("image layers sample their texture layer", () => {
@@ -121,5 +121,51 @@ describe("scene compiler", () => {
   test("slot budget fits the uniform binding for a capped scene", () => {
     const items = Array.from({ length: 128 }, () => shape("image", { image: { sdf: "x" } }));
     expect(countDataSlots(items)).toBeLessThan(DATA_SLOTS);
+  });
+});
+
+describe("scene compiler materials", () => {
+  const red = { color: [1, 0, 0] as [number, number, number], roughness: 0.2, metalness: 0.7, emission: 1.5 };
+  const blue = { color: [0, 0, 1] as [number, number, number], roughness: 0.4, metalness: 0, emission: 0 };
+
+  test("leaf material slots carry color, roughness, metalness, emission", () => {
+    const out = compile(scene([shape("sphere", { material: red })]));
+    expect(Array.from(out.values.slice(24, 32))).toEqual([1, 0, 0, 0.2, 0.7, 1.5, 0, 0].map((v) => Math.fround(v)));
+  });
+
+  test("default material when none is set", () => {
+    const out = compile(scene([shape("sphere")]));
+    expect(out.values[24]).toBeCloseTo(0.72);
+    expect(out.values[27]).toBeCloseTo(0.5);
+  });
+
+  test("group materials are inherited; own materials win", () => {
+    const out = compile(scene([group([shape("sphere"), shape("box", { material: red })], { material: blue })]));
+    // group slots 0-1, first leaf at 2 (material at +6), second leaf at 10
+    expect(Array.from(out.values.slice((2 + 6) * 4, (2 + 6) * 4 + 3))).toEqual([0, 0, 1]);
+    expect(Array.from(out.values.slice((10 + 6) * 4, (10 + 6) * 4 + 3))).toEqual([1, 0, 0]);
+  });
+
+  test("material changes never change the code", () => {
+    const a = compile(scene([shape("sphere", { material: red })])).code;
+    const b = compile(scene([shape("sphere", { material: blue })])).code;
+    const c = compile(scene([shape("sphere")])).code;
+    expect(a).toBe(b);
+    expect(a).toBe(c);
+  });
+
+  test("info pass blends materials per op", () => {
+    const code = compile(
+      scene([
+        shape("box"),
+        shape("sphere", { op: "sUnion" }),
+        shape("sphere", { op: "subtract" }),
+        shape("sphere", { op: "intersect" }),
+      ]),
+    ).code;
+    const info = code.slice(code.indexOf("fn ds_sceneInfo"));
+    expect(info).toMatch(/ds_mixMat\(m\d+, w\d+, ds_sminT\(a\d+, v\d+, /);
+    expect(info).toMatch(/if \(v\d+ > a\d+\) \{ m\d+ = w\d+; \}/);
+    expect(info).toContain("return DsInfo(info.x, info.y, mat.c.xyz, mat.c.w, mat.e.x, mat.e.y);");
   });
 });

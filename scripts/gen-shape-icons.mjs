@@ -394,6 +394,23 @@ icons.renderChrome = () => {
   };
 };
 
+/** Studio: a lit ball resting on a floor with its soft shadow. */
+icons.renderStudio = () => {
+  const ball = circle(0, -0.25, 0.82);
+  const core = move(ball, -0.18, -0.2, 0.78, 0, -0.25), mid = move(ball, -0.09, -0.1, 0.92, 0, -0.25);
+  const shadow = ellipse(0.12, 0.78, 1.05, 0.22);
+  const glint = circle(-0.32, -0.58, 0.16);
+  return {
+    layers: [
+      { rings: [shadow], tone: G, cut: [ball] },
+      { rings: [ball], tone: 0.42, cut: [mid] },
+      { rings: [mid], tone: 0.72, clip: [ball], cut: [core] },
+      { rings: [core], tone: S, cut: [glint] },
+      { rings: [glint], tone: M },
+    ],
+  };
+};
+
 icons.group = () => {
   const cube = polyhedron(CUBE_V.map((v) => v.map((c) => c * 0.62)), CUBE_F);
   const shift = (r) => r.map(([x, y]) => [x + 0.62, y - 0.55]);

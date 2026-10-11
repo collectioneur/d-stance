@@ -7,6 +7,7 @@ import type { IconComponent } from "../MaskIcon";
 const MODES: { value: RenderMode; label: string; icon: IconComponent }[] = [
   { value: "classic", label: "Classic", icon: RENDER_MODE_ICONS.classic },
   { value: "chrome", label: "Chrome", icon: RENDER_MODE_ICONS.chrome },
+  { value: "studio", label: "Studio", icon: RENDER_MODE_ICONS.studio },
 ];
 
 export default function RenderModePanel() {
