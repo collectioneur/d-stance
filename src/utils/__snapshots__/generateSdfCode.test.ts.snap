@@ -1,7 +1,79 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`generateSdfCode > kitchen sink output is stable > glsl 1`] = `
-"float sdSphere(vec3 p, float R) {
+"// Lattice point → gradient in [-1, 1]³.
+vec3 noiseHash3(ivec3 p) {
+  uvec3 u = uvec3(p) * uvec3(1597334673u, 3812015801u, 2798796415u);
+  u = uvec3(u.x ^ u.y ^ u.z) * uvec3(1597334673u, 3812015801u, 2798796415u);
+  return vec3(u >> 8u) * (2.0 / 16777215.0) - 1.0;
+}
+
+// Lattice point → value in [0, 1].
+float noiseHash2(ivec2 p) {
+  uvec2 u = uvec2(p) * uvec2(1597334673u, 3812015801u);
+  return float(((u.x ^ u.y) * 1597334673u) >> 8u) / 16777215.0;
+}
+
+// Gradient noise, about [-1, 1].
+float gradientNoise3(vec3 p) {
+  ivec3 i = ivec3(floor(p));
+  vec3 f = fract(p);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float n000 = dot(noiseHash3(i), f);
+  float n100 = dot(noiseHash3(i + ivec3(1, 0, 0)), f - vec3(1.0, 0.0, 0.0));
+  float n010 = dot(noiseHash3(i + ivec3(0, 1, 0)), f - vec3(0.0, 1.0, 0.0));
+  float n110 = dot(noiseHash3(i + ivec3(1, 1, 0)), f - vec3(1.0, 1.0, 0.0));
+  float n001 = dot(noiseHash3(i + ivec3(0, 0, 1)), f - vec3(0.0, 0.0, 1.0));
+  float n101 = dot(noiseHash3(i + ivec3(1, 0, 1)), f - vec3(1.0, 0.0, 1.0));
+  float n011 = dot(noiseHash3(i + ivec3(0, 1, 1)), f - vec3(0.0, 1.0, 1.0));
+  float n111 = dot(noiseHash3(i + ivec3(1, 1, 1)), f - vec3(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// Fractal sum: octaves halve in size and amplitude. About [-1, 1].
+float fbm3(vec3 p, float octaves) {
+  float sum = 0.0;
+  float amp = 0.5;
+  vec3 q = p;
+  for (float i = 0.0; i < octaves; i += 1.0) {
+    sum += amp * gradientNoise3(q);
+    q = q * 2.03 + vec3(17.1, 31.7, 47.3);
+    amp *= 0.5;
+  }
+  return sum * 1.6;
+}
+
+// Value noise with its derivatives: (value, d/dx, d/dy).
+vec3 valueNoised2(vec2 x) {
+  ivec2 i = ivec2(floor(x));
+  vec2 f = fract(x);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  float a = noiseHash2(i);
+  float b = noiseHash2(i + ivec2(1, 0));
+  float c = noiseHash2(i + ivec2(0, 1));
+  float d = noiseHash2(i + ivec2(1, 1));
+  float k4 = a - b - c + d;
+  return vec3(a + (b - a) * u.x + (c - a) * u.y + k4 * u.x * u.y, du * vec2(b - a + k4 * u.y, c - a + k4 * u.x));
+}
+
+// IQ-style terrain: fbm whose octaves fade on steep slopes (erosion look). About [0, 1].
+float terrainHeight(vec2 p) {
+  float a = 0.0;
+  float b = 1.0;
+  vec2 d = vec2(0.0);
+  vec2 q = p;
+  for (int i = 0; i < 6; i++) {
+    vec3 n = valueNoised2(q);
+    d += n.yz;
+    a += b * n.x / (1.0 + dot(d, d));
+    b *= 0.5;
+    q = vec2(1.6 * q.x - 1.2 * q.y, 1.2 * q.x + 1.6 * q.y);
+  }
+  return a * 0.55;
+}
+
+float sdSphere(vec3 p, float R) {
   return length(p) - R;
 }
 
@@ -198,6 +270,27 @@ float sdVesica(vec3 p, float r, float dIn) {
   return length(q - vec2(-dd, 0.0)) - r;
 }
 
+// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+float sdTerrain(vec3 p, float size, float height, float detail, float seed) {
+  float h = height * terrainHeight(p.xz * detail + vec2(seed * 37.13, seed * 17.71));
+  float slope = height * detail * 2.5;
+  float surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  float top = height * 1.1 + 0.01;
+  vec3 q = abs(vec3(p.x, p.y + top * 0.5, p.z)) - vec3(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}
+
+// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+float sdGyroid(vec3 p, float size, float cell, float thickness) {
+  float k = 6.2831853 / max(cell, 0.001);
+  vec3 q = p * k;
+  float g = (abs(dot(sin(q), cos(q.zxy))) / k - thickness) * 0.42;
+  vec3 b = abs(p) - vec3(size);
+  return max(g, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}
+
+
+
 // t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -241,6 +334,73 @@ float smin(float a, float b, float k) {
   return mix(b, a, h) - k * h * (1.0 - h);
 }
 
+// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it.
+vec3 opRepeat(vec3 q, vec3 s, vec3 c) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  vec3 shift = h - floor(h);
+  vec3 lim = clamp(round(q / s - shift) + shift, -h, h);
+  return q - s * mix(lim, round(q / s), lessThan(c, vec3(0.5)));
+}
+
+// The cell nearest to q, or (step = 1 on an axis) its neighbor toward q.
+vec3 opRepeatCell(vec3 q, vec3 s, vec3 c, vec3 step) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  vec3 shift = h - floor(h);
+  bvec3 inf = lessThan(c, vec3(0.5));
+  vec3 base = mix(round(q / s - shift) + shift, round(q / s), inf);
+  vec3 id = base + sign(q / s - base) * step;
+  return q - s * mix(clamp(id, -h, h), id, inf);
+}
+
+// Bits of n spread over the axes set in mask (neighbor cell n of 2^axes).
+vec3 cellStep(int n, vec3 mask) {
+  int bit = 0;
+  vec3 o = vec3(0.0);
+  if (mask.x > 0.5) { o.x = float(n & 1); bit = 1; }
+  if (mask.y > 0.5) { o.y = float((n >> bit) & 1); bit += 1; }
+  if (mask.z > 0.5) { o.z = float((n >> bit) & 1); }
+  return o;
+}
+
+vec2 rot2(vec2 v, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Polar repetition around an axis; sector = 2π / count.
+vec3 opPolar(vec3 q, float sector, int axis) {
+  vec2 uv = axis == 0 ? q.yz : axis == 1 ? q.xz : q.xy;
+  vec2 r = rot2(uv, -sector * round(atan(uv.y, uv.x) / sector));
+  if (axis == 0) return vec3(q.x, r.x, r.y);
+  if (axis == 1) return vec3(r.x, q.y, r.y);
+  return vec3(r.x, r.y, q.z);
+}
+
+vec3 opTwist(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.x); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.xz, k * q.y); return vec3(r.x, q.y, r.y); }
+  vec2 r = rot2(q.xy, k * q.z);
+  return vec3(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+vec3 opBend(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.y); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.zx, k * q.z); return vec3(r.y, q.y, r.x); }
+  vec2 r = rot2(q.xy, k * q.x);
+  return vec3(r.x, r.y, q.z);
+}
+
+float formula0(vec3 p, float size, float safety) {
+  float x = p.x;
+  float y = -p.y;
+  float z = p.z;
+  vec3 b = abs(p) - vec3(size);
+  return max((((smin((length(vec3(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(vec3((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (atan(x, z) * 0.0))) * safety, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}
+
 float sdScene(vec3 p) {
   float d0 = sdSphere(p - vec3(0.2, -0.1, 0.3), 0.5);
   d0 = smin(d0, sdBox(applyInvRotXYZ(p, vec3(0.174533, 0.349066, 0.523599)), vec3(0.4, 0.4, 0.4)), 0.2);
@@ -268,13 +428,84 @@ float sdScene(vec3 p) {
   d0 = min(d0, sdOctahedron(p, 0.5));
   d0 = min(d0, sdPyramid(p, 0.7, 0.7));
   d0 = min(d0, sdVesica(p, 0.5, 0.25));
+  d0 = min(d0, sdTerrain(p, 1.0, 0.35, 2.0, 0.0));
+  vec3 q3 = p;
+  float d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + vec3(14.26, 7.42, 10.74), 3.0)) * 0.565611;
+  d0 = min(d0, d3);
+  d0 = min(d0, formula0(p, 0.5, 0.5));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 }"
 `;
 
 exports[`generateSdfCode > kitchen sink output is stable > typegpu 1`] = `
-"const sdSphere = (p: d.v3f, R: number): number => {
+"const noiseHash3 = tgpu.fn([d.vec3i], d.vec3f)\`(p) {
+  var u = bitcast<vec3u>(p) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  u = vec3u(u.x ^ u.y ^ u.z) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  return vec3f(u >> vec3u(8u)) * (2.0 / 16777215.0) - 1.0;
+}\`;
+
+const noiseHash2 = tgpu.fn([d.vec2i], d.f32)\`(p) {
+  let u = bitcast<vec2u>(p) * vec2u(1597334673u, 3812015801u);
+  return f32(((u.x ^ u.y) * 1597334673u) >> 8u) / 16777215.0;
+}\`;
+
+const gradientNoise3 = tgpu.fn([d.vec3f], d.f32)\`(p) {
+  let i = vec3i(floor(p));
+  let f = fract(p);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let n000 = dot(noiseHash3(i), f);
+  let n100 = dot(noiseHash3(i + vec3i(1, 0, 0)), f - vec3f(1.0, 0.0, 0.0));
+  let n010 = dot(noiseHash3(i + vec3i(0, 1, 0)), f - vec3f(0.0, 1.0, 0.0));
+  let n110 = dot(noiseHash3(i + vec3i(1, 1, 0)), f - vec3f(1.0, 1.0, 0.0));
+  let n001 = dot(noiseHash3(i + vec3i(0, 0, 1)), f - vec3f(0.0, 0.0, 1.0));
+  let n101 = dot(noiseHash3(i + vec3i(1, 0, 1)), f - vec3f(1.0, 0.0, 1.0));
+  let n011 = dot(noiseHash3(i + vec3i(0, 1, 1)), f - vec3f(0.0, 1.0, 1.0));
+  let n111 = dot(noiseHash3(i + vec3i(1, 1, 1)), f - vec3f(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}\`.$uses({ noiseHash3 });
+
+const fbm3 = tgpu.fn([d.vec3f, d.f32], d.f32)\`(p, octaves) {
+  var sum = 0.0;
+  var amp = 0.5;
+  var q = p;
+  for (var i = 0.0; i < octaves; i += 1.0) {
+    sum += amp * gradientNoise3(q);
+    q = q * 2.03 + vec3f(17.1, 31.7, 47.3);
+    amp *= 0.5;
+  }
+  return sum * 1.6;
+}\`.$uses({ gradientNoise3 });
+
+const valueNoised2 = tgpu.fn([d.vec2f], d.vec3f)\`(x) {
+  let i = vec2i(floor(x));
+  let f = fract(x);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  let a = noiseHash2(i);
+  let b = noiseHash2(i + vec2i(1, 0));
+  let c = noiseHash2(i + vec2i(0, 1));
+  let d = noiseHash2(i + vec2i(1, 1));
+  let k4 = a - b - c + d;
+  return vec3f(a + (b - a) * u.x + (c - a) * u.y + k4 * u.x * u.y, du * vec2f(b - a + k4 * u.y, c - a + k4 * u.x));
+}\`.$uses({ noiseHash2 });
+
+const terrainHeight = tgpu.fn([d.vec2f], d.f32)\`(p) {
+  var a = 0.0;
+  var b = 1.0;
+  var d = vec2f(0.0);
+  var q = p;
+  for (var i = 0; i < 6; i++) {
+    let n = valueNoised2(q);
+    d += n.yz;
+    a += b * n.x / (1.0 + dot(d, d));
+    b *= 0.5;
+    q = vec2f(1.6 * q.x - 1.2 * q.y, 1.2 * q.x + 1.6 * q.y);
+  }
+  return a * 0.55;
+}\`.$uses({ valueNoised2 });
+
+const sdSphere = (p: d.v3f, R: number): number => {
   "use gpu";
   return std.length(p) - R;
 };
@@ -507,6 +738,28 @@ const sdVesica = (p: d.v3f, r: number, dIn: number): number => {
   return result;
 };
 
+// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+const sdTerrain = tgpu.fn([d.vec3f, d.f32, d.f32, d.f32, d.f32], d.f32)\`(p, size, height, detail, seed) {
+  let h = height * terrainHeight(p.xz * detail + vec2f(seed * 37.13, seed * 17.71));
+  let slope = height * detail * 2.5;
+  let surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  let top = height * 1.1 + 0.01;
+  let q = abs(vec3f(p.x, p.y + top * 0.5, p.z)) - vec3f(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}\`.$uses({ terrainHeight });
+
+// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+const sdGyroid = (p: d.v3f, size: number, cell: number, thickness: number): number => {
+  "use gpu";
+  const k = 6.2831853 / std.max(cell, 0.001);
+  const q = p * k;
+  const g = (std.abs(std.dot(std.sin(q), std.cos(d.vec3f(q.z, q.x, q.y)))) / k - thickness) * 0.42;
+  const b = std.abs(p) - d.vec3f(size);
+  return std.max(g, std.length(std.max(b, d.vec3f(0.0))) + std.min(std.max(b.x, std.max(b.y, b.z)), 0.0));
+};
+
+
+
 // t = normalized distance from the texture (d_px / RES); outside the square
 // √(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -560,6 +813,69 @@ const smin = (a: number, b: number, k: number): number => {
   return std.mix(b, a, h) - k * h * (1.0 - h);
 };
 
+const opRepeat = tgpu.fn([d.vec3f, d.vec3f, d.vec3f], d.vec3f)\`(q, s, c) {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let lim = clamp(round(q / s - shift) + shift, -h, h);
+  return q - s * select(lim, round(q / s), c < vec3f(0.5));
+}\`;
+
+const opRepeatCell = tgpu.fn([d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.vec3f)\`(q, s, c, step) {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let inf = c < vec3f(0.5);
+  let base = select(round(q / s - shift) + shift, round(q / s), inf);
+  let id = base + sign(q / s - base) * step;
+  return q - s * select(clamp(id, -h, h), id, inf);
+}\`;
+
+const cellStep = tgpu.fn([d.u32, d.vec3f], d.vec3f)\`(n, mask) {
+  var bit = 0u;
+  var out = vec3f(0.0);
+  if (mask.x > 0.5) { out.x = f32(n & 1u); bit = 1u; }
+  if (mask.y > 0.5) { out.y = f32((n >> bit) & 1u); bit += 1u; }
+  if (mask.z > 0.5) { out.z = f32((n >> bit) & 1u); }
+  return out;
+}\`;
+
+const rot2 = tgpu.fn([d.vec2f, d.f32], d.vec2f)\`(v, a) {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * v.x - s * v.y, s * v.x + c * v.y);
+}\`;
+
+const opPolar = tgpu.fn([d.vec3f, d.f32, d.u32], d.vec3f)\`(q, sector, axis) {
+  var uv = q.yz;
+  if (axis == 1u) { uv = q.xz; } else if (axis == 2u) { uv = q.xy; }
+  let r = rot2(uv, -sector * round(atan2(uv.y, uv.x) / sector));
+  if (axis == 0u) { return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { return vec3f(r.x, q.y, r.y); }
+  return vec3f(r.x, r.y, q.z);
+}\`.$uses({ rot2 });
+
+const opTwist = tgpu.fn([d.vec3f, d.f32, d.u32], d.vec3f)\`(q, k, axis) {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.x); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.xz, k * q.y); return vec3f(r.x, q.y, r.y); }
+  let r = rot2(q.xy, k * q.z);
+  return vec3f(r.x, r.y, q.z);
+}\`.$uses({ rot2 });
+
+const opBend = tgpu.fn([d.vec3f, d.f32, d.u32], d.vec3f)\`(q, k, axis) {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.y); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.zx, k * q.z); return vec3f(r.y, q.y, r.x); }
+  let r = rot2(q.xy, k * q.x);
+  return vec3f(r.x, r.y, q.z);
+}\`.$uses({ rot2 });
+
+const formula0 = (p: d.v3f, size: number, safety: number): number => {
+  "use gpu";
+  const x = p.x;
+  const y = -p.y;
+  const z = p.z;
+  const b = std.abs(p) - d.vec3f(size);
+  return std.max((((smin((std.length(d.vec3f(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(d.vec3f((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (std.atan2(x, z) * 0.0))) * safety, std.length(std.max(b, d.vec3f(0.0))) + std.min(std.max(b.x, std.max(b.y, b.z)), 0.0));
+};
+
 const sdScene = (p: d.v3f): number => {
   "use gpu";
   let d0 = sdSphere(p - d.vec3f(0.2, -0.1, 0.3), 0.5);
@@ -588,13 +904,90 @@ const sdScene = (p: d.v3f): number => {
   d0 = std.min(d0, sdOctahedron(p, 0.5));
   d0 = std.min(d0, sdPyramid(p, 0.7, 0.7));
   d0 = std.min(d0, sdVesica(p, 0.5, 0.25));
+  d0 = std.min(d0, sdTerrain(p, 1.0, 0.35, 2.0, 0.0));
+  const q3 = p;
+  let d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + d.vec3f(14.26, 7.42, 10.74), 3.0)) * 0.565611;
+  d0 = std.min(d0, d3);
+  d0 = std.min(d0, formula0(p, 0.5, 0.5));
   d0 = std.min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 };"
 `;
 
 exports[`generateSdfCode > kitchen sink output is stable > wgsl 1`] = `
-"fn sdSphere(p: vec3f, R: f32) -> f32 {
+"// Lattice point → gradient in [-1, 1]³.
+fn noiseHash3(p: vec3i) -> vec3f {
+  var u = bitcast<vec3u>(p) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  u = vec3u(u.x ^ u.y ^ u.z) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  return vec3f(u >> vec3u(8u)) * (2.0 / 16777215.0) - 1.0;
+}
+
+// Lattice point → value in [0, 1].
+fn noiseHash2(p: vec2i) -> f32 {
+  let u = bitcast<vec2u>(p) * vec2u(1597334673u, 3812015801u);
+  return f32(((u.x ^ u.y) * 1597334673u) >> 8u) / 16777215.0;
+}
+
+// Gradient noise, about [-1, 1].
+fn gradientNoise3(p: vec3f) -> f32 {
+  let i = vec3i(floor(p));
+  let f = fract(p);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let n000 = dot(noiseHash3(i), f);
+  let n100 = dot(noiseHash3(i + vec3i(1, 0, 0)), f - vec3f(1.0, 0.0, 0.0));
+  let n010 = dot(noiseHash3(i + vec3i(0, 1, 0)), f - vec3f(0.0, 1.0, 0.0));
+  let n110 = dot(noiseHash3(i + vec3i(1, 1, 0)), f - vec3f(1.0, 1.0, 0.0));
+  let n001 = dot(noiseHash3(i + vec3i(0, 0, 1)), f - vec3f(0.0, 0.0, 1.0));
+  let n101 = dot(noiseHash3(i + vec3i(1, 0, 1)), f - vec3f(1.0, 0.0, 1.0));
+  let n011 = dot(noiseHash3(i + vec3i(0, 1, 1)), f - vec3f(0.0, 1.0, 1.0));
+  let n111 = dot(noiseHash3(i + vec3i(1, 1, 1)), f - vec3f(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// Fractal sum: octaves halve in size and amplitude. About [-1, 1].
+fn fbm3(p: vec3f, octaves: f32) -> f32 {
+  var sum = 0.0;
+  var amp = 0.5;
+  var q = p;
+  for (var i = 0.0; i < octaves; i += 1.0) {
+    sum += amp * gradientNoise3(q);
+    q = q * 2.03 + vec3f(17.1, 31.7, 47.3);
+    amp *= 0.5;
+  }
+  return sum * 1.6;
+}
+
+// Value noise with its derivatives: (value, d/dx, d/dy).
+fn valueNoised2(x: vec2f) -> vec3f {
+  let i = vec2i(floor(x));
+  let f = fract(x);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  let a = noiseHash2(i);
+  let b = noiseHash2(i + vec2i(1, 0));
+  let c = noiseHash2(i + vec2i(0, 1));
+  let d = noiseHash2(i + vec2i(1, 1));
+  let k4 = a - b - c + d;
+  return vec3f(a + (b - a) * u.x + (c - a) * u.y + k4 * u.x * u.y, du * vec2f(b - a + k4 * u.y, c - a + k4 * u.x));
+}
+
+// IQ-style terrain: fbm whose octaves fade on steep slopes (erosion look). About [0, 1].
+fn terrainHeight(p: vec2f) -> f32 {
+  var a = 0.0;
+  var b = 1.0;
+  var d = vec2f(0.0);
+  var q = p;
+  for (var i = 0; i < 6; i++) {
+    let n = valueNoised2(q);
+    d += n.yz;
+    a += b * n.x / (1.0 + dot(d, d));
+    b *= 0.5;
+    q = vec2f(1.6 * q.x - 1.2 * q.y, 1.2 * q.x + 1.6 * q.y);
+  }
+  return a * 0.55;
+}
+
+fn sdSphere(p: vec3f, R: f32) -> f32 {
   return length(p) - R;
 }
 
@@ -792,6 +1185,27 @@ fn sdVesica(p: vec3f, r: f32, dIn: f32) -> f32 {
   return length(q - vec2f(-dd, 0.0)) - r;
 }
 
+// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+fn sdTerrain(p: vec3f, size: f32, height: f32, detail: f32, seed: f32) -> f32 {
+  let h = height * terrainHeight(p.xz * detail + vec2f(seed * 37.13, seed * 17.71));
+  let slope = height * detail * 2.5;
+  let surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  let top = height * 1.1 + 0.01;
+  let q = abs(vec3f(p.x, p.y + top * 0.5, p.z)) - vec3f(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}
+
+// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+fn sdGyroid(p: vec3f, size: f32, cell: f32, thickness: f32) -> f32 {
+  let k = 6.2831853 / max(cell, 0.001);
+  let q = p * k;
+  let g = (abs(dot(sin(q), cos(q.zxy))) / k - thickness) * 0.42;
+  let b = abs(p) - vec3f(size);
+  return max(g, length(max(b, vec3f(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}
+
+
+
 // t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -838,6 +1252,74 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
   return mix(b, a, h) - k * h * (1.0 - h);
 }
 
+// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it.
+fn opRepeat(q: vec3f, s: vec3f, c: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let lim = clamp(round(q / s - shift) + shift, -h, h);
+  return q - s * select(lim, round(q / s), c < vec3f(0.5));
+}
+
+// The cell nearest to q, or (step = 1 on an axis) its neighbor toward q.
+fn opRepeatCell(q: vec3f, s: vec3f, c: vec3f, step: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let inf = c < vec3f(0.5);
+  let base = select(round(q / s - shift) + shift, round(q / s), inf);
+  let id = base + sign(q / s - base) * step;
+  return q - s * select(clamp(id, -h, h), id, inf);
+}
+
+// Bits of n spread over the axes set in mask (neighbor cell n of 2^axes).
+fn cellStep(n: u32, mask: vec3f) -> vec3f {
+  var bit = 0u;
+  var out = vec3f(0.0);
+  if (mask.x > 0.5) { out.x = f32(n & 1u); bit = 1u; }
+  if (mask.y > 0.5) { out.y = f32((n >> bit) & 1u); bit += 1u; }
+  if (mask.z > 0.5) { out.z = f32((n >> bit) & 1u); }
+  return out;
+}
+
+fn rot2(v: vec2f, a: f32) -> vec2f {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Polar repetition around an axis; sector = 2π / count.
+fn opPolar(q: vec3f, sector: f32, axis: u32) -> vec3f {
+  var uv = q.yz;
+  if (axis == 1u) { uv = q.xz; } else if (axis == 2u) { uv = q.xy; }
+  let r = rot2(uv, -sector * round(atan2(uv.y, uv.x) / sector));
+  if (axis == 0u) { return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { return vec3f(r.x, q.y, r.y); }
+  return vec3f(r.x, r.y, q.z);
+}
+
+fn opTwist(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.x); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.xz, k * q.y); return vec3f(r.x, q.y, r.y); }
+  let r = rot2(q.xy, k * q.z);
+  return vec3f(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+fn opBend(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.y); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.zx, k * q.z); return vec3f(r.y, q.y, r.x); }
+  let r = rot2(q.xy, k * q.x);
+  return vec3f(r.x, r.y, q.z);
+}
+
+fn formula0(p: vec3f, size: f32, safety: f32) -> f32 {
+  let x = p.x;
+  let y = -p.y;
+  let z = p.z;
+  let b = abs(p) - vec3f(size);
+  return max((((smin((length(vec3f(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(vec3f((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (atan2(x, z) * 0.0))) * safety, length(max(b, vec3f(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}
+
 fn sdScene(p: vec3f) -> f32 {
   var d0 = sdSphere(p - vec3f(0.2, -0.1, 0.3), 0.5);
   d0 = smin(d0, sdBox(applyInvRotXYZ(p, vec3f(0.174533, 0.349066, 0.523599)), vec3f(0.4, 0.4, 0.4)), 0.2);
@@ -865,6 +1347,11 @@ fn sdScene(p: vec3f) -> f32 {
   d0 = min(d0, sdOctahedron(p, 0.5));
   d0 = min(d0, sdPyramid(p, 0.7, 0.7));
   d0 = min(d0, sdVesica(p, 0.5, 0.25));
+  d0 = min(d0, sdTerrain(p, 1.0, 0.35, 2.0, 0.0));
+  let q3 = p;
+  var d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + vec3f(14.26, 7.42, 10.74), 3.0)) * 0.565611;
+  d0 = min(d0, d3);
+  d0 = min(d0, formula0(p, 0.5, 0.5));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 }"

@@ -4,6 +4,7 @@ import { temporal } from "zundo";
 import { applyMoveToRoot } from "../scene/arboristAdapter";
 import { loadInitialState } from "./persistence";
 import { showToast } from "../utils/toast";
+import { DEFAULT_FORMULA } from "../sdf/formula";
 
 export type ShapeType =
   | "sphere"
@@ -28,6 +29,9 @@ export type ShapeType =
   | "octahedron"
   | "pyramid"
   | "vesica"
+  | "terrain"
+  | "gyroid"
+  | "formula"
   | "image";
 export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract" | "sIntersect";
 
@@ -55,6 +59,8 @@ export type ShapeLayer = {
   material?: Material;
   /** Domain / distance modifiers in the shape's own space (src/store/modifiers.ts). */
   modifiers?: Modifier[];
+  /** Only for shapeType "formula": the field f(x, y, z) (src/sdf/formula.ts). */
+  formula?: string;
 };
 
 export type ObjectGroup = {
@@ -120,6 +126,9 @@ const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
   octahedron: [0.5, 0, 0, 0],
   pyramid: [0.7, 0.7, 0, 0], // base width, height
   vesica: [0.5, 0.25, 0, 0], // radius, offset
+  terrain: [1, 0.35, 2, 0], // half size, height, detail (features per unit), seed
+  gyroid: [0.4, 0.25, 0.02, 0], // half size, cell size, wall thickness
+  formula: [0.5, 0.5, 0, 0], // half size of the clip cube, safety (field → distance factor)
   image: [0.5, 0.1, 0, 0], // half size, half thickness, bold, invert (0/1)
 };
 
@@ -146,6 +155,9 @@ const TYPE_LABEL: Record<ShapeType, string> = {
   octahedron: "Octahedron",
   pyramid: "Pyramid",
   vesica: "Vesica",
+  terrain: "Terrain",
+  gyroid: "Gyroid",
+  formula: "Formula",
   image: "Image",
 };
 
@@ -489,7 +501,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula"
       >
     >,
   ) => void;
@@ -552,6 +564,7 @@ export const useSceneStore = create<SceneState>()(
           op: "union",
           smoothK: 0.1,
           ...(image ? { image } : {}),
+          ...(shapeType === "formula" ? { formula: DEFAULT_FORMULA } : {}),
         };
 
         set({

@@ -46,6 +46,9 @@ export const SHAPE_ICONS: Record<ShapeType, IconComponent> = {
   octahedron: shapeIcon("octahedron"),
   pyramid: shapeIcon("pyramid"),
   vesica: shapeIcon("vesica"),
+  terrain: shapeIcon("terrain"),
+  gyroid: shapeIcon("gyroid"),
+  formula: shapeIcon("formula"),
   image: shapeIcon("image"),
 };
 
@@ -96,6 +99,9 @@ export const EXTRA_SHAPES: typeof SHAPES = (
     "octahedron",
     "pyramid",
     "vesica",
+    "terrain",
+    "gyroid",
+    "formula",
   ] as ShapeType[]
 ).map(shapeEntry);
 

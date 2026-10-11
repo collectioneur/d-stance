@@ -29,6 +29,16 @@ export type Modifier = (
   | { kind: "elongate"; size: Vec3 }
   | { kind: "round"; radius: number }
   | { kind: "onion"; thickness: number }
+  | {
+      kind: "noise";
+      /** Bump height (local units). */
+      amplitude: number;
+      /** Bumps per unit. */
+      scale: number;
+      /** Fractal layers, each half the size of the last. */
+      octaves: number;
+      seed: number;
+    }
 ) & {
   /** Temporarily switched off (kept in the list). */
   off?: boolean;
@@ -50,6 +60,7 @@ export const MIN_SPACING = 0.01;
 export const MAX_REPEAT_COUNT = 64;
 export const MAX_POLAR_COUNT = 64;
 export const MAX_DEFORM = 50;
+export const MAX_OCTAVES = 8;
 
 export const MODIFIER_LABEL: Record<ModifierKind, string> = {
   repeat: "Repeat",
@@ -60,6 +71,7 @@ export const MODIFIER_LABEL: Record<ModifierKind, string> = {
   elongate: "Elongate",
   round: "Round",
   onion: "Onion (shell)",
+  noise: "Noise",
 };
 
 export const MODIFIER_HINT: Record<ModifierKind, string> = {
@@ -71,6 +83,7 @@ export const MODIFIER_HINT: Record<ModifierKind, string> = {
   elongate: "Stretches the middle without scaling the ends.",
   round: "Rounds every edge by the radius.",
   onion: "Hollows into a shell of this thickness.",
+  noise: "Bumps the surface with fractal noise; every copy and seed differs.",
 };
 
 /**
@@ -96,6 +109,8 @@ export function createModifier(kind: ModifierKind, extent = 0.5): Modifier {
       return { kind, radius: 0.05 };
     case "onion":
       return { kind, thickness: 0.03 };
+    case "noise":
+      return { kind, amplitude: Math.round(Math.max(0.01, extent * 0.12) * 100) / 100, scale: Math.round(Math.min(40, 3 / Math.max(extent, 0.05)) * 10) / 10, octaves: 4, seed: 0 };
   }
 }
 
@@ -139,6 +154,15 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
       return { kind: "round", radius: num(raw.radius, 0.05, 0, 10), ...off };
     case "onion":
       return { kind: "onion", thickness: num(raw.thickness, 0.03, 0.001, 10), ...off };
+    case "noise":
+      return {
+        kind: "noise",
+        amplitude: num(raw.amplitude, 0.05, 0, 2),
+        scale: num(raw.scale, 6, 0.1, 100),
+        octaves: int(raw.octaves, 4, 1, MAX_OCTAVES),
+        seed: int(raw.seed, 0, 0, 9999),
+        ...off,
+      };
     default:
       return undefined;
   }

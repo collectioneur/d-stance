@@ -274,6 +274,50 @@ icons.vesica = () => {
   return { layers: volume(ring, 0, 0, 0.08, 0.93) };
 };
 
+/** Terrain: a mountain range on a block, lit from the left. */
+icons.terrain = () => {
+  const ridge = [[-1.2, 0.25], [-0.75, -0.35], [-0.45, -0.1], [0.05, -0.85], [0.45, -0.25], [0.7, -0.45], [1.2, 0.25]];
+  const block = [[-1.2, 0.25], [1.2, 0.25], [1.2, 0.75], [-1.2, 0.75]];
+  const shade = [[0.05, -0.85], [0.45, -0.25], [0.7, -0.45], [1.2, 0.25], [0.2, 0.25]];
+  return {
+    layers: [
+      { rings: [block], tone: M },
+      { rings: [[...ridge]], tone: S, cut: [shade] },
+      { rings: [shade], tone: 0.62, clip: [[...ridge]] },
+    ],
+    gaps: [[[-1.2, 0.25], [1.2, 0.25]]],
+  };
+};
+
+/** Gyroid: a cube pierced by a lattice of round holes. */
+icons.gyroid = () => {
+  const cube = polyhedron(CUBE_V, CUBE_F);
+  const holes = [];
+  for (const [x, y] of [[-0.42, -0.2], [0.2, -0.42], [0.05, 0.25], [-0.55, 0.45], [0.62, 0.15]]) holes.push(circle(x, y, 0.2));
+  return {
+    layers: cube.layers.map((l) => ({ ...l, cut: [...(l.cut ?? []), ...holes] })),
+    gaps: cube.gaps,
+  };
+};
+
+/** Formula: a function curve over a shaded plate, f(x) as a solid. */
+icons.formula = () => {
+  const plate = roundRect(-1.1, -0.95, 1.1, 0.95, 0.22);
+  const curve = [];
+  for (let i = 0; i <= 40; i++) {
+    const x = -0.85 + (1.7 * i) / 40;
+    curve.push([x, 0.1 - 0.42 * Math.sin(x * 3.2) * Math.exp(-x * x * 0.6)]);
+  }
+  return {
+    layers: [
+      { rings: [plate], tone: G },
+      { line: [[-0.85, 0.62], [0.85, 0.62]], width: 1.4, tone: M },
+      { line: [[-0.85, -0.7], [-0.85, 0.62]], width: 1.4, tone: M },
+      { line: curve, width: 2.6, tone: S },
+    ],
+  };
+};
+
 /** Convex hull (monotone chain) — the sweep of a convex face along its extrusion. */
 function hull(points) {
   const p = [...points].sort((a, b) => a[0] - b[0] || a[1] - b[1]);

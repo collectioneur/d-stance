@@ -223,6 +223,25 @@ const sdRhombus = (p: d.v3f, la: number, lb: number, h: number, ra: number): num
   if ((q.y - b) * dd > q.x * b) { result = std.length(q - d.vec2f(0.0, b)); }
   return result;
 };`,
+  terrain: `// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+const sdTerrain = tgpu.fn([d.vec3f, d.f32, d.f32, d.f32, d.f32], d.f32)\`(p, size, height, detail, seed) {
+  let h = height * terrainHeight(p.xz * detail + vec2f(seed * 37.13, seed * 17.71));
+  let slope = height * detail * 2.5;
+  let surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  let top = height * 1.1 + 0.01;
+  let q = abs(vec3f(p.x, p.y + top * 0.5, p.z)) - vec3f(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}\`.$uses({ terrainHeight });`,
+  gyroid: `// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+const sdGyroid = (p: d.v3f, size: number, cell: number, thickness: number): number => {
+  "use gpu";
+  const k = 6.2831853 / std.max(cell, 0.001);
+  const q = p * k;
+  const g = (std.abs(std.dot(std.sin(q), std.cos(d.vec3f(q.z, q.x, q.y)))) / k - thickness) * 0.42;
+  const b = std.abs(p) - d.vec3f(size);
+  return std.max(g, std.length(std.max(b, d.vec3f(0.0))) + std.min(std.max(b.x, std.max(b.y, b.z)), 0.0));
+};`,
+  formula: "", // generated per formula (src/sdf/formula.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // √(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -421,6 +440,24 @@ fn sdRhombus(p: vec3f, la: f32, lb: f32, h: f32, ra: f32) -> f32 {
   if ((q.y - b) * dd > q.x * b) { return length(q - vec2f(0.0, b)); }
   return length(q - vec2f(-dd, 0.0)) - r;
 }`,
+  terrain: `// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+fn sdTerrain(p: vec3f, size: f32, height: f32, detail: f32, seed: f32) -> f32 {
+  let h = height * terrainHeight(p.xz * detail + vec2f(seed * 37.13, seed * 17.71));
+  let slope = height * detail * 2.5;
+  let surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  let top = height * 1.1 + 0.01;
+  let q = abs(vec3f(p.x, p.y + top * 0.5, p.z)) - vec3f(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}`,
+  gyroid: `// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+fn sdGyroid(p: vec3f, size: f32, cell: f32, thickness: f32) -> f32 {
+  let k = 6.2831853 / max(cell, 0.001);
+  let q = p * k;
+  let g = (abs(dot(sin(q), cos(q.zxy))) / k - thickness) * 0.42;
+  let b = abs(p) - vec3f(size);
+  return max(g, length(max(b, vec3f(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}`,
+  formula: "", // generated per formula (src/sdf/formula.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -617,6 +654,24 @@ float sdRhombus(vec3 p, float la, float lb, float h, float ra) {
   if ((q.y - b) * dd > q.x * b) { return length(q - vec2(0.0, b)); }
   return length(q - vec2(-dd, 0.0)) - r;
 }`,
+  terrain: `// Heightfield tile: mountains rise toward −Y from a base at y = 0.
+float sdTerrain(vec3 p, float size, float height, float detail, float seed) {
+  float h = height * terrainHeight(p.xz * detail + vec2(seed * 37.13, seed * 17.71));
+  float slope = height * detail * 2.5;
+  float surface = (-p.y - h) / sqrt(1.0 + slope * slope);
+  float top = height * 1.1 + 0.01;
+  vec3 q = abs(vec3(p.x, p.y + top * 0.5, p.z)) - vec3(size, top * 0.5, size);
+  return max(surface, length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+}`,
+  gyroid: `// Gyroid sheet (triply periodic minimal surface) clipped to a cube.
+float sdGyroid(vec3 p, float size, float cell, float thickness) {
+  float k = 6.2831853 / max(cell, 0.001);
+  vec3 q = p * k;
+  float g = (abs(dot(sin(q), cos(q.zxy))) / k - thickness) * 0.42;
+  vec3 b = abs(p) - vec3(size);
+  return max(g, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
+}`,
+  formula: "", // generated per formula (src/sdf/formula.ts)
   image: `// t = normalized distance from the texture (d_px / RES); outside the square
 // sqrt(dBox² + dEdge²) is a tight lower bound (content lies inside the square).
 // rnd rounds every edge: erode the 2D field and half-thickness by rnd, inflate back after extrusion.
@@ -644,7 +699,7 @@ export interface CallSyntax {
 }
 
 /** Function name of a primitive in every language (`sphere` → `sdSphere`). */
-export function primitiveFnName(shape: Exclude<ShapeType, "image">): string {
+export function primitiveFnName(shape: Exclude<ShapeType, "image" | "formula">): string {
   return `sd${shape[0].toUpperCase()}${shape.slice(1)}`;
 }
 
@@ -654,7 +709,7 @@ export function primitiveFnName(shape: Exclude<ShapeType, "image">): string {
  * editor). Param meaning per shape: see DEFAULT_PARAMS in sceneStore.ts.
  */
 export function primitiveCall(
-  shape: Exclude<ShapeType, "image">,
+  shape: Exclude<ShapeType, "image" | "formula">,
   lp: string,
   P: readonly [string, string, string, string],
   syn: CallSyntax,
@@ -673,6 +728,7 @@ export function primitiveCall(
     case "boxFrame":
       return `${fn}(${lp}, ${syn.vec3(p0, p1, p2)}, ${p3})`;
     case "rhombus":
+    case "terrain":
       return `${fn}(${lp}, ${p0}, ${p1}, ${p2}, ${p3})`;
     case "cappedTorus":
     case "link":
@@ -680,6 +736,7 @@ export function primitiveCall(
     case "roundCone":
     case "cutHollowSphere":
     case "deathStar":
+    case "gyroid":
       return `${fn}(${lp}, ${p0}, ${p1}, ${p2})`;
     case "cylinder":
     case "capsule":
@@ -837,5 +894,172 @@ export const MODIFIER_TG = (() => {
       const uses = name === "opPolar" || name === "opTwist" || name === "opBend" ? ".$uses({ rot2 })" : "";
       return `const ${name} = tgpu.fn(${sig})\`${params} ${body(name)}\`${uses};`;
     })
+    .join("\n\n");
+})();
+
+// ── Noise (noise modifier, terrain) ──────────────────────────────────────────
+// Integer hashing only, so WGSL and GLSL give bit-identical fields on every GPU
+// (sin-based float hashes drift between drivers).
+
+export const NOISE_WGSL = `// Lattice point → gradient in [-1, 1]³.
+fn noiseHash3(p: vec3i) -> vec3f {
+  var u = bitcast<vec3u>(p) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  u = vec3u(u.x ^ u.y ^ u.z) * vec3u(1597334673u, 3812015801u, 2798796415u);
+  return vec3f(u >> vec3u(8u)) * (2.0 / 16777215.0) - 1.0;
+}
+
+// Lattice point → value in [0, 1].
+fn noiseHash2(p: vec2i) -> f32 {
+  let u = bitcast<vec2u>(p) * vec2u(1597334673u, 3812015801u);
+  return f32(((u.x ^ u.y) * 1597334673u) >> 8u) / 16777215.0;
+}
+
+// Gradient noise, about [-1, 1].
+fn gradientNoise3(p: vec3f) -> f32 {
+  let i = vec3i(floor(p));
+  let f = fract(p);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let n000 = dot(noiseHash3(i), f);
+  let n100 = dot(noiseHash3(i + vec3i(1, 0, 0)), f - vec3f(1.0, 0.0, 0.0));
+  let n010 = dot(noiseHash3(i + vec3i(0, 1, 0)), f - vec3f(0.0, 1.0, 0.0));
+  let n110 = dot(noiseHash3(i + vec3i(1, 1, 0)), f - vec3f(1.0, 1.0, 0.0));
+  let n001 = dot(noiseHash3(i + vec3i(0, 0, 1)), f - vec3f(0.0, 0.0, 1.0));
+  let n101 = dot(noiseHash3(i + vec3i(1, 0, 1)), f - vec3f(1.0, 0.0, 1.0));
+  let n011 = dot(noiseHash3(i + vec3i(0, 1, 1)), f - vec3f(0.0, 1.0, 1.0));
+  let n111 = dot(noiseHash3(i + vec3i(1, 1, 1)), f - vec3f(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// Fractal sum: octaves halve in size and amplitude. About [-1, 1].
+fn fbm3(p: vec3f, octaves: f32) -> f32 {
+  var sum = 0.0;
+  var amp = 0.5;
+  var q = p;
+  for (var i = 0.0; i < octaves; i += 1.0) {
+    sum += amp * gradientNoise3(q);
+    q = q * 2.03 + vec3f(17.1, 31.7, 47.3);
+    amp *= 0.5;
+  }
+  return sum * 1.6;
+}
+
+// Value noise with its derivatives: (value, d/dx, d/dy).
+fn valueNoised2(x: vec2f) -> vec3f {
+  let i = vec2i(floor(x));
+  let f = fract(x);
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  let a = noiseHash2(i);
+  let b = noiseHash2(i + vec2i(1, 0));
+  let c = noiseHash2(i + vec2i(0, 1));
+  let d = noiseHash2(i + vec2i(1, 1));
+  let k4 = a - b - c + d;
+  return vec3f(a + (b - a) * u.x + (c - a) * u.y + k4 * u.x * u.y, du * vec2f(b - a + k4 * u.y, c - a + k4 * u.x));
+}
+
+// IQ-style terrain: fbm whose octaves fade on steep slopes (erosion look). About [0, 1].
+fn terrainHeight(p: vec2f) -> f32 {
+  var a = 0.0;
+  var b = 1.0;
+  var d = vec2f(0.0);
+  var q = p;
+  for (var i = 0; i < 6; i++) {
+    let n = valueNoised2(q);
+    d += n.yz;
+    a += b * n.x / (1.0 + dot(d, d));
+    b *= 0.5;
+    q = vec2f(1.6 * q.x - 1.2 * q.y, 1.2 * q.x + 1.6 * q.y);
+  }
+  return a * 0.55;
+}`;
+
+export const NOISE_GLSL = `// Lattice point → gradient in [-1, 1]³.
+vec3 noiseHash3(ivec3 p) {
+  uvec3 u = uvec3(p) * uvec3(1597334673u, 3812015801u, 2798796415u);
+  u = uvec3(u.x ^ u.y ^ u.z) * uvec3(1597334673u, 3812015801u, 2798796415u);
+  return vec3(u >> 8u) * (2.0 / 16777215.0) - 1.0;
+}
+
+// Lattice point → value in [0, 1].
+float noiseHash2(ivec2 p) {
+  uvec2 u = uvec2(p) * uvec2(1597334673u, 3812015801u);
+  return float(((u.x ^ u.y) * 1597334673u) >> 8u) / 16777215.0;
+}
+
+// Gradient noise, about [-1, 1].
+float gradientNoise3(vec3 p) {
+  ivec3 i = ivec3(floor(p));
+  vec3 f = fract(p);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float n000 = dot(noiseHash3(i), f);
+  float n100 = dot(noiseHash3(i + ivec3(1, 0, 0)), f - vec3(1.0, 0.0, 0.0));
+  float n010 = dot(noiseHash3(i + ivec3(0, 1, 0)), f - vec3(0.0, 1.0, 0.0));
+  float n110 = dot(noiseHash3(i + ivec3(1, 1, 0)), f - vec3(1.0, 1.0, 0.0));
+  float n001 = dot(noiseHash3(i + ivec3(0, 0, 1)), f - vec3(0.0, 0.0, 1.0));
+  float n101 = dot(noiseHash3(i + ivec3(1, 0, 1)), f - vec3(1.0, 0.0, 1.0));
+  float n011 = dot(noiseHash3(i + ivec3(0, 1, 1)), f - vec3(0.0, 1.0, 1.0));
+  float n111 = dot(noiseHash3(i + ivec3(1, 1, 1)), f - vec3(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+
+// Fractal sum: octaves halve in size and amplitude. About [-1, 1].
+float fbm3(vec3 p, float octaves) {
+  float sum = 0.0;
+  float amp = 0.5;
+  vec3 q = p;
+  for (float i = 0.0; i < octaves; i += 1.0) {
+    sum += amp * gradientNoise3(q);
+    q = q * 2.03 + vec3(17.1, 31.7, 47.3);
+    amp *= 0.5;
+  }
+  return sum * 1.6;
+}
+
+// Value noise with its derivatives: (value, d/dx, d/dy).
+vec3 valueNoised2(vec2 x) {
+  ivec2 i = ivec2(floor(x));
+  vec2 f = fract(x);
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  float a = noiseHash2(i);
+  float b = noiseHash2(i + ivec2(1, 0));
+  float c = noiseHash2(i + ivec2(0, 1));
+  float d = noiseHash2(i + ivec2(1, 1));
+  float k4 = a - b - c + d;
+  return vec3(a + (b - a) * u.x + (c - a) * u.y + k4 * u.x * u.y, du * vec2(b - a + k4 * u.y, c - a + k4 * u.x));
+}
+
+// IQ-style terrain: fbm whose octaves fade on steep slopes (erosion look). About [0, 1].
+float terrainHeight(vec2 p) {
+  float a = 0.0;
+  float b = 1.0;
+  vec2 d = vec2(0.0);
+  vec2 q = p;
+  for (int i = 0; i < 6; i++) {
+    vec3 n = valueNoised2(q);
+    d += n.yz;
+    a += b * n.x / (1.0 + dot(d, d));
+    b *= 0.5;
+    q = vec2(1.6 * q.x - 1.2 * q.y, 1.2 * q.x + 1.6 * q.y);
+  }
+  return a * 0.55;
+}`;
+
+/** TypeGPU export: the WGSL noise as typed raw-WGSL functions. */
+export const NOISE_TG = (() => {
+  const fns: [string, string, string, string][] = [
+    ["noiseHash3", "[d.vec3i], d.vec3f", "(p)", ""],
+    ["noiseHash2", "[d.vec2i], d.f32", "(p)", ""],
+    ["gradientNoise3", "[d.vec3f], d.f32", "(p)", "noiseHash3"],
+    ["fbm3", "[d.vec3f, d.f32], d.f32", "(p, octaves)", "gradientNoise3"],
+    ["valueNoised2", "[d.vec2f], d.vec3f", "(x)", "noiseHash2"],
+    ["terrainHeight", "[d.vec2f], d.f32", "(p)", "valueNoised2"],
+  ];
+  const body = (name: string) => {
+    const m = NOISE_WGSL.match(new RegExp(`fn ${name}\\([^)]*\\) -> \\w+ (\\{[\\s\\S]*?\\n\\})`));
+    return m ? m[1] : "{}";
+  };
+  return fns
+    .map(([name, sig, params, dep]) => `const ${name} = tgpu.fn(${sig})\`${params} ${body(name)}\`${dep ? `.$uses({ ${dep} })` : ""};`)
     .join("\n\n");
 })();

@@ -14,6 +14,9 @@ import {
   MODIFIER_GLSL,
   MODIFIER_TG,
   MODIFIER_WGSL,
+  NOISE_GLSL,
+  NOISE_TG,
+  NOISE_WGSL,
   TG_HELPERS,
   WGSL_HELPERS,
   primitiveCall,
@@ -21,6 +24,13 @@ import {
 import { POINT_MODIFIERS, activeModifiers, type Modifier } from "../store/modifiers";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import type { ModifierPlan } from "../sdf/modifierMath";
+import {
+  formulaFunction,
+  formulaNeeds,
+  parseFormula,
+  sanitizeFormula,
+  type FormulaLang,
+} from "../sdf/formula";
 
 export type CodeLang = "typegpu" | "wgsl" | "glsl";
 
@@ -78,6 +88,8 @@ interface ShapeRhs {
   material: Material;
   /** Distance modifiers on the shape's own result (local units). */
   post: PostMod[];
+  /** Generated function for shapeType "formula". */
+  formulaFn?: string;
 }
 interface VarRhs {
   kind: "var";
@@ -85,7 +97,10 @@ interface VarRhs {
 }
 type Rhs = ShapeRhs | VarRhs;
 
-type PostMod = { kind: "round" | "onion"; amount: number };
+/** Distance modifier. noise: `amount` = amplitude, sampled at `point`. */
+type PostMod =
+  | { kind: "round" | "onion"; amount: number }
+  | { kind: "noise"; amount: number; scale: number; octaves: number; seed: number; point: string };
 type RepeatMod = Extract<Modifier, { kind: "repeat" }>;
 
 type Stmt =
@@ -107,6 +122,9 @@ interface Ir {
   usesRotation: boolean;
   usesSmin: boolean;
   usesModifiers: boolean;
+  usesNoise: boolean;
+  /** Formula functions: [name, parsed source]. */
+  formulas: [string, ReturnType<typeof parseFormula> & { ok: true }][];
   /** Distinct baked image SDF data URLs, in order of first use. */
   images: string[];
 }
@@ -138,16 +156,24 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   let usesRotation = false;
   let usesSmin = false;
   let usesModifiers = false;
+  let usesNoise = false;
+  const formulas = new Map<string, string>();
+  const formulaList: Ir["formulas"] = [];
   let accN = 0;
   let ptN = 0;
   const emit = (stmt: Stmt) => sink.push(stmt);
   const freshPoint = () => `q${++ptN}`;
 
-  function postMods(mods: Modifier[], unit: number): PostMod[] {
+  /** `point`: the item's own point before its point modifiers (noise input). */
+  function postMods(mods: Modifier[], unit: number, point: string): PostMod[] {
     const out: PostMod[] = [];
     for (const m of mods) {
       if (m.kind === "round") out.push({ kind: "round", amount: m.radius * unit });
       else if (m.kind === "onion") out.push({ kind: "onion", amount: m.thickness * unit });
+      else if (m.kind === "noise") {
+        usesNoise = true;
+        out.push({ kind: "noise", amount: m.amplitude * unit, scale: m.scale, octaves: m.octaves, seed: m.seed, point });
+      }
     }
     return out;
   }
@@ -181,7 +207,22 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       imageRound: Math.max(0, layer.image?.round ?? 0),
       material: layer.material ?? inherited,
       post: [],
+      formulaFn: layer.shapeType === "formula" ? formulaName(sanitizeFormula(layer.formula)) : undefined,
     };
+  }
+
+  function formulaName(src: string): string {
+    const known = formulas.get(src);
+    if (known) return known;
+    const parsed = parseFormula(src);
+    if (!parsed.ok) throw new Error(`formula should have been sanitized: ${src}`);
+    const needs = formulaNeeds(parsed.ast);
+    if (needs.noise) usesNoise = true;
+    if (needs.smin) usesSmin = true;
+    const name = `formula${formulas.size}`;
+    formulas.set(src, name);
+    formulaList.push([name, parsed]);
+    return name;
   }
 
   /**
@@ -229,7 +270,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
         accScl: null,
         scale: null,
         factor: full.factor * plan.invL,
-        post: postMods(mods, 1),
+        post: postMods(mods, 1, local),
       };
       emit({ t: "def", name: acc, rhs });
       return acc;
@@ -261,7 +302,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     const acc = withMods(pointMods, plan, 0, childPoint, (q) => walkItems(group.items, q, childAcc, material));
     if (!acc) return null;
     if (Math.abs(plan.invL - 1) > 1e-9) emit({ t: "scale", name: acc, k: plan.invL });
-    for (const post of postMods(mods, minV(childAcc))) emit({ t: "post", name: acc, mod: post });
+    for (const post of postMods(mods, minV(childAcc), childPoint)) emit({ t: "post", name: acc, mod: post });
     return acc;
   }
 
@@ -323,7 +364,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     result = walkItems(root.items, "p", [1, 1, 1], DEFAULT_MATERIAL);
   }
 
-  return { stmts, result, usedShapes, usesRotation, usesSmin, usesModifiers, images };
+  return { stmts, result, usedShapes, usesRotation, usesSmin, usesModifiers, usesNoise, formulas: formulaList, images };
 }
 
 // Image SDF texel → distance. Must match sdImage in src/gpu/shader.ts.
@@ -420,6 +461,7 @@ const GLSL_SMIN = `float smin(float a, float b, float k) {
 // ── Renderers ─────────────────────────────────────────────────────────────────
 
 interface Syntax {
+  lang: FormulaLang;
   vec3(v: V3): string;
   vec2(x: number, y: number): string;
   minFn: string;
@@ -440,6 +482,7 @@ interface Syntax {
     rot: string;
     smin: string;
     modifiers: string;
+    noise: string;
     imageSampler: string;
     image: (i: number, url: string) => string;
   };
@@ -468,7 +511,9 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
   const lp = shapeLocalPoint(syn, rhs);
   const [p0, p1, p2, p3] = rhs.params;
   let call: string;
-  if (rhs.shape === "image") {
+  if (rhs.shape === "formula") {
+    call = `${rhs.formulaFn}(${lp}, ${fmt(p0)}, ${fmt(p1)})`;
+  } else if (rhs.shape === "image") {
     call =
       rhs.imageIndex < 0
         ? fmt(1e10) // layer without a baked SDF contributes nothing
@@ -479,10 +524,16 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
       vec3: (x, y, z) => syn.vec3([Number(x), Number(y), Number(z)]),
     });
   }
-  for (const m of rhs.post) {
-    call = m.kind === "round" ? `(${call} - ${fmt(m.amount)})` : `(${syn.absFn}(${call}) - ${fmt(m.amount)})`;
-  }
+  for (const m of rhs.post) call = postModExpr(syn, m, call);
   return Math.abs(rhs.factor - 1) > 1e-9 ? `${call} * ${fmt(rhs.factor)}` : call;
+}
+
+function postModExpr(syn: Syntax, m: PostMod, d: string): string {
+  if (m.kind !== "noise") {
+    return m.kind === "round" ? `(${d} - ${fmt(m.amount)})` : `(${syn.absFn}(${d}) - ${fmt(m.amount)})`;
+  }
+  const input = `${m.point} * ${fmt(m.scale)}${m.seed ? ` + ${syn.vec3([m.seed * 7.13, m.seed * 3.71, m.seed * 5.37])}` : ""}`;
+  return `(${d} + ${fmt(m.amount)} * fbm3(${input}, ${fmt(m.octaves)}))`;
 }
 
 const AXIS = ["x", "y", "z"] as const;
@@ -564,14 +615,7 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         push(syn.assignStmt(stmt.name, `${stmt.name} * ${fmt(stmt.k)}`));
         break;
       case "post":
-        push(
-          syn.assignStmt(
-            stmt.name,
-            stmt.mod.kind === "round"
-              ? `${stmt.name} - ${fmt(stmt.mod.amount)}`
-              : `${syn.absFn}(${stmt.name}) - ${fmt(stmt.mod.amount)}`,
-          ),
-        );
+        push(syn.assignStmt(stmt.name, postModExpr(syn, stmt.mod, stmt.name)));
         break;
     }
   }
@@ -619,6 +663,8 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   }
 
   const helpers: string[] = [];
+  // Noise first: GLSL needs functions declared before use.
+  if (ir.usesNoise || ir.usedShapes.has("terrain")) helpers.push(syn.helpers.noise);
   for (const shape of ALL_SHAPE_TYPES) {
     if (ir.usedShapes.has(shape)) helpers.push(syn.helpers.shapes[shape]);
   }
@@ -627,6 +673,8 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   if (ir.usesRotation) helpers.push(syn.helpers.rot);
   if (ir.usesSmin) helpers.push(syn.helpers.smin);
   if (ir.usesModifiers) helpers.push(syn.helpers.modifiers);
+  // Last: formulas may call smin / noise.
+  for (const [name, parsed] of ir.formulas) helpers.push(formulaFunction(name, parsed.ast, syn.lang));
 
   return [...helpers, `${syn.fnOpen(fnName)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
 }
@@ -708,6 +756,7 @@ function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSynta
 }
 
 const TG_SYNTAX: Syntax = {
+  lang: "typegpu",
   vec3: (v) => `d.vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `d.vec2f(${fmt(x)}, ${fmt(y)})`,
   minFn: "std.min",
@@ -723,10 +772,11 @@ const TG_SYNTAX: Syntax = {
   vec3Expr: (c) => `d.vec3f(${c.join(", ")})`,
   uint: (n) => `${n}`,
   loopOpen: (n, count) => `for (let ${n} = d.u32(0); ${n} < ${count}; ${n}++) {`,
-  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, modifiers: MODIFIER_TG, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
+  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, modifiers: MODIFIER_TG, noise: NOISE_TG, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
 };
 
 const WGSL_SYNTAX: Syntax = {
+  lang: "wgsl",
   vec3: (v) => `vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `vec2f(${fmt(x)}, ${fmt(y)})`,
   minFn: "min",
@@ -742,10 +792,11 @@ const WGSL_SYNTAX: Syntax = {
   vec3Expr: (c) => `vec3f(${c.join(", ")})`,
   uint: (n) => `${n}u`,
   loopOpen: (n, count) => `for (var ${n} = 0u; ${n} < ${count}u; ${n}++) {`,
-  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, modifiers: MODIFIER_WGSL, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
+  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, modifiers: MODIFIER_WGSL, noise: NOISE_WGSL, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
 };
 
 const GLSL_SYNTAX: Syntax = {
+  lang: "glsl",
   vec3: (v) => `vec3(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `vec2(${fmt(x)}, ${fmt(y)})`,
   minFn: "min",
@@ -761,7 +812,7 @@ const GLSL_SYNTAX: Syntax = {
   vec3Expr: (c) => `vec3(${c.join(", ")})`,
   uint: (n) => `${n}`,
   loopOpen: (n, count) => `for (int ${n} = 0; ${n} < ${count}; ${n}++) {`,
-  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, modifiers: MODIFIER_GLSL, imageSampler: "", image: GLSL_IMAGE },
+  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, modifiers: MODIFIER_GLSL, noise: NOISE_GLSL, imageSampler: "", image: GLSL_IMAGE },
 };
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -779,6 +830,12 @@ const RESERVED = new Set([
   "opPolar",
   "opTwist",
   "opBend",
+  "noiseHash3",
+  "noiseHash2",
+  "gradientNoise3",
+  "fbm3",
+  "valueNoised2",
+  "terrainHeight",
 ]);
 
 function sdfFnName(nodeName: string): string {

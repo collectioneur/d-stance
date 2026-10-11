@@ -8,7 +8,7 @@ import type { ObjectGroup, OpType, SceneItem } from "../store/sceneStore";
 import { POINT_MODIFIERS, activeModifiers, type Modifier, type Vec3 } from "../store/modifiers";
 import { maxAbsScale, shapeBoundRadius } from "../gpu/bounds";
 import { itemLocalToWorldPosition } from "../gpu/gizmo";
-import { UNBOUNDED, planPointModifiers, type ModifierPlan } from "./modifierMath";
+import { UNBOUNDED, noiseReach, planPointModifiers, postInvLipschitz, type ModifierPlan } from "./modifierMath";
 
 export type Sphere = { c: Vec3; r: number };
 
@@ -19,8 +19,14 @@ function postGrow(mods: Modifier[]): number {
   for (const m of mods) {
     if (m.kind === "round") g += m.radius;
     else if (m.kind === "onion") g += m.thickness;
+    else if (m.kind === "noise") g += noiseReach(m);
   }
   return g;
+}
+
+/** Shapes and groups whose distance modifiers need the local point (noise). */
+export function needsPoint(mods: Modifier[]): boolean {
+  return mods.some((m) => POINT_MODIFIERS.has(m.kind) || m.kind === "noise");
 }
 
 export function encloseAll(spheres: Sphere[]): Sphere {
@@ -38,11 +44,12 @@ export function encloseAll(spheres: Sphere[]): Sphere {
 export function shapePlan(item: Extract<SceneItem, { kind: "layer" }>): ModifierPlan {
   const mods = activeModifiers(item.modifiers);
   const s = Math.max(Math.abs(item.scale[0]), Math.abs(item.scale[1]), Math.abs(item.scale[2]));
-  return planPointModifiers(
+  const plan = planPointModifiers(
     mods.filter((m) => POINT_MODIFIERS.has(m.kind)),
     [0, 0, 0],
     shapeBoundRadius(item) / s + postGrow(mods),
   );
+  return { ...plan, invL: plan.invL * postInvLipschitz(mods) };
 }
 
 /** Children sphere of a group in its own (local) frame, post modifiers included. */
@@ -60,8 +67,9 @@ export function groupLocalSphere(group: ObjectGroup): Sphere | null {
 export function groupPlan(group: ObjectGroup): ModifierPlan | null {
   const local = groupLocalSphere(group);
   if (!local) return null;
-  const point = activeModifiers(group.modifiers).filter((m) => POINT_MODIFIERS.has(m.kind));
-  return planPointModifiers(point, local.c, local.r);
+  const mods = activeModifiers(group.modifiers);
+  const plan = planPointModifiers(mods.filter((m) => POINT_MODIFIERS.has(m.kind)), local.c, local.r);
+  return { ...plan, invL: plan.invL * postInvLipschitz(mods) };
 }
 
 /** Sphere around the item's geometry in its parent's frame; null for empty groups. */

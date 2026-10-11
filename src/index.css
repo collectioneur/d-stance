@@ -1566,6 +1566,47 @@ canvas {
   color: var(--accent-text);
 }
 
+/* Formula editor */
+.formula-input {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  outline: none;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+  user-select: text;
+}
+
+.formula-input:focus {
+  border-color: var(--accent-border);
+  background: var(--bg-input-focus);
+}
+
+.formula-input--error,
+.formula-input--error:focus {
+  border-color: rgba(248, 113, 113, 0.6);
+}
+
+.formula-error {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--danger);
+}
+
+.formula-error-at {
+  color: var(--text-4);
+}
+
 /* Tree: modifier badge */
 .scene-item-mods {
   flex-shrink: 0;

@@ -18,7 +18,7 @@
  * (src/sdf/primitives.ts), prefixed `ds_` so they cannot collide with names
  * TypeGPU generates for the rest of the shader.
  */
-import { MODIFIER_WGSL, WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
+import { MODIFIER_WGSL, NOISE_WGSL, WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
 import {
   ALL_SHAPE_TYPES,
   type ObjectGroup,
@@ -30,8 +30,9 @@ import {
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
-import { UNBOUNDED, type ModifierPlan } from "../sdf/modifierMath";
-import { groupPlan, shapePlan } from "../sdf/itemBounds";
+import { UNBOUNDED, noiseReach, type ModifierPlan } from "../sdf/modifierMath";
+import { groupPlan, needsPoint, shapePlan } from "../sdf/itemBounds";
+import { formulaFunction, parseFormula, sanitizeFormula } from "../sdf/formula";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
 
@@ -82,8 +83,12 @@ type PointStep =
   | { kind: "polar" | "twist" | "bend"; slot: number; axis: Axis }
   | { kind: "elongate"; slot: number };
 
-/** A distance-modifier step: `.x` of the slot is the amount (already in result units). */
-type PostStep = { kind: "round" | "onion"; slot: number };
+/**
+ * A distance-modifier step. round / onion: slot.x = amount (result units).
+ * noise: slot = (amplitude in result units, scale, octaves, seed), sampled at
+ * the item's own point before its point modifiers (every copy differs).
+ */
+type PostStep = { kind: "round" | "onion" | "noise"; slot: number };
 
 interface LeafNode {
   kind: "leaf";
@@ -96,6 +101,8 @@ interface LeafNode {
   radius: number;
   steps: PointStep[];
   post: PostStep[];
+  /** Generated function name for shapeType "formula". */
+  formulaFn?: string;
 }
 
 interface GroupNode {
@@ -185,6 +192,8 @@ class Builder {
   values: number[] = [];
   leafIds: string[] = [];
   markIndex = new Map<string, number>();
+  /** Formula source → generated function name (identical formulas share one). */
+  formulas = new Map<string, string>();
 
   constructor(private opts: CompileOptions) {}
 
@@ -249,6 +258,13 @@ class Builder {
     const post: PostStep[] = [];
     let grow = 0;
     for (const m of mods) {
+      if (m.kind === "noise") {
+        const slot = this.alloc(1);
+        this.set(slot, m.amplitude * unit, m.scale, m.octaves, m.seed);
+        post.push({ kind: "noise", slot });
+        grow += noiseReach(m);
+        continue;
+      }
       if (m.kind !== "round" && m.kind !== "onion") continue;
       const amount = m.kind === "round" ? m.radius : m.thickness;
       const slot = this.alloc(1);
@@ -296,8 +312,18 @@ class Builder {
     }
     this.markIndex.set(layer.id, (base + 4) * 4 + 2);
     this.leafIds.push(layer.id);
+    let formulaFn: string | undefined;
+    if (layer.shapeType === "formula") {
+      const src = sanitizeFormula(layer.formula);
+      formulaFn = this.formulas.get(src);
+      if (!formulaFn) {
+        formulaFn = `ds_formula${this.formulas.size}`;
+        this.formulas.set(src, formulaFn);
+      }
+    }
     return {
       kind: "leaf",
+      formulaFn,
       layer,
       base,
       cull,
@@ -318,7 +344,8 @@ class Builder {
   ): GroupNode {
     const base = this.alloc(GROUP_SLOTS);
     const mods = activeModifiers(item.modifiers);
-    const hasFrame = mods.some((m) => POINT_MODIFIERS.has(m.kind));
+    // Point modifiers and noise need the group's own point in code.
+    const hasFrame = needsPoint(mods);
     const inner = composeGroupCtx(ctx, item.position, item.rotation, item.scale);
     const frameScale = Math.min(Math.abs(inner.accScl[0]), Math.abs(inner.accScl[1]), Math.abs(inner.accScl[2]));
     let xf = 0;
@@ -470,7 +497,7 @@ const f = (n: number) => (Number.isInteger(n) ? `${n}.0` : `${n}`);
 /** Generated function names that must not collide with TypeGPU's. */
 const PRIMITIVE_HELPERS = (() => {
   const names = new Set<string>();
-  for (const src of [...ALL_SHAPE_TYPES.map((t) => WGSL_HELPERS[t]), MODIFIER_WGSL]) {
+  for (const src of [...ALL_SHAPE_TYPES.map((t) => WGSL_HELPERS[t]), MODIFIER_WGSL, NOISE_WGSL]) {
     for (const m of src.matchAll(/fn (\w+)\(/g)) names.add(m[1]);
   }
   return names;
@@ -492,6 +519,7 @@ function leafCall(node: LeafNode, lp: string): string {
   const b = node.base;
   const P = slot(b + 3);
   if (node.layer.shapeType === "image") return `ds_sdImage(${lp}, ${P}, ${slot(b + LEAF_SLOTS)})`;
+  if (node.layer.shapeType === "formula") return `${node.formulaFn}(${lp}, ${P}.x, ${P}.y)`;
   const params = [`${P}.x`, `${P}.y`, `${P}.z`, `${P}.w`] as const;
   // Prefer a swizzle when a primitive takes the first three params as a vector.
   const call = primitiveCall(node.layer.shapeType, lp, params, {
@@ -522,8 +550,12 @@ function stepExpr(s: PointStep, q: string): string {
   }
 }
 
-function postExpr(s: PostStep, d: string): string {
-  return s.kind === "round" ? `(${d} - ${slot(s.slot)}.x)` : `(abs(${d}) - ${slot(s.slot)}.x)`;
+/** `q`: the item's own point (before its point modifiers), for noise. */
+function postExpr(s: PostStep, d: string, q: string): string {
+  const S = slot(s.slot);
+  if (s.kind === "round") return `(${d} - ${S}.x)`;
+  if (s.kind === "onion") return `(abs(${d}) - ${S}.x)`;
+  return `(${d} + ${S}.x * ds_fbm3(${q} * ${S}.y + ${S}.w * vec3f(7.13, 3.71, 5.37), ${S}.z))`;
 }
 
 function combine(op: OpType, a: string, b: string, k: string): string {
@@ -689,17 +721,18 @@ class Emitter {
     this.push(depth, `let ${q0} = ${xf};`);
     return this.withSteps(node.steps, q0, depth, (q) => {
       let e = leafCall(node, q);
-      for (const s of node.post) e = postExpr(s, e);
+      for (const s of node.post) e = postExpr(s, e, q0);
       return { d: `${e} * ${factor}`, m: mat };
     });
   }
 
   groupValue(node: GroupNode, depth: number, frame: Frame): Val {
     let res: Val;
+    let q0 = frame.p;
     if (!node.frame) {
       res = this.nodes(node.children, depth, frame);
     } else {
-      const q0 = this.fresh("q");
+      q0 = this.fresh("q");
       this.push(depth, `let ${q0} = ds_xf(${frame.p}, ${node.frame.xf}u);`);
       const inner = `${slot(node.base)}.w`;
       res = this.withSteps(node.frame.steps, q0, depth, (q, d) => this.nodes(node.children, d, { p: q, f: inner }));
@@ -707,7 +740,7 @@ class Emitter {
     if (!node.lipschitz && node.post.length === 0) return res;
     const g = this.fresh("g");
     this.push(depth, `var ${g} = ${res.d}${node.lipschitz ? ` * ${slot(node.base)}.x` : ""};`);
-    for (const s of node.post) this.push(depth, `${g} = ${postExpr(s, g)};`);
+    for (const s of node.post) this.push(depth, `${g} = ${postExpr(s, g, q0)};`);
     return { d: g, m: res.m };
   }
 
@@ -824,6 +857,7 @@ fn ds_sdImage(q: vec3f, P: vec4f, X: vec4f) -> f32 {
 
 /** Every helper is emitted: unused WGSL functions cost nothing at runtime. */
 const HELPERS_WGSL = [
+  prefixHelpers(NOISE_WGSL),
   ...ALL_SHAPE_TYPES.map((t) => prefixHelpers(WGSL_HELPERS[t])),
   prefixHelpers(MODIFIER_WGSL),
   RUNTIME_WGSL,
@@ -838,8 +872,14 @@ export function compileScene(root: SceneRoot, opts: CompileOptions): CompiledSce
   const info = new Emitter(true);
   const infoMat = ir.length > 0 ? info.nodes(ir, 1).m : "ds_defaultMat()";
 
+  const formulas = [...builder.formulas].map(([src, name]) => {
+    const parsed = parseFormula(src);
+    if (!parsed.ok) throw new Error(`formula should have been sanitized: ${src}`);
+    return prefixHelpers(formulaFunction(name, parsed.ast, "wgsl")).replace(/\bsmin\(/g, "ds_smin(");
+  });
   const code = [
     HELPERS_WGSL,
+    ...formulas,
     `fn ds_sdScene(p: vec3f) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc};\n}`,
     `fn ds_sceneInfo(p: vec3f) -> DsInfo {
   var info = vec4f(0.0, 0.0, 1e9, 0.0);

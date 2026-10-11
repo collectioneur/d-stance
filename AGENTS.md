@@ -52,6 +52,9 @@ A shape is not registered until **all** of these know it, with the same key:
 - `shapeBoundRadius` in `src/gpu/bounds.ts` — a too-small radius makes culling cut the shape off.
 - `SHAPE_ICONS` in `commands.ts` (`Record<ShapeType, …>` will fail typecheck if an icon is missing; toolbar `SHAPES` vs palette `EXTRA_SHAPES` is a separate product choice). Icons are generated: add the shape to `icons` in `scripts/gen-shape-icons.mjs`, run `node scripts/gen-shape-icons.mjs`
 - `e2e/scenes.ts` `SHAPES` (render tests) and `src/test/fixtures.ts` `kitchenSink` (codegen snapshot + compile test).
+- `RightPanel.tsx` `SIZE_FIELDS` (inspector fields per param).
+
+Two shapes are special: `image` (texture sampling, per-language wrappers) and `formula` (no static source — `src/sdf/formula.ts` parses the user's `formula` string and emits one function per distinct source in every language). Both are excluded from `primitiveCall`. Terrain samples `terrainHeight` from the shared noise sources (`NOISE_*` in primitives.ts, emitted before shapes because GLSL needs declaration order).
 
 ### 2. Compiled scene
 
@@ -85,6 +88,12 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 - Numbers (spacing, counts, amounts) are values; kinds, axes, mirror axes, neighbor loops and on/off are code.
 - WGSL / GLSL / TypeGPU helper sources live in `primitives.ts` (`MODIFIER_*`); the compiler prefixes them `ds_`. Export helper names are reserved (`RESERVED` in generateSdfCode).
 
+### 2d. Noise and formulas
+
+- Noise uses **integer hashing only** (`NOISE_WGSL` / `NOISE_GLSL`) so WebGPU, WebGL2 and every driver produce the same field. Never switch to sin-based float hashes.
+- The noise modifier samples the item's own point *before* its point modifiers, so repeated copies differ. Its 1/Lipschitz (`postInvLipschitz`) and reach (`noiseReach`) feed the shared plans — changing the noise sum changes both.
+- Formulas are a trust boundary (hash links): `parseFormula` is a closed recursive-descent parser with a function / constant whitelist looked up by **own** keys only (`constructor` is not a function). `sanitizeFormula` replaces anything that does not parse. Never emit user text that did not come out of the AST emitter.
+
 ### 2b. Embed export
 
 - `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
@@ -112,7 +121,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 8` (v4–v7 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 9` (v4–v8 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.

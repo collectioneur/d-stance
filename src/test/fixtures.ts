@@ -24,6 +24,7 @@ export function shape(
     ...(opts.image ? { image: opts.image } : {}),
     ...(opts.material ? { material: opts.material } : {}),
     ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
+    ...(opts.formula ? { formula: opts.formula } : {}),
   };
 }
 
@@ -108,6 +109,9 @@ export function kitchenSink(): SceneRoot {
     shape("octahedron", { id: "oc" }),
     shape("pyramid", { id: "py" }),
     shape("vesica", { id: "ve" }),
+    shape("terrain", { id: "te" }),
+    shape("gyroid", { id: "gy", modifiers: [{ kind: "noise", amplitude: 0.02, scale: 8, octaves: 3, seed: 2 }] }),
+    shape("formula", { id: "fo", formula: "smin(length(x, y, z) - 0.3, y + 0.1, 0.1) + 0.02*fbm(x*4, y*4, z*4) - atan2(x, z)*0" }),
     shape("image", { id: "im", image: { sdf: FAKE_IMAGE_SDF, round: 0.02 } }),
   ]);
 }

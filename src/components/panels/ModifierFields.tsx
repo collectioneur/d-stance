@@ -3,6 +3,7 @@ import { useSceneStore, type SceneItem } from "../../store/sceneStore";
 import {
   MAX_DEFORM,
   MAX_MODIFIERS,
+  MAX_OCTAVES,
   MAX_POLAR_COUNT,
   MAX_REPEAT_COUNT,
   MIN_SPACING,
@@ -19,7 +20,7 @@ import { shapeBoundRadius } from "../../gpu/bounds";
 import { groupLocalSphere } from "../../sdf/itemBounds";
 import { NumberField } from "./fields";
 
-const KINDS: ModifierKind[] = ["repeat", "mirror", "polar", "twist", "bend", "elongate", "round", "onion"];
+const KINDS: ModifierKind[] = ["repeat", "mirror", "polar", "twist", "bend", "elongate", "round", "onion", "noise"];
 const AXES = ["X", "Y", "Z"] as const;
 
 /** The item's size in its own space, so new modifiers start with sensible numbers. */
@@ -185,6 +186,15 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
       return <ScalarRow label="Radius" value={m.radius} min={0} max={10} step={0.01} onChange={(radius) => onChange({ ...m, radius })} />;
     case "onion":
       return <ScalarRow label="Thickness" value={m.thickness} min={0.001} max={10} step={0.005} onChange={(thickness) => onChange({ ...m, thickness })} />;
+    case "noise":
+      return (
+        <>
+          <ScalarRow label="Amplitude" value={m.amplitude} min={0} max={2} step={0.005} onChange={(amplitude) => onChange({ ...m, amplitude })} />
+          <ScalarRow label="Scale" value={m.scale} min={0.1} max={100} step={0.5} onChange={(scale) => onChange({ ...m, scale })} />
+          <ScalarRow label="Octaves" value={m.octaves} min={1} max={MAX_OCTAVES} step={1} integer onChange={(octaves) => onChange({ ...m, octaves })} />
+          <ScalarRow label="Seed" value={m.seed} min={0} max={9999} step={1} integer onChange={(seed) => onChange({ ...m, seed })} />
+        </>
+      );
   }
 }
 
@@ -233,7 +243,7 @@ export function ModifierFields({ item }: { item: SceneItem }) {
       </div>
       {mods.length === 0 && (
         <p className="props-op-hint">
-          Repeat, mirror, twist, bend, round or hollow this {item.kind === "group" ? "object" : "shape"}.
+          Repeat, mirror, twist, bend, round, hollow or roughen this {item.kind === "group" ? "object" : "shape"}.
         </p>
       )}
       {mods.map((m, i) => (

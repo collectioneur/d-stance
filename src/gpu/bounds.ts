@@ -20,6 +20,14 @@ export function shapeBoundRadius(layer: ShapeLayer): number {
     case "box":
       r = Math.hypot(a, b, c);
       break;
+    case "terrain":
+      // Tile: base at y = 0, peaks up to 1.1·height (terrainHeight ≤ 1).
+      r = Math.hypot(a, b * 1.1 + 0.01, a) + b * 0.6;
+      break;
+    case "gyroid":
+    case "formula":
+      r = a * Math.sqrt(3);
+      break;
     case "image":
       // 2D field is clamped to the [-a, a]² square, so bold can't escape it.
       r = Math.hypot(a, a, b);
