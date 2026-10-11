@@ -6,7 +6,12 @@ import {
   PICK_PASS_SCENE,
   RENDER_MODE_CHROME,
   RENDER_MODE_CLASSIC,
+  RENDER_MODE_COST,
+  RENDER_MODE_FIELD,
+  RENDER_MODE_NEON,
+  RENDER_MODE_NORMALS,
   RENDER_MODE_STUDIO,
+  RENDER_MODE_VOLUME,
 } from "./shader";
 import {
   useSceneStore,
@@ -196,8 +201,17 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let latestRoot: SceneRoot | null = null;
       let dataDirty = true;
 
-      const modeId = (mode: RenderMode) =>
-        mode === "classic" ? RENDER_MODE_CLASSIC : mode === "studio" ? RENDER_MODE_STUDIO : RENDER_MODE_CHROME;
+      const MODE_IDS: Record<RenderMode, number> = {
+        classic: RENDER_MODE_CLASSIC,
+        chrome: RENDER_MODE_CHROME,
+        studio: RENDER_MODE_STUDIO,
+        neon: RENDER_MODE_NEON,
+        volume: RENDER_MODE_VOLUME,
+        field: RENDER_MODE_FIELD,
+        cost: RENDER_MODE_COST,
+        normals: RENDER_MODE_NORMALS,
+      };
+      const modeId = (mode: RenderMode) => MODE_IDS[mode] ?? RENDER_MODE_CLASSIC;
 
       /** Programs are per (render mode, scene code): see renderModeSlot in shader.ts. */
       function programFor(code: string, mode: RenderMode): Program {
@@ -286,7 +300,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           selectAll: rootSelected && scene.leafIds.length > 0 && !useTryStore.getState().trying ? 1 : 0,
           time,
           boundsCenter: d.vec3f(0, 0, 0),
-          _pad2: 0,
+          sliceY: useRenderStore.getState().sliceY,
         });
         writtenTime = time;
         dataDirty = false;
@@ -1316,6 +1330,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let lastDrawnRoot: SceneRoot | null = null;
       let sceneAnimated = false;
       let lastTrying = false;
+      let lastSliceY = 0;
       let animatedFor: SceneRoot | null = null;
       let lastTick = performance.now();
       let lastActive: { program: Program; scene: CompiledScene } | null = null;
@@ -1332,7 +1347,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
         const { root: sceneRoot, selectedIds, rootSelected } =
           useSceneStore.getState();
-        const { renderMode, quality } = useRenderStore.getState();
+        const { renderMode, quality, sliceY } = useRenderStore.getState();
         if (quality !== lastQuality) {
           applyQualityPreset(quality);
           lastQuality = quality;
@@ -1361,11 +1376,13 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
           renderMode !== lastRenderMode ||
-          trying !== lastTrying
+          trying !== lastTrying ||
+          sliceY !== lastSliceY
         ) {
           dataDirty = true;
         }
         lastTrying = trying;
+        lastSliceY = sliceY;
         lastRoot = sceneRoot;
         lastSelectedIds = selectedIds;
         lastRootSelected = rootSelected;

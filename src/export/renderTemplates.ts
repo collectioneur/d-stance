@@ -11,12 +11,17 @@
  * - classic: one key light + iteration AO; chrome: reflection march + studio
  *   environment + SDF AO + ACES, tinted by the material; studio: GGX key
  *   light with soft shadow, sky ambient, reflections, AO, and a floor under
- *   the scene that catches the shadow (alpha-only on transparent pages)
+ *   the scene that catches the shadow (alpha-only on transparent pages);
+ *   neon: glow along the ray in the closest surface's color, dark glossy
+ *   bodies; volume: shapes as self-shadowed clouds (density from the SDF and
+ *   noise), composited with premultiplied alpha
  *
  * Export options are baked in as constants so the driver prunes what is off.
  */
 
-export type EmbedStyle = "classic" | "chrome" | "studio";
+import { NOISE_GLSL, NOISE_WGSL } from "../sdf/primitives";
+
+export type EmbedStyle = "classic" | "chrome" | "studio" | "neon" | "volume";
 export type EmbedBackground = "transparent" | "studio";
 
 export interface RenderConstants {
@@ -63,7 +68,306 @@ const num = (n: number) => {
 const HIT_EPS = 0.001;
 const REST_HIT_EPS = 0.01;
 
-const STYLE_ID: Record<EmbedStyle, number> = { classic: 0, chrome: 1, studio: 2 };
+const STYLE_ID: Record<EmbedStyle, number> = { classic: 0, chrome: 1, studio: 2, neon: 3, volume: 4 };
+
+/** The scene's own noise under other names (the scene may already define it). */
+const NOISE_NAMES = [...NOISE_WGSL.matchAll(/\bfn (\w+)\(/g)].map((m) => m[1]);
+const volNoise = (src: string) => src.replace(new RegExp(`\\b(${NOISE_NAMES.join("|")})\\b`, "g"), "vol_$1");
+
+/**
+ * Neon and Volume functions (shader.ts rayMarchNeon / renderVolume). Only
+ * the chosen style's code is emitted: both call the scene many times.
+ */
+function wgslLook(fns: SceneFns, style: EmbedStyle): string {
+  const mat = (at: string) => `${call(fns, fns.materialName, "view.time").replace("(p", `(${at}`)}`;
+  if (style === "neon") {
+    return `
+// (t or -1, glow, t of the closest pass, steps): glow adds up near surfaces.
+fn marchNeon(ro: vec3f, rd: vec3f) -> vec4f {
+  let span = bounds(ro, rd);
+  if (span.y < 0.0) { return vec4f(-1.0, 0.0, 0.0, 0.0); }
+  var t = span.x;
+  var glow = 0.0;
+  var closest = 1e9;
+  var tClosest = t;
+  for (var i = 0; i < MAX_STEPS; i++) {
+    let d = map(ro + rd * t);
+    glow += exp(-max(d, 0.0) * 24.0) * 0.06;
+    if (d < closest) { closest = d; tClosest = t; }
+    if (d < ${num(HIT_EPS)} * max(t, 1.0)) { return vec4f(t, glow, t, f32(i + 1)); }
+    t += max(d * 0.8, 0.004);
+    if (t > span.y) { break; }
+  }
+  return vec4f(-1.0, glow, tClosest, f32(MAX_STEPS));
+}
+
+fn shadeNeon(ro: vec3f, rd: vec3f, t: f32) -> vec3f {
+  let p = ro + rd * t;
+  let n = normal(p);
+  let v = -rd;
+  let m = ${mat("p")};
+  let tint = m.color * (1.0 + m.emission);
+  let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+  let spec = pow(max(dot(n, normalize(KEY_LIGHT + v)), 0.0), 90.0);
+  return tint * (0.05 + rim * 1.4) + vec3f(spec * 0.5);
+}
+
+fn neonHalo(ro: vec3f, rd: vec3f, hit: vec4f) -> vec3f {
+  if (hit.y <= 0.001) { return vec3f(0.0); }
+  let p = ro + rd * hit.z;
+  let m = ${mat("p")};
+  return m.color * (1.0 + m.emission) * (1.0 - exp(-hit.y * 0.9)) * 1.3;
+}
+`;
+  }
+  if (style === "volume") {
+    return `
+${volNoise(NOISE_WGSL)}
+
+// Shapes as clouds: (premultiplied linear color, alpha). Mirrors shader.ts renderVolume.
+const VOLUME_EDGE = 0.06;
+const VOLUME_STEP = 0.015;
+
+fn renderVolume(ro: vec3f, rd: vec3f) -> vec4f {
+  let span = bounds(ro, rd);
+  if (span.y < 0.0) { return vec4f(0.0); }
+  var t = span.x;
+  var T = 1.0;
+  // Light per cloud (the first two a ray enters); materials after the loop.
+  var lightA = vec3f(0.0);
+  var weightA = 0.0;
+  var lightB = vec3f(0.0);
+  var weightB = 0.0;
+  var entryA = vec3f(0.0);
+  var entryB = vec3f(0.0);
+  var clouds = 0;
+  var inside = false;
+  // One map() call site: a sample's light probe is the next iteration's lookup.
+  var probing = false;
+  var dens = 0.0;
+  for (var i = 0; i < MAX_STEPS * 3; i++) {
+    let p = ro + rd * t;
+    let d = map(select(p, p + KEY_LIGHT * 0.15, probing));
+    if (probing) {
+      probing = false;
+      let sun = exp(-clamp(-d * 6.0, 0.0, 1.0) * 3.2);
+      let light = vec3f(0.12, 0.13, 0.17) + vec3f(1.0, 0.95, 0.86) * (sun * 2.0);
+      let a = 1.0 - exp(-dens * VOLUME_STEP);
+      let w = T * a;
+      if (clouds < 2) { lightA += light * w; weightA += w; } else { lightB += light * w; weightB += w; }
+      T *= 1.0 - a;
+      t += VOLUME_STEP;
+    } else if (d > VOLUME_EDGE + 0.02) {
+      t += d - VOLUME_EDGE;
+      if (d > VOLUME_EDGE + 0.15) { inside = false; } // a clear gap ends this cloud
+    } else {
+      if (!inside) {
+        inside = true;
+        if (clouds == 0) { entryA = p; } else if (clouds == 1) { entryB = p; }
+        clouds++;
+      }
+      // Noise erodes the surface into wisps (density = −sdf + fbm).
+      let shaped = d - VOLUME_EDGE * vol_fbm3(p * 7.0 + vec3f(0.0, view.time * -0.25, 0.0), 3.0);
+      if (shaped < 0.0) {
+        dens = min(-shaped * 14.0, 1.0) * 22.0;
+        probing = true;
+      } else {
+        t += VOLUME_STEP;
+      }
+    }
+    if (T < 0.02 || t > span.y) { break; }
+  }
+  var col = vec3f(0.0);
+  if (weightA > 0.0) {
+    let m = ${mat("entryA")};
+    col += m.color * m.color * lightA + m.color * (m.emission * 1.5 * weightA);
+  }
+  if (weightB > 0.0) {
+    let m = ${mat("entryB")};
+    col += m.color * m.color * lightB + m.color * (m.emission * 1.5 * weightB);
+  }
+  return vec4f(col, 1.0 - T);
+}
+`;
+  }
+  return "";
+}
+
+/** The end of fs(): what a pixel shows, per style (bg is the studio backdrop). */
+function wgslFinish(style: EmbedStyle): string {
+  const bg = "mix(vec3f(0.055), vec3f(0.118), clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0)) * clamp(1.0 - 0.175 * dot(uv, uv), 0.0, 1.0)";
+  if (style === "neon") {
+    return `  let hit = marchNeon(ro, rd);
+  let halo = neonHalo(ro, rd, hit);
+  if (hit.x >= 0.0) { return vec4f(min(shadeNeon(ro, rd, hit.x) + halo, vec3f(1.0)), 1.0); }
+  if (TRANSPARENT) {
+    let h = min(halo, vec3f(1.0));
+    return vec4f(h, max(h.x, max(h.y, h.z)));
+  }
+  return vec4f(min(${bg} * 0.45 + halo, vec3f(1.0)), 1.0);`;
+  }
+  if (style === "volume") {
+    return `  let vol = renderVolume(ro, rd);
+  var c = vec3f(0.0);
+  if (vol.w > 0.001) { c = pow(aces(vol.xyz / vol.w), vec3f(1.0 / 2.2)); }
+  if (TRANSPARENT) { return vec4f(c * vol.w, vol.w); }
+  return vec4f(c * vol.w + ${bg} * (1.0 - vol.w), 1.0);`;
+  }
+  return `  let hit = march(ro, rd);
+  if (hit.x >= 0.0) { return vec4f(shade(ro, rd, hit.x, hit.y), 1.0); }
+  let fl = floorLight(ro, rd);
+  if (TRANSPARENT) { return vec4f(0.0, 0.0, 0.0, (1.0 - fl.x) * fl.y * 0.75); }
+  let bg = ${bg};
+  return vec4f(bg * mix(1.0, fl.x, fl.y * 0.9) + vec3f(0.035) * (fl.y * fl.x), 1.0);`;
+}
+
+function glslLook(fns: SceneFns, style: EmbedStyle): string {
+  const mat = (at: string) => `${call(fns, fns.materialName, "uTime").replace("(p", `(${at}`)}`;
+  if (style === "neon") {
+    return `
+// (t or -1, glow, t of the closest pass, steps): glow adds up near surfaces.
+vec4 marchNeon(vec3 ro, vec3 rd) {
+  vec2 span = bounds(ro, rd);
+  if (span.y < 0.0) return vec4(-1.0, 0.0, 0.0, 0.0);
+  float t = span.x;
+  float glow = 0.0;
+  float closest = 1e9;
+  float tClosest = t;
+  for (int i = 0; i < MAX_STEPS; i++) {
+    float d = map(ro + rd * t);
+    glow += exp(-max(d, 0.0) * 24.0) * 0.06;
+    if (d < closest) { closest = d; tClosest = t; }
+    if (d < ${num(HIT_EPS)} * max(t, 1.0)) return vec4(t, glow, t, float(i + 1));
+    t += max(d * 0.8, 0.004);
+    if (t > span.y) break;
+  }
+  return vec4(-1.0, glow, tClosest, float(MAX_STEPS));
+}
+
+vec3 shadeNeon(vec3 ro, vec3 rd, float t) {
+  vec3 p = ro + rd * t;
+  vec3 n = calcNormal(p);
+  vec3 v = -rd;
+  SdfMaterial m = ${mat("p")};
+  vec3 tint = m.color * (1.0 + m.emission);
+  float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+  float spec = pow(max(dot(n, normalize(KEY_LIGHT + v)), 0.0), 90.0);
+  return tint * (0.05 + rim * 1.4) + vec3(spec * 0.5);
+}
+
+vec3 neonHalo(vec3 ro, vec3 rd, vec4 hit) {
+  if (hit.y <= 0.001) return vec3(0.0);
+  vec3 p = ro + rd * hit.z;
+  SdfMaterial m = ${mat("p")};
+  return m.color * (1.0 + m.emission) * (1.0 - exp(-hit.y * 0.9)) * 1.3;
+}
+`;
+  }
+  if (style === "volume") {
+    return `
+${volNoise(NOISE_GLSL)}
+
+// Shapes as clouds: (premultiplied linear color, alpha). Mirrors shader.ts renderVolume.
+const float VOLUME_EDGE = 0.06;
+const float VOLUME_STEP = 0.015;
+
+vec4 renderVolume(vec3 ro, vec3 rd) {
+  vec2 span = bounds(ro, rd);
+  if (span.y < 0.0) return vec4(0.0);
+  float t = span.x;
+  float T = 1.0;
+  // Light per cloud (the first two a ray enters); materials after the loop.
+  vec3 lightA = vec3(0.0);
+  float weightA = 0.0;
+  vec3 lightB = vec3(0.0);
+  float weightB = 0.0;
+  vec3 entryA = vec3(0.0);
+  vec3 entryB = vec3(0.0);
+  int clouds = 0;
+  bool inside = false;
+  // One map() call site: a sample's light probe is the next iteration's lookup.
+  bool probing = false;
+  float dens = 0.0;
+  for (int i = 0; i < MAX_STEPS * 3; i++) {
+    vec3 p = ro + rd * t;
+    float d = map(probing ? p + KEY_LIGHT * 0.15 : p);
+    if (probing) {
+      probing = false;
+      float sun = exp(-clamp(-d * 6.0, 0.0, 1.0) * 3.2);
+      vec3 light = vec3(0.12, 0.13, 0.17) + vec3(1.0, 0.95, 0.86) * (sun * 2.0);
+      float a = 1.0 - exp(-dens * VOLUME_STEP);
+      float w = T * a;
+      if (clouds < 2) { lightA += light * w; weightA += w; } else { lightB += light * w; weightB += w; }
+      T *= 1.0 - a;
+      t += VOLUME_STEP;
+    } else if (d > VOLUME_EDGE + 0.02) {
+      t += d - VOLUME_EDGE;
+      if (d > VOLUME_EDGE + 0.15) inside = false; // a clear gap ends this cloud
+    } else {
+      if (!inside) {
+        inside = true;
+        if (clouds == 0) entryA = p; else if (clouds == 1) entryB = p;
+        clouds++;
+      }
+      // Noise erodes the surface into wisps (density = −sdf + fbm).
+      float shaped = d - VOLUME_EDGE * vol_fbm3(p * 7.0 + vec3(0.0, uTime * -0.25, 0.0), 3.0);
+      if (shaped < 0.0) {
+        dens = min(-shaped * 14.0, 1.0) * 22.0;
+        probing = true;
+      } else {
+        t += VOLUME_STEP;
+      }
+    }
+    if (T < 0.02 || t > span.y) break;
+  }
+  vec3 col = vec3(0.0);
+  if (weightA > 0.0) {
+    SdfMaterial m = ${mat("entryA")};
+    col += m.color * m.color * lightA + m.color * (m.emission * 1.5 * weightA);
+  }
+  if (weightB > 0.0) {
+    SdfMaterial m = ${mat("entryB")};
+    col += m.color * m.color * lightB + m.color * (m.emission * 1.5 * weightB);
+  }
+  return vec4(col, 1.0 - T);
+}
+`;
+  }
+  return "";
+}
+
+function glslFinish(style: EmbedStyle): string {
+  const bg = "mix(vec3(0.055), vec3(0.118), clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0)) * clamp(1.0 - 0.175 * dot(uv, uv), 0.0, 1.0)";
+  if (style === "neon") {
+    return `  vec4 hit = marchNeon(ro, rd);
+  vec3 halo = neonHalo(ro, rd, hit);
+  if (hit.x >= 0.0) return vec4(min(shadeNeon(ro, rd, hit.x) + halo, vec3(1.0)), 1.0);
+#if TRANSPARENT
+  vec3 h = min(halo, vec3(1.0));
+  return vec4(h, max(h.x, max(h.y, h.z)));
+#else
+  return vec4(min(${bg} * 0.45 + halo, vec3(1.0)), 1.0);
+#endif`;
+  }
+  if (style === "volume") {
+    return `  vec4 vol = renderVolume(ro, rd);
+  vec3 c = vol.w > 0.001 ? pow(aces(vol.xyz / vol.w), vec3(1.0 / 2.2)) : vec3(0.0);
+#if TRANSPARENT
+  return vec4(c * vol.w, vol.w);
+#else
+  return vec4(c * vol.w + ${bg} * (1.0 - vol.w), 1.0);
+#endif`;
+  }
+  return `  vec2 hit = march(ro, rd);
+  if (hit.x >= 0.0) return vec4(shade(ro, rd, hit.x, hit.y), 1.0);
+  vec2 fl = floorLight(ro, rd);
+#if TRANSPARENT
+  return vec4(0.0, 0.0, 0.0, (1.0 - fl.x) * fl.y * 0.75);
+#else
+  vec3 bg = ${bg};
+  return vec4(bg * mix(1.0, fl.x, fl.y * 0.9) + vec3(0.035) * (fl.y * fl.x), 1.0);
+#endif`;
+}
 
 /** WGSL module with entry points vs / fs. */
 export function renderWgsl(fns: SceneFns, c: RenderConstants): string {
@@ -324,6 +628,7 @@ fn floorLight(ro: vec3f, rd: vec3f) -> vec2f {
   return vec2f(light, near);
 }
 
+${wgslLook(fns, c.style)}
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
   let pos = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -338,12 +643,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let ro = ray.ro;
   let rd = ray.rd;
 
-  let hit = march(ro, rd);
-  if (hit.x >= 0.0) { return vec4f(shade(ro, rd, hit.x, hit.y), 1.0); }
-  let fl = floorLight(ro, rd);
-  if (TRANSPARENT) { return vec4f(0.0, 0.0, 0.0, (1.0 - fl.x) * fl.y * 0.75); }
-  let bg = mix(vec3f(0.055), vec3f(0.118), clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0)) * clamp(1.0 - 0.175 * dot(uv, uv), 0.0, 1.0);
-  return vec4f(bg * mix(1.0, fl.x, fl.y * 0.9) + vec3f(0.035) * (fl.y * fl.x), 1.0);
+${wgslFinish(c.style)}
 }
 ${fns.interactiveCount ? `
 // Interactive item under view.pick as id / 255 (0 = none), for hover and click.
@@ -591,6 +891,7 @@ void cameraRay(vec2 px, out vec3 ro, out vec3 rd) {
   rd = vec3(rd.x, rdYZ.x, rdYZ.y);
 }
 
+${glslLook(fns, c.style)}
 // frag: pixel position from the top-left corner.
 vec4 render(vec2 frag) {
   vec2 uvn = frag / uRes * 2.0 - 1.0;
@@ -599,15 +900,7 @@ vec4 render(vec2 frag) {
   vec3 rd;
   cameraRay(frag, ro, rd);
 
-  vec2 hit = march(ro, rd);
-  if (hit.x >= 0.0) return vec4(shade(ro, rd, hit.x, hit.y), 1.0);
-  vec2 fl = floorLight(ro, rd);
-#if TRANSPARENT
-  return vec4(0.0, 0.0, 0.0, (1.0 - fl.x) * fl.y * 0.75);
-#else
-  vec3 bg = mix(vec3(0.055), vec3(0.118), clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0)) * clamp(1.0 - 0.175 * dot(uv, uv), 0.0, 1.0);
-  return vec4(bg * mix(1.0, fl.x, fl.y * 0.9) + vec3(0.035) * (fl.y * fl.x), 1.0);
-#endif
+${glslFinish(c.style)}
 }`;
 }
 

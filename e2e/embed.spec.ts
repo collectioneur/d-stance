@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { bakeTestImage, box, canvasShot, imageDiff, openEditor, openHtml, sphere, waitForProgram } from "./helpers";
 import { csgScene, modifiersScene } from "./scenes";
 
-type Opts = { style: "classic" | "chrome"; background: "studio" | "transparent"; motion: "still"; quality: "fast" | "balanced" | "best" };
+type Opts = { style: "classic" | "chrome" | "studio" | "neon" | "volume"; background: "studio" | "transparent"; motion: "still"; quality: "fast" | "balanced" | "best" };
 const VIEW = { rotX: 0.3, rotY: 0.4, distance: 2.5 };
 
 async function makeEmbed(page: Page, root: unknown, opts: Partial<Opts> = {}) {
@@ -51,7 +51,7 @@ test.describe("embed export", () => {
   });
 
   test("WebGPU and WebGL2 backends draw the same image", async ({ page }) => {
-    for (const style of ["classic", "chrome", "studio"] as const) {
+    for (const style of ["classic", "chrome", "studio", "neon", "volume"] as const) {
       await openEditor(page);
       const out = await makeEmbed(page, csgScene(), { style });
       await mountDirect(page, out.scene, "webgpu");
@@ -74,6 +74,8 @@ test.describe("embed export", () => {
       ["chrome", lift(csgScene().items)],
       ["studio", lift(csgScene().items)],
       ["studio", lift(modifiersScene().items)],
+      ["neon", lift(csgScene().items)],
+      ["volume", lift(csgScene().items)],
     ] as const) {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);
       await openEditor(page, lifted as never);
@@ -129,7 +131,7 @@ test.describe("embed export", () => {
       };
       const out: string[] = [];
       for (const root of [kitchenSink(), modifiersScene(), { id: "e", name: "Empty", items: [] }]) {
-        for (const style of ["classic", "chrome", "studio"]) {
+        for (const style of ["classic", "chrome", "studio", "neon", "volume"]) {
           for (const background of ["studio", "transparent"]) {
             for (const quality of ["fast", "best"]) {
               const e = generateEmbed(root as never, { style, background, quality, motion: "still", framing: background === "studio" ? "fit" : "editor", view } as never);

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSceneStore } from "../../store/sceneStore";
-import { useRenderStore } from "../../store/renderStore";
+import { useRenderStore, type RenderMode } from "../../store/renderStore";
+import type { EmbedStyle } from "../../export/renderTemplates";
 import { useExportStore } from "../../store/exportStore";
 import { useTimelineStore } from "../../store/timelineStore";
 import { useViewStore } from "../../store/viewStore";
@@ -64,6 +65,11 @@ function getHighlighter(): Promise<Highlighter> {
   return highlighterPromise;
 }
 
+/** Inspect modes (Field, Cost, Normals) are editor tools: the embed shows Classic. */
+function editorStyle(mode: RenderMode): EmbedStyle {
+  return mode === "field" || mode === "cost" || mode === "normals" ? "classic" : mode;
+}
+
 export default function CodeView() {
   const root = useSceneStore((s) => s.root);
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
@@ -93,7 +99,7 @@ export default function CodeView() {
     () =>
       isScene
         ? generateEmbed(root, {
-            style: look === "editor" ? renderMode : look,
+            style: look === "editor" ? editorStyle(renderMode) : look,
             background,
             motion,
             quality,

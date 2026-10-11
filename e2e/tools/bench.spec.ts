@@ -25,7 +25,8 @@ const scenes: [string, () => unknown][] = [
   ["anim", animationScene],
   ["animCrowd120", () => animatedCrowd(120)],
 ];
-for (const mode of ["classic", "chrome", "studio"]) {
+const MODES = process.env.BENCH_MODES?.split(",") ?? ["classic", "chrome", "studio"];
+for (const mode of MODES) {
   for (const [name, make] of scenes) {
     test(`bench ${name} ${mode}`, async ({ page }) => {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);

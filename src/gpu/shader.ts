@@ -29,7 +29,7 @@ const SceneUniforms = d.struct({
   selectAll: d.u32, // 1 = scene root selected: every surface glows
   time: d.f32, // animation clock (seconds): formulas `t`, noise flow
   boundsCenter: d.vec3f,
-  _pad2: d.f32,
+  sliceY: d.f32, // Field mode: height of the slice plane (+Y is down)
 });
 
 const GizmoUniforms = d.struct({
@@ -85,6 +85,16 @@ export const RENDER_MODE_CLASSIC = 0;
 export const RENDER_MODE_CHROME = 1;
 /** Physically based materials, soft shadows, AO, floor shadow. */
 export const RENDER_MODE_STUDIO = 2;
+/** Glowing halos in the nearest object's color, dark glossy bodies. */
+export const RENDER_MODE_NEON = 3;
+/** Shapes as clouds: density from the SDF and noise, self-shadowed. */
+export const RENDER_MODE_VOLUME = 4;
+/** Inspect: distance isolines on a horizontal slice (IQ's palette). */
+export const RENDER_MODE_FIELD = 5;
+/** Inspect: march steps per pixel as a heatmap. */
+export const RENDER_MODE_COST = 6;
+/** Inspect: surface normals as colors. */
+export const RENDER_MODE_NORMALS = 7;
 
 /** What the generated scene knows about a surface point (ds_sceneInfo). */
 export const SceneInfo = d.struct({
@@ -107,6 +117,8 @@ const renderModeSlot = tgpu.slot(RENDER_MODE_CLASSIC);
 const sceneSdfSlot = tgpu.slot<(p: d.v3f) => number>();
 /** Generated scene info at a surface point. */
 const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.InferGPU<typeof SceneInfo>>();
+/** Fractal noise of the compiled scene's helpers (volume detail). */
+const noiseSlot = tgpu.slot<(p: d.v3f) => number>();
 
 export function createShader(root: TgpuRoot) {
   const cameraUniforms = root.createUniform(CameraUniforms, {
@@ -121,7 +133,7 @@ export function createShader(root: TgpuRoot) {
     selectAll: 0,
     time: 0,
     boundsCenter: d.vec3f(0, 0, 0),
-    _pad2: 0,
+    sliceY: 0,
   });
   const gizmoUniforms = root.createUniform(GizmoUniforms, {
     enabled: 0,
@@ -722,6 +734,164 @@ export function createShader(root: TgpuRoot) {
     return d.vec2f(RAY_MISS_T + 10.0, iterations);
   };
 
+  // ── Volume, neon and inspect looks ──
+
+  /** Same key light as Studio, pointing toward the light. */
+  const KEY_LIGHT = d.vec3f(-0.33282, -0.83205, -0.44376);
+  /** How far noise pushes a cloud's edge in and out (world units). Mirrored in renderTemplates.ts. */
+  const VOLUME_EDGE = 0.06;
+  /** Step inside a cloud: fixed, so density integrates the same at any scene size. */
+  const VOLUME_STEP = 0.015;
+
+  /**
+   * Volume: every shape is a cloud. Empty space is skipped by sphere
+   * tracing; inside, fixed steps add density (deeper = denser, broken up by
+   * fractal noise) lit by the key light through the cloud itself (the SDF
+   * one short step toward the light stands in for optical depth). Returns
+   * premultiplied (color, alpha), linear.
+   */
+  const renderVolume = (ro: d.v3f, rd: d.v3f): d.v4f => {
+    "use gpu";
+    const span = rayBounds(ro, rd);
+    if (span.y < 0.0) {
+      return d.vec4f(0.0);
+    }
+    const stepLen = VOLUME_STEP;
+    let t = span.x;
+    let T = d.f32(1.0);
+    // Light gathered per cloud (the first two a ray enters); materials are
+    // applied after the loop — fetching them inside it bloats the loop and
+    // costs occupancy. lit = albedo² · light + albedo · emission · 1.5.
+    let lightA = d.vec3f(0.0);
+    let weightA = d.f32(0.0);
+    let lightB = d.vec3f(0.0);
+    let weightB = d.f32(0.0);
+    let entryA = d.vec3f(0.0);
+    let entryB = d.vec3f(0.0);
+    let clouds = d.f32(0.0);
+    let inside = false;
+    // One SDF call site: a sample's light probe is the next iteration's
+    // lookup (two call sites inline the scene twice: ~8× slower here).
+    let probing = false;
+    let dens = d.f32(0.0);
+    const steps = qualityUniforms.$.maxSteps * 3.0;
+    for (let i = d.f32(0.0); i < steps; i += d.f32(1.0)) {
+      const p = ro + rd * t;
+      const q = std.select(p, p + KEY_LIGHT * 0.15, probing);
+      const sd = sdScene(q);
+      if (probing) {
+        probing = false;
+        const sun = std.exp(-std.clamp(-sd * 6.0, 0.0, 1.0) * 3.2);
+        const light = d.vec3f(0.12, 0.13, 0.17) + d.vec3f(1.0, 0.95, 0.86) * (sun * 2.0);
+        const a = 1.0 - std.exp(-dens * stepLen);
+        const w = T * a;
+        if (clouds < 1.5) {
+          lightA = lightA + light * w;
+          weightA += w;
+        } else {
+          lightB = lightB + light * w;
+          weightB += w;
+        }
+        T = T * (1.0 - a);
+        t += stepLen;
+      } else if (sd > VOLUME_EDGE + 0.02) {
+        t += sd - VOLUME_EDGE;
+        // A clear gap ends this cloud; grazing its edge band does not.
+        if (sd > VOLUME_EDGE + 0.15) {
+          inside = false;
+        }
+      } else {
+        if (!inside) {
+          inside = true;
+          if (clouds < 0.5) {
+            entryA = d.vec3f(p);
+          } else if (clouds < 1.5) {
+            entryB = d.vec3f(p);
+          }
+          clouds += 1.0;
+        }
+        // Noise erodes the surface into wisps (IQ: density = −sdf + fbm).
+        const n = noiseSlot.$(p * 7.0 + d.vec3f(0.0, sceneUniforms.$.time * -0.25, 0.0));
+        const shaped = sd - VOLUME_EDGE * n;
+        if (shaped < 0.0) {
+          dens = std.min(-shaped * 14.0, 1.0) * 22.0;
+          probing = true; // light this sample next iteration, same t
+        } else {
+          t += stepLen;
+        }
+      }
+      if (T < 0.02 || t > span.y) {
+        break;
+      }
+    }
+    let col = d.vec3f(0.0);
+    if (weightA > 0.0) {
+      const m = sceneInfoSlot.$(entryA);
+      col = col + m.color * m.color * lightA + m.color * (m.emission * 1.5 * weightA);
+    }
+    if (weightB > 0.0) {
+      const m = sceneInfoSlot.$(entryB);
+      col = col + m.color * m.color * lightB + m.color * (m.emission * 1.5 * weightB);
+    }
+    return d.vec4f(col, 1.0 - T);
+  };
+
+  /**
+   * Neon: march once, adding glow wherever the ray passes close to a
+   * surface; the closest pass picks the glow color. Returns (t or miss,
+   * glow, t of the closest pass, iterations).
+   */
+  const rayMarchNeon = (ro: d.v3f, rd: d.v3f): d.v4f => {
+    "use gpu";
+    const span = rayBounds(ro, rd);
+    if (span.y < 0.0) {
+      return d.vec4f(RAY_MISS_T + 10.0, 0.0, 0.0, 0.0);
+    }
+    let t = span.x;
+    let glow = d.f32(0.0);
+    let closest = d.f32(1e9);
+    let tClosest = t;
+    let iterations = d.f32(0.0);
+    for (let i = d.f32(0.0); i < qualityUniforms.$.maxSteps; i += d.f32(1.0)) {
+      const dist = sdScene(ro + rd * t);
+      iterations += 1.0;
+      glow += std.exp(-std.max(dist, 0.0) * 24.0) * 0.06;
+      if (dist < closest) {
+        closest = dist;
+        tClosest = t;
+      }
+      if (dist < HIT_EPS * std.max(t, 1.0)) {
+        return d.vec4f(t, glow, t, iterations);
+      }
+      // Smaller steps near surfaces: the halo is sampled, not skipped.
+      t += std.max(dist * 0.8, 0.004);
+      if (t > span.y) {
+        break;
+      }
+    }
+    return d.vec4f(RAY_MISS_T + 10.0, glow, tClosest, iterations);
+  };
+
+  /** IQ's distance palette: orange outside, blue inside, isolines, white zero line. */
+  const fieldColor = (dist: number, footprint: number): d.v3f => {
+    "use gpu";
+    let col = std.select(d.vec3f(0.65, 0.85, 1.0), d.vec3f(0.9, 0.6, 0.3), dist > 0.0);
+    col = col * (1.0 - std.exp(-6.0 * std.abs(dist)));
+    // Isolines every 0.05, faded where they get thinner than a pixel.
+    const lines = 0.8 + 0.2 * std.cos(dist * (6.2831853 / 0.05));
+    col = col * std.mix(lines, 0.9, std.smoothstep(0.004, 0.012, footprint));
+    return std.mix(col, d.vec3f(1.0), 1.0 - std.smoothstep(0.0, std.max(footprint * 1.5, 0.004), std.abs(dist)));
+  };
+
+  /** Cheap → expensive: deep blue, teal, yellow, red. */
+  const heat = (x: number): d.v3f => {
+    "use gpu";
+    const t = std.clamp(x, 0.0, 1.0);
+    const a = std.mix(d.vec3f(0.05, 0.08, 0.3), d.vec3f(0.05, 0.6, 0.55), std.smoothstep(0.0, 0.35, t));
+    const b = std.mix(a, d.vec3f(0.95, 0.85, 0.2), std.smoothstep(0.3, 0.7, t));
+    return std.mix(b, d.vec3f(0.9, 0.15, 0.1), std.smoothstep(0.7, 1.0, t));
+  };
+
   // ── Reference grid on the y = 0 plane (Blender-style: lines only) ──
 
   /** Anti-aliased grid line coverage for grid coords `g` with pixel footprint `w`. */
@@ -801,8 +971,20 @@ export function createShader(root: TgpuRoot) {
     }
 
     // One march serves the pick pass and the image: each call site inlines
-    // the generated scene SDF again.
-    const sceneResult = rayMarch(ro, rd);
+    // the generated scene SDF again. Volume and Neon march their own way for
+    // the image; picking always uses the surface march.
+    let sceneResult = d.vec2f(RAY_MISS_T + 10.0, 0.0);
+    if (
+      isScenePickPass ||
+      (renderModeSlot.$ !== RENDER_MODE_VOLUME && renderModeSlot.$ !== RENDER_MODE_NEON)
+    ) {
+      sceneResult = rayMarch(ro, rd);
+    }
+    let neon = d.vec4f(RAY_MISS_T + 10.0, 0.0, 0.0, 0.0);
+    if (!isScenePickPass && renderModeSlot.$ === RENDER_MODE_NEON) {
+      neon = rayMarchNeon(ro, rd);
+      sceneResult = d.vec2f(neon.x, neon.w);
+    }
     const tScene = sceneResult.x;
 
     if (isScenePickPass) {
@@ -829,6 +1011,9 @@ export function createShader(root: TgpuRoot) {
     );
     const vig = 1.0 - 0.35 * std.dot(uvCorrected, uvCorrected) * 0.5;
     let col = bg * std.clamp(vig, 0.0, 1.0);
+    if (renderModeSlot.$ === RENDER_MODE_NEON) {
+      col = col * 0.45;
+    }
 
     if (sceneHit) {
       const pos = ro + rd * tScene;
@@ -838,11 +1023,28 @@ export function createShader(root: TgpuRoot) {
       // The scene info (material, glow) is fetched as late as possible: holding
       // it across a march loop that inlines the scene SDF costs registers.
       let glow = d.f32(0.0);
-      if (renderModeSlot.$ === RENDER_MODE_CLASSIC) {
+      if (renderModeSlot.$ === RENDER_MODE_CLASSIC || renderModeSlot.$ === RENDER_MODE_FIELD) {
         // Classic: single light, no secondary marches — cheap.
         const info = sceneInfoSlot.$(pos);
         col = shadeClassic(N, viewDir, sceneResult.y, info);
         glow = info.glow;
+      } else if (renderModeSlot.$ === RENDER_MODE_NEON) {
+        // Dark glossy body; the rim burns in the material's color.
+        const info = sceneInfoSlot.$(pos);
+        glow = info.glow;
+        const tint = info.color * (1.0 + info.emission);
+        const rim = std.pow(1.0 - std.max(std.dot(N, viewDir), 0.0), 3.0);
+        const halfDir = std.normalize(KEY_LIGHT + viewDir);
+        const spec = std.pow(std.max(std.dot(N, halfDir), 0.0), 90.0);
+        col = tint * (0.05 + rim * 1.4) + d.vec3f(spec * 0.5);
+      } else if (renderModeSlot.$ === RENDER_MODE_COST) {
+        const lit = 0.75 + 0.25 * std.max(std.dot(N, KEY_LIGHT), 0.0);
+        col = heat(sceneResult.y / qualityUniforms.$.maxSteps) * lit;
+        glow = sceneInfoSlot.$(pos).glow;
+      } else if (renderModeSlot.$ === RENDER_MODE_NORMALS) {
+        // World normal → color with +Y up (the editor's Y points down).
+        col = d.vec3f(N.x, -N.y, -N.z) * 0.5 + 0.5;
+        glow = sceneInfoSlot.$(pos).glow;
       } else if (renderModeSlot.$ === RENDER_MODE_STUDIO) {
         const shaded = shadeStudio(pos, N, rd);
         col = d.vec3f(shaded.x, shaded.y, shaded.z);
@@ -912,14 +1114,53 @@ export function createShader(root: TgpuRoot) {
       }
     }
 
+    // Cost of rays that found nothing: empty space can be expensive too.
+    if (renderModeSlot.$ === RENDER_MODE_COST && !sceneHit && sceneResult.y > 0.0) {
+      col = std.mix(col, heat(sceneResult.y / qualityUniforms.$.maxSteps), 0.55);
+    }
+
+    // Field: the distance on a horizontal slice in front of the surfaces.
+    let sliceShown = false;
+    if (renderModeSlot.$ === RENDER_MODE_FIELD) {
+      const flat = std.abs(rd.y) < 0.0001;
+      const tSlice = (sceneUniforms.$.sliceY - ro.y) / std.select(rd.y, d.f32(0.0001), flat);
+      if (!flat && tSlice > 0.0 && (!sceneHit || tSlice < tScene)) {
+        const sp = ro + rd * tSlice;
+        const reach = std.max(sceneUniforms.$.boundsRadius * 1.8, 1.0);
+        const fromCenter = std.length(d.vec2f(sp.x - sceneUniforms.$.boundsCenter.x, sp.z - sceneUniforms.$.boundsCenter.z));
+        const fade = 1.0 - std.smoothstep(reach * 0.75, reach, fromCenter);
+        if (fade > 0.0) {
+          // World size of a pixel on the slice: wider at grazing angles.
+          const footprint = (tSlice * 0.0025) / std.max(std.abs(rd.y), 0.15);
+          col = std.mix(col, fieldColor(sdScene(sp), footprint), fade * 0.92);
+          sliceShown = true;
+        }
+      }
+    }
+
     // Grid lines over the background, and over anything below the plane.
-    if (tPlane <= RAY_MISS_T && (!sceneHit || tPlane < tScene)) {
+    if (!sliceShown && tPlane <= RAY_MISS_T && (!sceneHit || tPlane < tScene)) {
       const fade =
         (1.0 - std.smoothstep(2.0, 7.0, std.length(gridXZ))) *
         std.smoothstep(0.02, 0.2, std.abs(rd.y));
       col = std.mix(col, d.vec3f(0.42), (minorGrid * 0.06 + majorGrid * 0.14) * fade);
       col = std.mix(col, d.vec3f(0.85, 0.3, 0.3), xAxisLine * 0.55 * fade);
       col = std.mix(col, d.vec3f(0.35, 0.52, 0.9), zAxisLine * 0.55 * fade);
+    }
+
+    if (renderModeSlot.$ === RENDER_MODE_NEON && neon.y > 0.001) {
+      // The halo takes the color of the surface the ray passed closest to.
+      const near = sceneInfoSlot.$(ro + rd * neon.z);
+      const halo = near.color * (1.0 + near.emission) * (1.0 - std.exp(-neon.y * 0.9));
+      col = std.min(col + halo * 1.3, d.vec3f(1.0));
+    }
+
+    if (renderModeSlot.$ === RENDER_MODE_VOLUME) {
+      const vol = renderVolume(ro, rd);
+      if (vol.w > 0.001) {
+        const c = std.pow(acesTonemap(d.vec3f(vol.x, vol.y, vol.z) / vol.w), d.vec3f(1.0 / 2.2));
+        col = c * vol.w + col * (1.0 - vol.w);
+      }
     }
 
     if (gizmoUniforms.$.enabled === d.u32(1)) {
@@ -968,9 +1209,13 @@ export function createShader(root: TgpuRoot) {
       DS_SCENE let i = ds_sceneInfo(p);
       return Info(i.glow, i.id, i.color, i.roughness, i.metalness, i.emission);
     }`.$uses({ DS_SCENE: decl, Info: SceneInfo });
+    const noise = tgpu.fn([d.vec3f], d.f32)`(p) { DS_SCENE return ds_fbm3(p, 3.0); }`.$uses({
+      DS_SCENE: decl,
+    });
     return root
       .with(sceneSdfSlot, sdf)
       .with(sceneInfoSlot, info)
+      .with(noiseSlot, noise)
       .with(renderModeSlot, renderMode)
       .createRenderPipeline({
         vertex: fullScreenTriangle,

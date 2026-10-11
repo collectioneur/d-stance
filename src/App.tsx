@@ -6,6 +6,7 @@ import RightPanel from "./components/panels/RightPanel";
 import GizmoPanel from "./components/panels/GizmoPanel";
 import TimelinePanel from "./components/panels/TimelinePanel";
 import TryBanner from "./components/panels/TryBanner";
+import InspectPanel from "./components/panels/InspectPanel";
 import CommandPalette from "./components/CommandPalette";
 import ImageImportDialog from "./components/ImageImportDialog";
 import RenderModePanel from "./components/panels/RenderModePanel";
@@ -210,6 +211,7 @@ function Editor() {
       <GizmoPanel />
       <TimelinePanel />
       <TryBanner />
+      <InspectPanel />
       <CommandPalette />
       <ImageImportDialog />
       <div className="toast motion-pop" data-open={toastOpen} role="status">

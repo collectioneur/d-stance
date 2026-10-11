@@ -308,6 +308,7 @@ canvas {
 .floating-pill--top-right {
   top: var(--space-3);
   right: var(--space-3);
+  z-index: 11; /* its dropdown opens over the properties panel below */
 }
 
 /* Narrow windows: docked bottom-center (see useRenderPillDocked). */
@@ -2516,4 +2517,95 @@ canvas {
   margin-bottom: 4px;
   font-family: var(--font-ui);
   font-size: var(--text-sm);
+}
+
+/* Render mode picker: Look / Inspect groups */
+.render-mode-group {
+  padding: 6px 10px 2px;
+  color: var(--text-4);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.render-mode-list > [role="group"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Inspect modes: legend + slice control, bottom right */
+.inspect-panel {
+  --motion-dy: 8px;
+  position: fixed;
+  z-index: 10;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 230px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur-panel);
+  -webkit-backdrop-filter: var(--blur-panel);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.38);
+}
+
+.inspect-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.inspect-legend--column {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.inspect-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-left: 4px;
+}
+
+.inspect-swatch:first-child {
+  margin-left: 0;
+}
+
+.inspect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+}
+
+.inspect-slider {
+  flex: 1;
+  accent-color: var(--scale-10);
+}
+
+.inspect-value {
+  min-width: 36px;
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.inspect-ramp {
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(to right, #0d1450, #0d998c, #f2d933, #e6261a);
+}
+
+.inspect-ramp-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-4);
 }

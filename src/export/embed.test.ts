@@ -183,3 +183,27 @@ describe("embed interaction", () => {
     expect(bound(moving.scene.wgsl)).toBeGreaterThanOrEqual(Math.SQRT2 + 0.5);
   });
 });
+
+describe("embed looks", () => {
+  test("neon and volume ship only their own code", () => {
+    const neon = generateEmbed(scene([shape("sphere")]), { ...OPTS, style: "neon" });
+    expect(neon.scene.wgsl).toContain("fn marchNeon(");
+    expect(neon.scene.wgsl).not.toContain("fn renderVolume(");
+    expect(neon.scene.glsl).toContain("vec4 marchNeon(");
+    const vol = generateEmbed(scene([shape("sphere")]), { ...OPTS, style: "volume" });
+    expect(vol.scene.wgsl).toContain("fn renderVolume(");
+    expect(vol.scene.wgsl).not.toContain("fn marchNeon(");
+    const classic = generateEmbed(scene([shape("sphere")]), OPTS);
+    expect(classic.scene.wgsl).not.toMatch(/marchNeon|renderVolume|vol_/);
+  });
+
+  test("volume noise never clashes with the scene's own noise helpers", () => {
+    const root = scene([shape("terrain"), shape("sphere", { modifiers: [{ kind: "noise", amplitude: 0.05, scale: 4, octaves: 3, seed: 1 }] })]);
+    const vol = generateEmbed(root, { ...OPTS, style: "volume" });
+    for (const name of ["fbm3", "gradientNoise3", "noiseHash3", "terrainHeight", "valueNoised2"]) {
+      const defs = vol.scene.wgsl.match(new RegExp(`fn ${name}\\(`, "g")) ?? [];
+      expect(defs, name).toHaveLength(1);
+      expect(vol.scene.wgsl).toContain(`fn vol_${name}(`);
+    }
+  });
+});

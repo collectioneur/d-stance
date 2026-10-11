@@ -430,6 +430,67 @@ icons.renderClassic = () => {
   };
 };
 
+/** Neon: a dark ball with a burning rim and a faint halo around it. */
+icons.renderNeon = () => {
+  const halo = circle(0, 0, 1.2), ball = circle(0, 0, 0.98), inner = circle(-0.05, -0.05, 0.8);
+  return {
+    layers: [
+      { rings: [halo], tone: G, cut: [ball] },
+      { rings: [ball], tone: S, cut: [inner] },
+      { rings: [inner], tone: 0.14 },
+    ],
+  };
+};
+
+/** Volume: a cloud of three puffs, lit from the upper left. */
+icons.renderVolume = () => {
+  const puffs = [circle(-0.5, 0.2, 0.5), circle(0.08, -0.18, 0.66), circle(0.6, 0.22, 0.46), roundRect(-1.0, 0.1, 1.06, 0.68, 0.28)];
+  const lit = [move(puffs[0], -0.08, -0.1, 0.8, -0.5, 0.2), move(puffs[1], -0.1, -0.12, 0.8, 0.08, -0.18), move(puffs[2], -0.06, -0.08, 0.78, 0.6, 0.22)];
+  return {
+    layers: [
+      { rings: puffs, tone: M, cut: lit },
+      { rings: lit, tone: S, clip: puffs },
+    ],
+  };
+};
+
+/** Field: a solid core inside its distance isolines. */
+icons.renderField = () => {
+  const ringAt = (r, w) => [circle(0, 0, r + w), circle(0, 0, r - w)];
+  const [a1, a0] = ringAt(0.68, 0.07), [b1, b0] = ringAt(0.95, 0.06), [c1, c0] = ringAt(1.2, 0.05);
+  return {
+    layers: [
+      { rings: [circle(0, 0, 0.42)], tone: S },
+      { rings: [a1], tone: 0.72, cut: [a0] },
+      { rings: [b1], tone: M, cut: [b0] },
+      { rings: [c1], tone: G, cut: [c0] },
+    ],
+  };
+};
+
+/** Cost: three bars, cheap to expensive. */
+icons.renderCost = () => ({
+  layers: [
+    { rings: [roundRect(-1.0, 0.2, -0.45, 1.0, 0.12)], tone: G },
+    { rings: [roundRect(-0.28, -0.3, 0.28, 1.0, 0.12)], tone: M },
+    { rings: [roundRect(0.45, -1.0, 1.0, 1.0, 0.12)], tone: S },
+  ],
+});
+
+/** Normals: a ball in three facing tones. */
+icons.renderNormals = () => {
+  const ball = circle(0, 0, 1);
+  const top = [[-1.2, -1.2], [1.2, -1.2], [1.2, -0.1], [0, 0.1], [-1.2, -0.1]];
+  const left = [[-1.2, -0.1], [0, 0.1], [0, 1.2], [-1.2, 1.2]];
+  return {
+    layers: [
+      { rings: [ball], tone: S, clip: [top] },
+      { rings: [ball], tone: 0.62, clip: [left] },
+      { rings: [ball], tone: 0.34, cut: [top, left] },
+    ],
+  };
+};
+
 /** Mirror ball: sky above a bright horizon, dark ground below, a softbox highlight. */
 icons.renderChrome = () => {
   const ball = circle(0, 0, 1);
