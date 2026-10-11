@@ -4,7 +4,7 @@
  */
 import { test } from "@playwright/test";
 import { openEditor, waitForFrames } from "../helpers";
-import { crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene } from "../scenes";
+import { crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene, noiseScene } from "../scenes";
 const scenes: [string, () => unknown][] = [
   ["shapes22", allShapesScene],
   ["csg", csgScene],
@@ -14,6 +14,7 @@ const scenes: [string, () => unknown][] = [
   ["union250", () => crowdScene(250, false)],
   ["modifiers", modifiersScene],
   ["infinite", infiniteScene],
+  ["noise", noiseScene],
 ];
 for (const mode of ["classic", "chrome", "studio"]) {
   for (const [name, make] of scenes) {

@@ -28,6 +28,8 @@ const SHAPES: [string, number[]][] = [
   ["octahedron", [0.18, 0, 0, 0]],
   ["pyramid", [0.25, 0.25, 0, 0]],
   ["vesica", [0.18, 0.09, 0, 0]],
+  ["terrain", [0.2, 0.12, 4, 3]],
+  ["gyroid", [0.15, 0.12, 0.01, 0]],
 ];
 
 let n = 0;
@@ -188,6 +190,27 @@ export function infiniteScene() {
     name: "Infinite",
     items: [
       group([layer("sphere", [0.15, 0, 0, 0])], { modifiers: [{ kind: "repeat", spacing: [0.6, 0.6, 0.6], count: [0, 1, 0] }] }),
+    ],
+  };
+}
+
+/** Noise and math surfaces: a terrain tile, a gyroid cube, a rough rock, noisy copies. */
+export function noiseScene() {
+  return {
+    id: "root",
+    name: "Noise",
+    items: [
+      layer("terrain", [0.7, 0.35, 2.2, 7], { position: [-0.3, 0, 0.1] as V3, material: { color: [0.45, 0.62, 0.38], roughness: 0.9, metalness: 0, emission: 0 } }),
+      layer("gyroid", [0.22, 0.18, 0.012, 0], { position: [0.75, -0.35, -0.2] as V3, material: { color: [0.9, 0.55, 0.2], roughness: 0.4, metalness: 0, emission: 0 } }),
+      layer("sphere", [0.2, 0, 0, 0], {
+        position: [0.65, -0.3, 0.45] as V3,
+        modifiers: [{ kind: "noise", amplitude: 0.05, scale: 6, octaves: 5, seed: 1 }],
+        material: { color: [0.55, 0.52, 0.5], roughness: 0.8, metalness: 0, emission: 0 },
+      }),
+      group([layer("box", [0.07, 0.07, 0.07, 0.0], { modifiers: [{ kind: "noise", amplitude: 0.02, scale: 12, octaves: 3, seed: 0 }] })], {
+        position: [-0.3, -0.75, -0.6] as V3,
+        modifiers: [{ kind: "repeat", spacing: [0.22, 0.22, 0.22], count: [5, 1, 1] }],
+      }),
     ],
   };
 }

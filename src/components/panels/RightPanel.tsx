@@ -16,6 +16,7 @@ import CodeView from "./CodeView";
 import { NumericInput, common } from "./fields";
 import { MaterialFields } from "./MaterialFields";
 import { ModifierFields } from "./ModifierFields";
+import { FormulaField } from "./FormulaField";
 
 // ── Shape size field definitions ──────────────────────────────────────────────
 
@@ -122,6 +123,21 @@ const SIZE_FIELDS: Record<string, SizeField[]> = {
   vesica: [
     { label: "Radius", paramIndex: 0, min: 0.01, step: 0.01 },
     { label: "Offset", paramIndex: 1, min: 0.005, step: 0.01 },
+  ],
+  terrain: [
+    { label: "Size", paramIndex: 0, min: 0.05, step: 0.05 },
+    { label: "Height", paramIndex: 1, min: 0, step: 0.02 },
+    { label: "Detail", paramIndex: 2, min: 0.1, max: 40, step: 0.1 },
+    { label: "Seed", paramIndex: 3, min: 0, max: 9999, step: 1 },
+  ],
+  gyroid: [
+    { label: "Size", paramIndex: 0, min: 0.01, step: 0.01 },
+    { label: "Cell", paramIndex: 1, min: 0.02, step: 0.01 },
+    { label: "Thickness", paramIndex: 2, min: 0.002, step: 0.005 },
+  ],
+  formula: [
+    { label: "Size", paramIndex: 0, min: 0.01, step: 0.05 },
+    { label: "Safety", paramIndex: 1, min: 0.05, max: 1, step: 0.05 },
   ],
   image: [
     { label: "Size", paramIndex: 0, min: 0.01, step: 0.01 },
@@ -416,6 +432,9 @@ function LayerProperties({
         </div>
       )}
 
+      {shared.length === 1 && layer.shapeType === "formula" && (
+        <FormulaField key={layer.id} layer={layer} containerId={containerId} />
+      )}
       {shared.length === 1 && <ModifierFields item={layer} />}
       <MaterialFields items={shared} />
     </div>
