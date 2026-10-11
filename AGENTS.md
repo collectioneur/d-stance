@@ -125,9 +125,19 @@ Text layers are image layers (`shapeType: "image"`) whose `image.text` (`src/uti
 
 - `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
 - `runtime.js` is plain JS on purpose: its source is inlined verbatim into every export (`?raw`). No imports, no TypeScript. Its types live in `runtime.d.ts`.
-- The WebGPU view uniform is 64 bytes (`res, rot, dist, time, pointer, center, pick`) at `@group(0) @binding(100)`; `runtime.js` `viewFloats` writes it. Interaction states (`ix: array<vec4f, N>`) sit at `binding(101)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. The runtime builds one explicit bind group layout for the draw and pick pipelines. Avoid WGSL reserved words in templates (`target` is one).
+- The WebGPU view uniform is 64 bytes (`res, rot, dist, time, pointer, center, pick, jitter`) at `@group(0) @binding(100)`; `runtime.js` `viewFloats` writes it. Interaction states (`ix: array<vec4f, N>`) sit at `binding(101)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. The runtime builds one explicit bind group layout for the draw and pick pipelines. Avoid WGSL reserved words in templates (`target` is one).
 - The runtime compiles the WebGPU pipeline before calling `getContext("webgpu")`: a canvas keeps its first context type, and WebGL2 must stay possible as the fallback.
 - Inline JSON goes through `scriptJson` (escapes `<`). Scene names are user data.
+
+### 2i. Progressive anti-aliasing
+
+- Editor and embed both average jittered samples while the view holds still: sample 0 is the pixel center, sample i is offset by Halton(2, 3) − ½ px (`sampleOffset` in runtime.js, `halton` in useGpu.ts — same sequence, so editor and embed match). Samples blend into an `rgba16float` texture with blend constant `1 / (i + 1)` and are blitted to the canvas. **Set the blend constant in every pass** — it starts at 0 and silently drops the sample.
+- Any change restarts at sample 0, so editing costs one sample per frame (plus a blit). Counts: `aaSamples` per quality preset (`assertQualityInvariants`), embed `aa` mount option (fast 4, balanced 16, best 32). Picks always aim at pixel centers (jitter is reset after the last sample).
+- Tests: `__dstance.gpu.settled()` / embed `canvas[data-settled]` mean the image is final; `canvasShot` waits for it.
+
+### 2j. Examples
+
+- `src/scene/examples.ts` builds each example in code (stays valid as the schema grows); loading is one undoable store change plus a render mode and a camera glide (`requestView`). Thumbnails are generated with the export renderer: `PW_TOOLS=1 npx playwright test tools/example-thumbs` writes `src/assets/examples/*.jpg`.
 
 ### 3. Bake math
 

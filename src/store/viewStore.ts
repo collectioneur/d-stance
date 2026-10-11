@@ -13,4 +13,9 @@ export interface ViewState {
 
 export const DEFAULT_VIEW: ViewState = { rotX: 0.3, rotY: 0.4, distance: 2.5 };
 
-export const useViewStore = create<ViewState>(() => ({ ...DEFAULT_VIEW }));
+export const useViewStore = create<ViewState & { request: ViewState | null }>(() => ({ ...DEFAULT_VIEW, request: null }));
+
+/** Asks the renderer to glide the camera to `view` (examples, framing). */
+export function requestView(view: ViewState): void {
+  useViewStore.setState({ request: { ...view } });
+}

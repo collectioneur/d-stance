@@ -74,6 +74,7 @@ export async function canvasShot(page: Page, path?: string): Promise<Buffer> {
     content: "body * { visibility: hidden !important; } canvas { visibility: visible !important; }",
   });
   await waitForFrames(page, 1);
+  await waitSettled(page);
   const png = await page.locator("canvas").screenshot({ path });
   await page.evaluate(() => document.querySelectorAll("style").forEach((s) => {
     if (s.textContent?.includes("visibility: hidden !important")) s.remove();
@@ -208,4 +209,16 @@ export async function projectToScreen(page: Page, p: [number, number, number]): 
     const aspect = r.width / r.height;
     return { x: r.left + ((ux / aspect + 1) / 2) * r.width, y: r.top + ((uy + 1) / 2) * r.height };
   }, p);
+}
+
+/** Until the renderer has nothing left to draw (anti-aliasing samples included). */
+export async function waitSettled(page: Page, timeout = 5000) {
+  await page
+    .waitForFunction(() => {
+      const g = (window as unknown as { __dstance?: { gpu?: { settled?: () => boolean } } }).__dstance?.gpu;
+      return !g?.settled || g.settled();
+    }, undefined, { timeout })
+    .catch(() => {
+      /* animated scenes never settle: take what is there */
+    });
 }

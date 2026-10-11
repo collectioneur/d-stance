@@ -10,6 +10,8 @@ export type QualityPreset = {
   /** Soft-shadow march steps (Studio render mode). */
   shadowSteps: number;
   fpsCap: number;
+  /** Jittered samples averaged once the view holds still (1 = no anti-aliasing). */
+  aaSamples: number;
 };
 
 export const QUALITY_PRESETS: readonly QualityPreset[] = [
@@ -21,6 +23,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     reflSteps: 0,
     shadowSteps: 12,
     fpsCap: 60,
+    aaSamples: 1,
   },
   {
     id: "low",
@@ -30,6 +33,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     reflSteps: 12,
     shadowSteps: 16,
     fpsCap: 60,
+    aaSamples: 4,
   },
   {
     id: "medium",
@@ -39,6 +43,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     reflSteps: 18,
     shadowSteps: 20,
     fpsCap: 60,
+    aaSamples: 8,
   },
   {
     id: "high",
@@ -48,6 +53,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     reflSteps: 24,
     shadowSteps: 24,
     fpsCap: 60,
+    aaSamples: 16,
   },
   {
     id: "ultra",
@@ -57,6 +63,7 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
     reflSteps: 32,
     shadowSteps: 32,
     fpsCap: 60,
+    aaSamples: 32,
   },
 ] as const;
 
@@ -106,6 +113,9 @@ export function assertQualityInvariants(): void {
     }
     if (cur.fpsCap < prev.fpsCap) {
       throw new Error(`fpsCap not monotonic at ${cur.id}`);
+    }
+    if (cur.aaSamples < prev.aaSamples || cur.aaSamples < 1) {
+      throw new Error(`aaSamples not monotonic at ${cur.id}`);
     }
     if (
       prev.dprCap !== Infinity &&

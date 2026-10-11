@@ -28,11 +28,46 @@ async function loadBitmap(url) {
   return createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" });
 }
 
-/** View uniform: res, rot, dist, time, pointer, center, pick (WGSL `View`, 64 bytes). */
-function viewFloats(out, canvas, view, pointer, pick) {
-  out.set([canvas.width, canvas.height, view.rotX, view.rotY, view.distance, view.time, pointer[0], pointer[1], ...view.target, 0, pick[0], pick[1], 0, 0]);
+/** View uniform: res, rot, dist, time, pointer, center, pick, jitter (WGSL `View`, 64 bytes). */
+function viewFloats(out, canvas, view, pointer, pick, jitter) {
+  out.set([canvas.width, canvas.height, view.rotX, view.rotY, view.distance, view.time, pointer[0], pointer[1], ...view.target, 0, pick[0], pick[1], jitter[0], jitter[1]]);
   return out;
 }
+
+/** Radical inverse in `base`: sub-pixel offsets of the anti-aliasing samples. */
+function halton(i, base) {
+  let f = 1;
+  let r = 0;
+  for (let n = i; n > 0; n = Math.floor(n / base)) {
+    f /= base;
+    r += f * (n % base);
+  }
+  return r;
+}
+
+/** Sample i (0 = pixel center) → offset in pixels, the same sequence as the editor. */
+const sampleOffset = (i) => (i === 0 ? [0, 0] : [halton(i, 2) - 0.5, halton(i, 3) - 0.5]);
+
+const BLIT_WGSL = `@group(0) @binding(0) var src: texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+  return textureLoad(src, vec2i(p.xy), 0);
+}`;
+
+const BLIT_GLSL = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+out vec4 outColor;
+void main() { outColor = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0); }`;
+
+/** Averaging blend: color = sample · w + accumulated · (1 − w), w = 1 / (i + 1). */
+const MEAN_BLEND = {
+  color: { srcFactor: "constant", dstFactor: "one-minus-constant", operation: "add" },
+  alpha: { srcFactor: "constant", dstFactor: "one-minus-constant", operation: "add" },
+};
 
 async function createWebGpu(canvas, scene, ixCount) {
   const adapter = await navigator.gpu?.requestAdapter();
@@ -52,10 +87,17 @@ async function createWebGpu(canvas, scene, ixCount) {
   // Compile before touching the canvas: a canvas keeps the first context
   // type it hands out, and WebGL2 must stay possible if this fails.
   const module = device.createShaderModule({ code: scene.wgsl });
-  const pipeline = await device.createRenderPipelineAsync({
+  // Samples are averaged in an rgba16float texture (anti-aliasing), then blitted.
+  const accumPipeline = await device.createRenderPipelineAsync({
     layout,
     vertex: { module, entryPoint: "vs" },
-    fragment: { module, entryPoint: "fs", targets: [{ format }] },
+    fragment: { module, entryPoint: "fs", targets: [{ format: "rgba16float", blend: MEAN_BLEND }] },
+  });
+  const blitModule = device.createShaderModule({ code: BLIT_WGSL });
+  const blitPipeline = await device.createRenderPipelineAsync({
+    layout: "auto",
+    vertex: { module: blitModule, entryPoint: "vs" },
+    fragment: { module: blitModule, entryPoint: "fs", targets: [{ format }] },
   });
   const pickPipeline =
     ixCount > 0
@@ -101,25 +143,45 @@ async function createWebGpu(canvas, scene, ixCount) {
     : null;
   const pickRead = pickPipeline ? device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : null;
 
-  const upload = (view, state, pick) => {
-    device.queue.writeBuffer(viewBuffer, 0, viewFloats(viewData, canvas, view, state.pointer, pick));
+  const upload = (view, state, pick, jitter = [0, 0]) => {
+    device.queue.writeBuffer(viewBuffer, 0, viewFloats(viewData, canvas, view, state.pointer, pick, jitter));
     if (ixBuffer) device.queue.writeBuffer(ixBuffer, 0, state.ix);
   };
-  const pass = (encoder, target, pipe) => {
+  const pass = (encoder, target, pipe, group = bindGroup, load = false, blend = null) => {
     const p = encoder.beginRenderPass({
-      colorAttachments: [{ view: target, loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: "store" }],
+      colorAttachments: [{ view: target, loadOp: load ? "load" : "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: "store" }],
     });
     p.setPipeline(pipe);
-    p.setBindGroup(0, bindGroup);
+    p.setBindGroup(0, group);
+    // The blend constant starts at 0 in every pass: always set it when blending.
+    if (blend !== null) p.setBlendConstant([blend, blend, blend, blend]);
     p.draw(3);
     p.end();
   };
+  let accum = null;
+  const accumFor = () => {
+    if (accum && accum.w === canvas.width && accum.h === canvas.height) return accum;
+    accum?.texture.destroy();
+    const texture = device.createTexture({
+      size: [canvas.width, canvas.height],
+      format: "rgba16float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const view = texture.createView();
+    const group = device.createBindGroup({ layout: blitPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: view }] });
+    accum = { texture, view, group, w: canvas.width, h: canvas.height };
+    return accum;
+  };
 
   return {
-    draw(view, state) {
-      upload(view, state, [0, 0]);
+    antialias: true,
+    /** Sample `i` of the current image (0 resets the average). */
+    draw(view, state, i = 0) {
+      upload(view, state, [0, 0], sampleOffset(i));
+      const a = accumFor();
       const encoder = device.createCommandEncoder();
-      pass(encoder, context.getCurrentTexture().createView(), pipeline);
+      pass(encoder, a.view, accumPipeline, bindGroup, i > 0, 1 / (i + 1));
+      pass(encoder, context.getCurrentTexture().createView(), blitPipeline, a.group);
       device.queue.submit([encoder.finish()]);
     },
     /** Pick id (0 = nothing) of the interactive item at canvas pixel px. */
@@ -137,6 +199,7 @@ async function createWebGpu(canvas, scene, ixCount) {
     },
     destroy() {
       textures.forEach((t) => t.destroy());
+      accum?.texture.destroy();
       device.destroy();
     },
   };
@@ -178,6 +241,17 @@ async function createWebGl(canvas, scene, ixCount) {
     };
   };
   const main = link(scene.glsl);
+  main.uJitter = gl.getUniformLocation(main.program, "uJitter");
+  // Anti-aliasing needs a float target to average into (most WebGL2 GPUs).
+  const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+  let blit = null;
+  if (floatTargets) {
+    const program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, BLIT_GLSL));
+    gl.linkProgram(program);
+    if (gl.getProgramParameter(program, gl.LINK_STATUS)) blit = { program, uSrc: gl.getUniformLocation(program, "uSrc") };
+  }
   // The pick variant: same source with PICK defined (right after #version).
   const pickProgram = ixCount > 0 ? link(scene.glsl.replace(/^(#version[^\n]*\n)/, "$1#define PICK 1\n")) : null;
 
@@ -216,8 +290,9 @@ async function createWebGl(canvas, scene, ixCount) {
   }
   const pixel = new Uint8Array(4);
 
-  const use = (p, view, state, pick) => {
+  const use = (p, view, state, pick, jitter = [0, 0]) => {
     gl.useProgram(p.program);
+    if (p.uJitter) gl.uniform2f(p.uJitter, jitter[0], jitter[1]);
     gl.uniform2f(p.uRes, canvas.width, canvas.height);
     gl.uniform2f(p.uRot, view.rotX, view.rotY);
     gl.uniform1f(p.uDist, view.distance);
@@ -228,10 +303,62 @@ async function createWebGl(canvas, scene, ixCount) {
     if (p.uIx) gl.uniform4fv(p.uIx, state.ix);
   };
 
+  // Image texture units are 0..N-1; the pick target sits at N; the accumulator at N + 1.
+  const accumUnit = scene.images.length + 1;
+  let accum = null;
+  const accumFor = () => {
+    if (accum && accum.w === canvas.width && accum.h === canvas.height) return accum;
+    if (accum) {
+      gl.deleteTexture(accum.texture);
+      gl.deleteFramebuffer(accum.fbo);
+    }
+    const texture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + accumUnit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, canvas.width, canvas.height, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    accum = { texture, fbo, ok, w: canvas.width, h: canvas.height };
+    return accum;
+  };
+
   return {
-    draw(view, state) {
-      use(main, view, state, [0, 0]);
+    antialias: !!blit,
+    /** Sample `i` of the current image (0 resets the average). */
+    draw(view, state, i = 0) {
+      const a = blit ? accumFor() : null;
+      if (!a?.ok) {
+        use(main, view, state, [0, 0]);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        return;
+      }
+      // The shader adds uJitter in top-left pixel coordinates, like WebGPU.
+      use(main, view, state, [0, 0], sampleOffset(i));
+      gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
       gl.viewport(0, 0, canvas.width, canvas.height);
+      if (i === 0) {
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      const w = 1 / (i + 1);
+      gl.enable(gl.BLEND);
+      gl.blendColor(w, w, w, w);
+      gl.blendFunc(gl.CONSTANT_COLOR, gl.ONE_MINUS_CONSTANT_COLOR);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.disable(gl.BLEND);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(blit.program);
+      gl.activeTexture(gl.TEXTURE0 + accumUnit);
+      gl.bindTexture(gl.TEXTURE_2D, a.texture);
+      gl.uniform1i(blit.uSrc, accumUnit);
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -251,6 +378,11 @@ async function createWebGl(canvas, scene, ixCount) {
     destroy() {
       textures.forEach((t) => gl.deleteTexture(t));
       if (pickTex) gl.deleteTexture(pickTex);
+      if (accum) {
+        gl.deleteTexture(accum.texture);
+        gl.deleteFramebuffer(accum.fbo);
+      }
+      if (blit) gl.deleteProgram(blit.program);
       if (pickFbo) gl.deleteFramebuffer(pickFbo);
       gl.deleteProgram(main.program);
       if (pickProgram) gl.deleteProgram(pickProgram.program);
@@ -260,7 +392,7 @@ async function createWebGl(canvas, scene, ixCount) {
 }
 
 export function mount(canvas, scene, options = {}) {
-  const opts = { orbit: true, zoom: true, autoRotate: 0, animate: true, maxDpr: 2, backend: "auto", ...options };
+  const opts = { orbit: true, zoom: true, autoRotate: 0, animate: true, maxDpr: 2, backend: "auto", aa: 16, ...options };
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (reducedMotion) {
     opts.autoRotate = 0;
@@ -278,6 +410,8 @@ export function mount(canvas, scene, options = {}) {
   let fit = scene.view.fit ?? 0;
   let renderer = null;
   let dirty = true;
+  /** Anti-aliasing samples averaged into the image on screen (restarts on every change). */
+  let samples = 0;
   let visible = true;
   let destroyed = false;
   let raf = 0;
@@ -349,12 +483,17 @@ export function mount(canvas, scene, options = {}) {
       stepStates(dt);
       dirty = true;
     }
-    if (dirty && visible && renderer) {
+    const target = renderer?.antialias ? Math.max(1, opts.aa) : 1;
+    if (dirty) samples = 0;
+    if ((dirty || samples < target) && visible && renderer) {
       resize();
-      renderer.draw(view, state);
+      renderer.draw(view, state, samples);
+      samples++;
       dirty = false;
+      if (samples >= target) canvas.dataset.settled = "1";
+      else delete canvas.dataset.settled;
     }
-    if (opts.autoRotate || loop || !settled || dirty) schedule();
+    if (opts.autoRotate || loop || !settled || dirty || (renderer && samples < target)) schedule();
   };
   const schedule = () => {
     if (!raf && !destroyed && visible) raf = requestAnimationFrame(frame);

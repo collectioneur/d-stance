@@ -387,6 +387,7 @@ struct View {
   pointer: vec2f, // pointer over the canvas, −1..1 from the top-left
   center: vec3f,  // orbit center
   pick: vec2f,    // pixel the pick pass looks through
+  jitter: vec2f,  // sub-pixel offset of this anti-aliasing sample (pixels)
 }
 @group(0) @binding(100) var<uniform> view: View;
 ${fns.interactiveCount ? `// Per interactive item: (hover, click, 0, 0), each eased 0..1.
@@ -639,7 +640,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let uvn = frag.xy / view.res * 2.0 - 1.0;
   let uv = vec2f(uvn.x * view.res.x / view.res.y, uvn.y);
-  let ray = cameraRay(frag.xy);
+  let ray = cameraRay(frag.xy + view.jitter);
   let ro = ray.ro;
   let rd = ray.rd;
 
@@ -923,6 +924,7 @@ uniform vec2 uRot;    // orbit yaw, pitch (radians)
 uniform float uDist;  // orbit distance
 uniform float uTime;  // seconds
 uniform vec3 uTarget; // orbit center
+uniform vec2 uJitter; // sub-pixel offset of this anti-aliasing sample (pixels)
 ${fns.interactiveCount !== undefined ? "uniform vec2 uPointer; // pointer over the canvas, −1..1 from the top-left\n" : ""}${fns.interactiveCount ? `uniform vec2 uPick;    // pixel the pick pass looks through
 uniform vec4 uIx[${fns.interactiveCount}];  // per interactive item: (hover, click, 0, 0), each eased 0..1
 ` : ""}out vec4 outColor;
@@ -945,7 +947,7 @@ vec4 pick() {
 }
 ` : ""}
 void main() {
-${fns.interactiveCount ? "#ifdef PICK\n  outColor = pick();\n  return;\n#endif\n" : ""}  outColor = render(vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y));
+${fns.interactiveCount ? "#ifdef PICK\n  outColor = pick();\n  return;\n#endif\n" : ""}  outColor = render(vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y) + uJitter);
 }
 `;
 }

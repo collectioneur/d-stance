@@ -11,6 +11,7 @@ import { duplicateSelection } from "../scene/clipboard";
 import { showToast } from "./toast";
 import type { RenderMode } from "../store/renderStore";
 import { useBrushStore } from "../scene/sculpt";
+import { openExamples } from "../components/ExamplesGallery";
 import { isImageFile } from "./decodeImage";
 import { DEFAULT_TEXT, TEXT_PARAMS, bakeText, textLayerName } from "./textSdf";
 
@@ -193,6 +194,13 @@ export const COMMANDS: Command[] = [
     keywords: ["shape", "primitive"],
     run: () => addShape(type),
   })),
+  {
+    id: "examples",
+    label: "Examples…",
+    icon: GROUP_ICON,
+    keywords: ["examples", "gallery", "demo", "start", "template", "inspiration", "open"],
+    run: () => openExamples(),
+  },
   {
     id: "sculpt",
     label: "Sculpt (clay & carve brush)",
