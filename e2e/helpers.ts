@@ -70,7 +70,9 @@ export type PixelStats = {
 
 /** Canvas pixels only: the floating panels are hidden for the shot. */
 export async function canvasShot(page: Page, path?: string): Promise<Buffer> {
-  await page.addStyleTag({ content: "#root > *:not(canvas) { visibility: hidden !important; }" });
+  await page.addStyleTag({
+    content: "body * { visibility: hidden !important; } canvas { visibility: visible !important; }",
+  });
   await waitForFrames(page, 1);
   const png = await page.locator("canvas").screenshot({ path });
   await page.evaluate(() => document.querySelectorAll("style").forEach((s) => {
@@ -116,4 +118,36 @@ export async function canvasStats(page: Page): Promise<PixelStats> {
 /** Current scene root as stored by the app (dev builds expose the store). */
 export async function sceneRoot(page: Page): Promise<SceneJson & { items: { id: string; name: string }[] }> {
   return page.evaluate(() => (window as unknown as { __dstance: { scene: () => unknown } }).__dstance.scene()) as never;
+}
+
+/** Per-pixel comparison of two same-size PNGs (decoded in-page). */
+export async function imageDiff(page: Page, a: Buffer, b: Buffer): Promise<{ meanAbs: number; over16: number }> {
+  return page.evaluate(
+    async ([a64, b64]) => {
+      const load = async (b64s: string) => {
+        const bmp = await createImageBitmap(await (await fetch(`data:image/png;base64,${b64s}`)).blob());
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const g = c.getContext("2d")!;
+        g.drawImage(bmp, 0, 0);
+        return g.getImageData(0, 0, bmp.width, bmp.height).data;
+      };
+      const [x, y] = await Promise.all([load(a64), load(b64)]);
+      if (x.length !== y.length) return { meanAbs: 255, over16: 1 };
+      let sum = 0, over = 0, n = 0;
+      for (let i = 0; i < x.length; i += 4) {
+        const d = (Math.abs(x[i] - y[i]) + Math.abs(x[i + 1] - y[i + 1]) + Math.abs(x[i + 2] - y[i + 2])) / 3;
+        sum += d;
+        if (d > 16) over++;
+        n++;
+      }
+      return { meanAbs: sum / n, over16: over / n };
+    },
+    [a.toString("base64"), b.toString("base64")] as const,
+  );
+}
+
+/** Waits until the compiled program for the current scene is on screen. */
+export async function waitForProgram(page: Page) {
+  await page.waitForFunction(() => (window as unknown as { __dstance: { gpu: { synced(): boolean } } }).__dstance?.gpu?.synced());
+  await waitForFrames(page, 2);
 }

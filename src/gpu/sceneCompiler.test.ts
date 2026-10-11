@@ -1,0 +1,125 @@
+import { describe, expect, test } from "vitest";
+import { compileScene, countDataSlots, DATA_SLOTS } from "./sceneCompiler";
+import { group, kitchenSink, scene, shape } from "../test/fixtures";
+import type { SceneRoot } from "../store/sceneStore";
+
+const OPTS = { imageLayer: () => 3 };
+const compile = (root: SceneRoot) => compileScene(root, OPTS);
+
+describe("scene compiler", () => {
+  test("empty scene is infinitely far", () => {
+    const out = compile(scene([]));
+    expect(out.code).toContain("return 1e10;");
+    expect(out.leafIds).toEqual([]);
+    expect(out.slotCount).toBe(0);
+  });
+
+  test("same structure → same code; values carry the numbers", () => {
+    const a = compile(scene([shape("box", { id: "x", position: [1, 2, 3] })]));
+    const b = compile(scene([shape("box", { id: "y", position: [-4, 0, 9], params: [1, 2, 3, 0] })]));
+    expect(a.code).toBe(b.code);
+    expect(Array.from(a.values)).not.toEqual(Array.from(b.values));
+  });
+
+  test("structure changes change the code", () => {
+    const base = compile(scene([shape("box"), shape("sphere")])).code;
+    expect(compile(scene([shape("box"), shape("torus")])).code).not.toBe(base);
+    expect(compile(scene([shape("box"), shape("sphere", { op: "subtract" })])).code).not.toBe(base);
+    expect(compile(scene([group([shape("box")]), shape("sphere")])).code).not.toBe(base);
+  });
+
+  test("values follow the baked transform", () => {
+    const out = compile(scene([shape("sphere", { position: [1, 2, 3], params: [0.7, 0, 0, 0] })]));
+    const v = out.values;
+    // rows (identity) with offset −position in w
+    expect(Array.from(v.slice(0, 12))).toEqual([1, 0, 0, -1, 0, 1, 0, -2, 0, 0, 1, -3]);
+    expect(v[12]).toBeCloseTo(0.7); // params.x
+    expect(v[16]).toBe(1); // factor
+    expect(Array.from(v.slice(20, 23))).toEqual([1, 2, 3]); // bound center
+    expect(v[23]).toBeCloseTo(0.7 + 1e-3); // bound radius
+  });
+
+  test("leaf ids and marks cover the tree in order", () => {
+    const root = kitchenSink();
+    const out = compile(root);
+    const layers: string[] = [];
+    const all: string[] = [];
+    const walk = (items: SceneRoot["items"]) =>
+      items.forEach((i) => {
+        all.push(i.id);
+        if (i.kind === "layer") layers.push(i.id);
+        else walk(i.items);
+      });
+    walk(root.items);
+    expect(out.leafIds).toEqual(layers);
+    expect([...out.markIndex.keys()].sort()).toEqual([...all].sort());
+  });
+
+  test("helpers are namespaced so they cannot collide with TypeGPU names", () => {
+    const code = compile(kitchenSink()).code;
+    expect(code).not.toMatch(/(?<!ds_)\bsd[A-Z]\w*\(/);
+    expect(code).toContain("fn ds_sdSphere(");
+    expect(code).toContain("fn ds_sdScene(p: vec3f) -> f32");
+    expect(code).toContain("fn ds_sceneInfo(p: vec3f) -> vec4f");
+  });
+
+  test("image layers sample their texture layer", () => {
+    const out = compile(kitchenSink());
+    const imageIdx = out.leafIds.indexOf("im");
+    expect(imageIdx).toBeGreaterThan(-1);
+    expect(out.code).toContain("ds_sdImage(");
+    // layer index from the callback lands in the image extra slot (.z)
+    const found = [...out.values].some((x, i) => i % 4 === 2 && x === 3);
+    expect(found).toBe(true);
+  });
+
+  test("union siblings are gated by their bounds; subtract never is", () => {
+    const code = compile(
+      scene([shape("box"), shape("sphere"), shape("torus", { op: "subtract" })]),
+    ).code;
+    const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    expect(sdf.match(/if \(ds_bound\(p, \d+u\) < a0\)/g)).toHaveLength(1);
+    expect(sdf).toMatch(/a0 = max\(a0, -v\d+\);/);
+  });
+
+  test("smooth union gates include k", () => {
+    const code = compile(scene([shape("box"), shape("sphere", { op: "sUnion" })])).code;
+    expect(code).toMatch(/< a0 \+ dsData\[\d+\]\.y\)/);
+  });
+
+  test("long union runs are chunked and chunk bounds enclose members", () => {
+    const items = Array.from({ length: 20 }, (_, i) =>
+      shape("sphere", { position: [i * 0.5, 0, 0], params: [0.2, 0, 0, 0] }),
+    );
+    const out = compile(scene(items));
+    const sdf = out.code.slice(out.code.indexOf("fn ds_sdScene"), out.code.indexOf("fn ds_sceneInfo"));
+    // 19 gated members + 3 chunk gates (8 + 8 + 3)
+    expect(sdf.match(/if \(ds_bound/g)!.length).toBe(19 + 3);
+    expect(countDataSlots(scene(items).items)).toBe(out.slotCount);
+  });
+
+  test("group bounds enclose children and smooth bulge", () => {
+    const root = scene([
+      group([
+        shape("sphere", { position: [1, 0, 0], params: [0.5, 0, 0, 0] }),
+        shape("sphere", { position: [-1, 0, 0], params: [0.5, 0, 0, 0], op: "sUnion", smoothK: 0.4 }),
+      ]),
+    ]);
+    const out = compile(root);
+    // group slots come first: misc, bound
+    const r = out.values[7];
+    expect(r).toBeGreaterThanOrEqual(1.5 + 0.1);
+  });
+
+  test("the head of a hard-union scene may stand in its sphere far away", () => {
+    const code = compile(scene([shape("box"), shape("sphere")])).code;
+    expect(code).toMatch(/var v\d+ = ds_bound\(p, 5u\);\n\s+if \(v\d+ <= 0\.15\)/);
+    const notUnion = compile(scene([shape("box"), shape("sphere", { op: "subtract" })])).code;
+    expect(notUnion).not.toMatch(/<= 0\.15/);
+  });
+
+  test("slot budget fits the uniform binding for a capped scene", () => {
+    const items = Array.from({ length: 128 }, () => shape("image", { image: { sdf: "x" } }));
+    expect(countDataSlots(items)).toBeLessThan(DATA_SLOTS);
+  });
+});
