@@ -946,6 +946,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
 
       /** `additive`: Cmd/Ctrl/Shift-click toggles the hit item in the selection. */
       async function pickAt(clientX: number, clientY: number, additive: boolean) {
+        // Something else may select while the pick is in flight (a shape
+        // added by hotkey): that newer selection wins over this click.
+        const selectionAtClick = useSceneStore.getState().selectedIds.join("\n");
         // A hover pick runs on almost every mouse move; a click must wait for
         // it instead of being dropped (quick move-then-click lost selections).
         while (pickInProgress) {
@@ -960,8 +963,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           const pickId = await readPickPixel(PICK_PASS_SCENE, clientX, clientY);
           if (pickId === null) return;
 
-          const { root: sceneRoot, selectItem, toggleSelected, deselect } =
+          const { root: sceneRoot, selectItem, toggleSelected, deselect, selectedIds } =
             useSceneStore.getState();
+          if (selectedIds.join("\n") !== selectionAtClick) return;
 
           if (useTryStore.getState().trying) {
             if (pickId > 0 && ids[pickId - 1]) tryClick(ids[pickId - 1]);

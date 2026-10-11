@@ -19,6 +19,8 @@ import { ModifierFields } from "./ModifierFields";
 import { FormulaField } from "./FormulaField";
 import { AnimationFields } from "./AnimationFields";
 import { InteractionFields } from "./InteractionFields";
+import { TextFields } from "./TextFields";
+import type { TextSpec } from "../../utils/textSdf";
 
 // ── Shape size field definitions ──────────────────────────────────────────────
 
@@ -368,12 +370,14 @@ function LayerProperties({
 
   const sizeFields = sameShapes ? (SIZE_FIELDS[layer.shapeType] ?? []) : [];
   const showOp = shared.length > 1 || itemIndex > 0;
+  const textLayer = shared.length === 1 && layer.image?.text ? (layer as ShapeLayer & { image: { text: TextSpec } }) : null;
 
   return (
     <div className="props-content">
       <OperationFields items={shared} showOp={showOp} />
+      {textLayer && <TextFields key={layer.id} layer={textLayer} spaced={showOp} />}
 
-      <div className="props-section-title" style={{ marginTop: showOp ? "16px" : undefined }}>
+      <div className="props-section-title" style={{ marginTop: showOp || textLayer ? "16px" : undefined }}>
         Position
       </div>
       <NumericInput label="X" value={layer.position[0]} fallback={0} decimals={2} onChange={(v) => setPosition(0, v)} />

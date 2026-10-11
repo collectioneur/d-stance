@@ -39,6 +39,7 @@ import type { Material } from "./material";
 import type { Modifier } from "./modifiers";
 import type { Track } from "./animation";
 import type { Reaction } from "./interaction";
+import type { TextSpec } from "../utils/textSdf";
 export type { Material } from "./material";
 export type { Track } from "./animation";
 export type { Reaction } from "./interaction";
@@ -58,8 +59,9 @@ export type ShapeLayer = {
   /**
    * Only for shapeType "image": baked 2D SDF as a PNG data URL (see
    * utils/imageSdf.ts) and the edge rounding radius (local units, ≥ 0).
+   * Text layers also keep what they were baked from (utils/textSdf.ts).
    */
-  image?: { sdf: string; round?: number };
+  image?: { sdf: string; round?: number; text?: TextSpec };
   material?: Material;
   /** Domain / distance modifiers in the shape's own space (src/store/modifiers.ts). */
   modifiers?: Modifier[];
@@ -494,6 +496,8 @@ interface SceneState {
     containerId: string,
     shapeType: ShapeType,
     image?: ShapeLayer["image"],
+    /** Text layers: named by their words, sized for a word rather than a logo. */
+    opts?: { name?: string; params?: ShapeLayer["params"] },
   ) => boolean;
   addGroupToContainer: (containerId: string) => boolean;
   /** Splices ready-made items (fresh ids) into a container and selects the last one. */
@@ -553,7 +557,7 @@ export const useSceneStore = create<SceneState>()(
       counters: { ...zeroCounters(), ..._saved.counters },
       groupCounter: _saved.groupCounter ?? 0,
 
-      addShapeToContainer: (containerId, shapeType, image) => {
+      addShapeToContainer: (containerId, shapeType, image, opts = {}) => {
         const state = get();
         const container = findContainer(state.root, containerId);
         if (!container) return false;
@@ -568,11 +572,11 @@ export const useSceneStore = create<SceneState>()(
           kind: "layer",
           id: crypto.randomUUID(),
           shapeType,
-          name: `${TYPE_LABEL[shapeType]} ${count}`,
+          name: opts.name ?? `${TYPE_LABEL[shapeType]} ${count}`,
           position: [0, 0, 0],
           rotation: [0, 0, 0],
           scale: [1, 1, 1],
-          params: [...DEFAULT_PARAMS[shapeType]],
+          params: [...(opts.params ?? DEFAULT_PARAMS[shapeType])],
           op: "union",
           smoothK: 0.1,
           ...(image ? { image } : {}),

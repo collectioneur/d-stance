@@ -159,3 +159,20 @@ describe("persistence v11 interaction", () => {
     expect(decodeHash(blob(10, scene([shape("sphere")])))?.root.items).toHaveLength(1);
   });
 });
+
+describe("persistence v12 text", () => {
+  test("text specs are sanitized; a text layer still needs its baked SDF", () => {
+    const ok = shape("image", { id: "ok", image: { sdf: FAKE_IMAGE_SDF, text: { content: "Hi", font: "serif", weight: 700, italic: false, spacing: 0, align: "center" } } });
+    const bad = shape("image", { id: "bad", image: { sdf: FAKE_IMAGE_SDF, text: { content: 1 } as never } });
+    const noSdf = { ...shape("image", { id: "nosdf" }), image: { text: { content: "Hi" } } };
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad, noSdf as never])));
+    const items = decoded!.root.items as { id: string; image?: { text?: unknown } }[];
+    expect(items.map((i) => i.id)).toEqual(["ok", "bad"]);
+    expect(items[0].image?.text).toEqual(ok.image!.text);
+    expect(items[1].image && "text" in items[1].image).toBe(false);
+  });
+
+  test("v11 blobs still load", () => {
+    expect(decodeHash(blob(11, scene([shape("sphere")])))?.root.items).toHaveLength(1);
+  });
+});

@@ -20,6 +20,8 @@ export type ArboristNode = {
   kind: "layer" | "group" | "root";
   name: string;
   shapeType?: ShapeType;
+  /** Image layer made from text (tree icon). */
+  text?: boolean;
   op?: OpType;
   /** Hex of the item's own material color (tree dot), if it has one. */
   color?: string;
@@ -40,6 +42,7 @@ export function sceneItemToArborist(item: SceneItem): ArboristNode {
       kind: "layer",
       name: item.name,
       shapeType: item.shapeType,
+      ...(item.image?.text ? { text: true } : {}),
       op: item.op,
       ...(item.material ? { color: colorToHex(item.material.color) } : {}),
       ...modsBadge(item),

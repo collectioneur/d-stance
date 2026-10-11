@@ -73,6 +73,10 @@ Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake
 
 Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` live in `sdImageField` (`src/sdf/primitives.ts`, shared by viewport and export) and `imageSdf.ts`; change one, change both. The layer's `params[3]` is the invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`); the compiler writes `(round, invert, layer, hasImage)` into the leaf's extra slot. Texture layers are assigned per distinct `image.sdf` string by `syncImageSlots` before every compile.
 
+### 2g. Text
+
+Text layers are image layers (`shapeType: "image"`) whose `image.text` (`src/utils/textSdf.ts`) records what they were baked from: words, font, weight, italic, spacing, align. `bakeTextSdf` lays the lines out by their ink inside the padded square at `MASK_SDF_SIZE` and goes through `encodeMaskSdf` (the same EDT + PNG as image import), so GPU, export, Shadertoy dropping and the `MAX_IMAGES` cap treat text exactly like an image. The baked `image.sdf` stays the source of truth (persisted; other machines may lack a font); `image.text` is only for re-editing. Fonts: Inter / JetBrains Mono ship with the app; custom families are whitelisted by `customFamily`.
+
 ### 2a. Materials and render modes
 
 - `Material` (`src/store/material.ts`): sRGB `color`, `roughness`, `metalness`, `emission`. Optional on shapes and groups; a shape without one uses the nearest ancestor group's, then `DEFAULT_MATERIAL` (0.72 gray — the editor's original look; Classic/Chrome with the default must stay pixel-identical to before materials). Persisted since schema v7, sanitized by `sanitizeMaterial`.
@@ -135,7 +139,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 11` (v4–v10 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`, v11 optional `interaction` reactions). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 12` (v4–v11 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`, v11 optional `interaction` reactions, v12 optional `image.text`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.
