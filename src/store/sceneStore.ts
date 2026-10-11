@@ -37,7 +37,9 @@ export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract"
 
 import type { Material } from "./material";
 import type { Modifier } from "./modifiers";
+import type { Track } from "./animation";
 export type { Material } from "./material";
+export type { Track } from "./animation";
 export type { Modifier } from "./modifiers";
 
 export type ShapeLayer = {
@@ -61,6 +63,8 @@ export type ShapeLayer = {
   modifiers?: Modifier[];
   /** Only for shapeType "formula": the field f(x, y, z) (src/sdf/formula.ts). */
   formula?: string;
+  /** Procedural animation tracks (src/store/animation.ts). */
+  animation?: Track[];
 };
 
 export type ObjectGroup = {
@@ -76,6 +80,8 @@ export type ObjectGroup = {
   material?: Material;
   /** Domain / distance modifiers applied in the group's frame to all children. */
   modifiers?: Modifier[];
+  /** Procedural animation tracks (src/store/animation.ts). */
+  animation?: Track[];
   items: SceneItem[];
 };
 
@@ -501,7 +507,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula" | "animation"
       >
     >,
   ) => void;
@@ -510,7 +516,7 @@ interface SceneState {
   updateGroup: (
     groupId: string,
     patch: Partial<
-      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material" | "modifiers">
+      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material" | "modifiers" | "animation">
     >,
   ) => void;
   updateRootName: (name: string) => void;

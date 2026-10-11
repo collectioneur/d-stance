@@ -4,7 +4,14 @@
  */
 import { test } from "@playwright/test";
 import { openEditor, waitForFrames } from "../helpers";
-import { crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene, noiseScene } from "../scenes";
+import { animationScene, crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene, noiseScene } from "../scenes";
+
+/** Every shape of a crowd floating out of step: per-frame CPU evaluation + uniform upload. */
+function animatedCrowd(count: number) {
+  const root = crowdScene(count) as { items: Record<string, unknown>[] };
+  root.items.forEach((it, i) => (it.animation = [{ target: "position.y", wave: "sine", amount: 0.05, period: 2, phase: (i % 10) / 10 }]));
+  return root;
+}
 const scenes: [string, () => unknown][] = [
   ["shapes22", allShapesScene],
   ["csg", csgScene],
@@ -15,6 +22,8 @@ const scenes: [string, () => unknown][] = [
   ["modifiers", modifiersScene],
   ["infinite", infiniteScene],
   ["noise", noiseScene],
+  ["anim", animationScene],
+  ["animCrowd120", () => animatedCrowd(120)],
 ];
 for (const mode of ["classic", "chrome", "studio"]) {
   for (const [name, make] of scenes) {

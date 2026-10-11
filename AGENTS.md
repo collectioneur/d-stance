@@ -94,6 +94,13 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 - The noise modifier samples the item's own point *before* its point modifiers, so repeated copies differ. Its 1/Lipschitz (`postInvLipschitz`) and reach (`noiseReach`) feed the shared plans — changing the noise sum changes both.
 - Formulas are a trust boundary (hash links): `parseFormula` is a closed recursive-descent parser with a function / constant whitelist looked up by **own** keys only (`constructor` is not a function). `sanitizeFormula` replaces anything that does not parse. Never emit user text that did not come out of the AST emitter.
 
+### 2e. Animation
+
+- Tracks (`src/store/animation.ts`): `value = base + amount · wave(t / period + phase)`; scale multiplies (`base · (1 + …)`, clamped at `MIN_SCALE`). The editor evaluates them **on the CPU** each frame (`evaluateAnimations` in `useGpu.ts`), so playback rewrites uniforms and never recompiles. Items being dragged with the gizmo stay at rest (`still`).
+- The clock reaches shaders only for things the CPU cannot fold: formula `t` and noise flow (`speed`). Compiler: `dsScene.time` (`SceneUniforms.time`, was `_pad1`).
+- Export writes the same formula into code (`animationExpr`; `fmtEx` in generateSdfCode). An animated scene's SDF and material functions take a second parameter, `time`; still scenes keep the one-argument signature byte-for-byte. `waveAt` (CPU) and `waveExpr` (shader) must agree — `animation.test.ts` runs the GLSL expression in JS against the CPU for every waveform. `animHash` is bit-identical to the shader hash.
+- Embeds loop the clock over the editor's loop length (`scene.loop`, `mod(iTime, loop)` on Shadertoy); the runtime redraws every frame only when the scene is animated, and holds the first pose under `prefers-reduced-motion`. Export bounds / floor / framing are sampled over the loop (`sceneExtent` in embed.ts).
+
 ### 2b. Embed export
 
 - `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
@@ -121,7 +128,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 9` (v4–v8 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 10` (v4–v9 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.

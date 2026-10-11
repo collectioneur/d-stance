@@ -32,7 +32,7 @@ import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
 import { UNBOUNDED, noiseReach, type ModifierPlan } from "../sdf/modifierMath";
 import { groupPlan, needsPoint, shapePlan } from "../sdf/itemBounds";
-import { formulaFunction, parseFormula, sanitizeFormula } from "../sdf/formula";
+import { formulaFunction, formulaUsesTime, parseFormula, sanitizeFormula } from "../sdf/formula";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
 
@@ -52,6 +52,8 @@ export const GLOW_BAND_HI = 0.035;
 
 /** Data identifier inside generated WGSL; useGpu binds it via `$uses`. */
 export const DATA_IDENT = "dsData";
+/** Scene uniforms inside generated WGSL (`dsScene.time` = animation clock). */
+export const SCENE_IDENT = "dsScene";
 export const IMAGE_TEX_IDENT = "dsImageTex";
 export const IMAGE_SAMPLER_IDENT = "dsImageSampler";
 
@@ -259,8 +261,9 @@ class Builder {
     let grow = 0;
     for (const m of mods) {
       if (m.kind === "noise") {
-        const slot = this.alloc(1);
+        const slot = this.alloc(2);
         this.set(slot, m.amplitude * unit, m.scale, m.octaves, m.seed);
+        this.set(slot + 1, m.speed ?? 0, 0, 0, 0);
         post.push({ kind: "noise", slot });
         grow += noiseReach(m);
         continue;
@@ -519,7 +522,7 @@ function leafCall(node: LeafNode, lp: string): string {
   const b = node.base;
   const P = slot(b + 3);
   if (node.layer.shapeType === "image") return `ds_sdImage(${lp}, ${P}, ${slot(b + LEAF_SLOTS)})`;
-  if (node.layer.shapeType === "formula") return `${node.formulaFn}(${lp}, ${P}.x, ${P}.y)`;
+  if (node.layer.shapeType === "formula") return `${node.formulaFn}(${lp}, ${P}.x, ${P}.y, ${SCENE_IDENT}.time)`;
   const params = [`${P}.x`, `${P}.y`, `${P}.z`, `${P}.w`] as const;
   // Prefer a swizzle when a primitive takes the first three params as a vector.
   const call = primitiveCall(node.layer.shapeType, lp, params, {
@@ -555,7 +558,8 @@ function postExpr(s: PostStep, d: string, q: string): string {
   const S = slot(s.slot);
   if (s.kind === "round") return `(${d} - ${S}.x)`;
   if (s.kind === "onion") return `(abs(${d}) - ${S}.x)`;
-  return `(${d} + ${S}.x * ds_fbm3(${q} * ${S}.y + ${S}.w * vec3f(7.13, 3.71, 5.37), ${S}.z))`;
+  const flow = `vec3f(0.0, ${SCENE_IDENT}.time * ${slot(s.slot + 1)}.x, 0.0)`;
+  return `(${d} + ${S}.x * ds_fbm3(${q} * ${S}.y + ${S}.w * vec3f(7.13, 3.71, 5.37) + ${flow}, ${S}.z))`;
 }
 
 function combine(op: OpType, a: string, b: string, k: string): string {
@@ -922,4 +926,15 @@ export function countDataSlots(items: SceneItem[]): number {
   const builder = new Builder({ imageLayer: () => 0 });
   builder.items(items, identityCtx(), [], true);
   return builder.slots;
+}
+
+/** Whether anything in the scene reads the clock in the shader (formula `t`, flowing noise). */
+export function sceneUsesTime(root: SceneRoot): boolean {
+  const walk = (items: SceneItem[]): boolean =>
+    items.some((item) => {
+      if (activeModifiers(item.modifiers).some((m) => m.kind === "noise" && (m.speed ?? 0) !== 0)) return true;
+      if (item.kind === "layer") return item.shapeType === "formula" && formulaUsesTime(sanitizeFormula(item.formula));
+      return walk(item.items);
+    });
+  return walk(root.items);
 }

@@ -9,6 +9,7 @@ import {
 } from "../store/sceneStore";
 import { IMAGE_SDF_RES, IMAGE_SDF_STEP_PX } from "./imageSdf";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
+import { ANIM_HELPERS, activeTracks, animationExpr, type Track } from "../store/animation";
 import {
   GLSL_HELPERS,
   MODIFIER_GLSL,
@@ -27,6 +28,7 @@ import type { ModifierPlan } from "../sdf/modifierMath";
 import {
   formulaFunction,
   formulaNeeds,
+  formulaUsesTime,
   parseFormula,
   sanitizeFormula,
   type FormulaLang,
@@ -36,6 +38,8 @@ export type CodeLang = "typegpu" | "wgsl" | "glsl";
 
 export interface GeneratedSdf {
   fnName: string;
+  /** The function takes a second parameter, `time` (seconds): something in the scene moves. */
+  animated: boolean;
   typegpu: string;
   wgsl: string;
   glsl: string;
@@ -45,17 +49,53 @@ export const PLACEHOLDER = "// Nothing to export - add shapes to the scene";
 
 const DEG_TO_RAD = Math.PI / 180;
 
-type V3 = readonly [number, number, number];
+/**
+ * A number in the IR: a constant, or an animated value (base ± waves of
+ * `time`, src/store/animation.ts) and products / minima of those. Constants
+ * fold; anything animated is printed per language by fmtEx.
+ */
+type Ex =
+  | number
+  | { k: "anim"; base: number; tracks: Track[]; mul: boolean; min?: number }
+  | { k: "mul"; a: Ex; b: Ex }
+  | { k: "min3"; a: Ex; b: Ex; c: Ex }
+  | { k: "scale"; a: Ex; s: number };
 
-const isZero = (v: V3) => v.every((c) => Math.abs(c) < 1e-9);
-const isOne = (v: V3) => v.every((c) => Math.abs(c - 1) < 1e-9);
-const isUniform = (v: V3) => v[0] === v[1] && v[1] === v[2];
-const minV = (v: V3) => Math.min(v[0], v[1], v[2]);
-const mulV = (a: V3, b: V3): V3 => [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
-const toRad = (deg: V3): V3 => [deg[0] * DEG_TO_RAD, deg[1] * DEG_TO_RAD, deg[2] * DEG_TO_RAD];
+type V3 = readonly [Ex, Ex, Ex];
+
+const isNum = (e: Ex): e is number => typeof e === "number";
+const isZero = (v: V3) => v.every((c) => isNum(c) && Math.abs(c) < 1e-9);
+const isOne = (v: V3) => v.every((c) => isNum(c) && Math.abs(c - 1) < 1e-9);
+const isUniform = (v: V3) => v.every(isNum) && v[0] === v[1] && v[1] === v[2];
+const exMul = (a: Ex, b: Ex): Ex =>
+  isNum(a) && isNum(b) ? a * b : isNum(a) && a === 1 ? b : isNum(b) && b === 1 ? a : { k: "mul", a, b };
+const minV = (v: V3): Ex =>
+  v.every(isNum) ? Math.min(...(v as unknown as number[])) : { k: "min3", a: v[0], b: v[1], c: v[2] };
+const mulV = (a: V3, b: V3): V3 => [exMul(a[0], b[0]), exMul(a[1], b[1]), exMul(a[2], b[2])];
+const toRad = (deg: V3): V3 => deg.map((c) => (isNum(c) ? c * DEG_TO_RAD : { k: "scale", a: c, s: DEG_TO_RAD })) as unknown as V3;
+const isOneEx = (e: Ex) => isNum(e) && Math.abs(e - 1) < 1e-9;
+/** The value with every animation at rest (time 0 offsets ignored). */
+function exAtRest(e: Ex): number {
+  if (isNum(e)) return e;
+  switch (e.k) {
+    case "anim":
+      return e.base;
+    case "mul":
+      return exAtRest(e.a) * exAtRest(e.b);
+    case "min3":
+      return Math.min(exAtRest(e.a), exAtRest(e.b), exAtRest(e.c));
+    case "scale":
+      return exAtRest(e.a) * e.s;
+  }
+}
 
 function fmt(n: number): string {
   const s = parseFloat(n.toFixed(6)).toString();
+  return /[.e]/.test(s) ? s : s + ".0";
+}
+
+function fmtPrecise(n: number): string {
+  const s = parseFloat(n.toPrecision(9)).toString();
   return /[.e]/.test(s) ? s : s + ".0";
 }
 
@@ -64,6 +104,65 @@ function fmt(n: number): string {
 function fmtRecip(n: number): string {
   const s = parseFloat((1 / n).toPrecision(9)).toString();
   return /[.e]/.test(s) ? s : s + ".0";
+}
+
+/** `time` is the animation clock: a parameter of every exported function of an animated scene. */
+function fmtEx(e: Ex, syn: Syntax): string {
+  if (isNum(e)) return fmt(e);
+  switch (e.k) {
+    case "anim": {
+      const x = animationExpr(e.base, e.tracks, "time", syn.lang, e.mul);
+      return e.min !== undefined ? `${syn.maxFn}(${x}, ${fmt(e.min)})` : x;
+    }
+    case "mul":
+      return `(${fmtEx(e.a, syn)} * ${fmtEx(e.b, syn)})`;
+    case "min3":
+      return `${syn.minFn}(${syn.minFn}(${fmtEx(e.a, syn)}, ${fmtEx(e.b, syn)}), ${fmtEx(e.c, syn)})`;
+    case "scale":
+      return `(${fmtEx(e.a, syn)} * ${fmtPrecise(e.s)})`;
+  }
+}
+
+function fmtRecipEx(e: Ex, syn: Syntax): string {
+  return isNum(e) ? fmtRecip(e) : `(1.0 / ${fmtEx(e, syn)})`;
+}
+
+/** An item's numbers with its animation tracks folded in. */
+interface ItemValues {
+  position: V3;
+  rotationDeg: V3;
+  scale: V3;
+  params: readonly [Ex, Ex, Ex, Ex];
+  smoothK: Ex;
+  emissionTracks: Track[];
+}
+
+function animated(base: number, tracks: Track[], mul = false, min?: number): Ex {
+  return tracks.length === 0 ? base : { k: "anim", base, tracks, mul, ...(min !== undefined ? { min } : {}) };
+}
+
+function itemValues(item: SceneItem): ItemValues {
+  const tracks = activeTracks(item.animation);
+  const on = (target: string) => tracks.filter((t) => t.target === target);
+  const axis = (prefix: string, v: readonly number[]) =>
+    v.map((b, a) => animated(b, on(`${prefix}.${"xyz"[a]}`))) as unknown as V3;
+  const scaleTracks = on("scale");
+  const params = item.kind === "layer" ? item.params : [0, 0, 0, 0];
+  return {
+    position: axis("position", item.position),
+    rotationDeg: axis("rotation", item.rotation),
+    scale: item.scale.map((b) => animated(b, scaleTracks, true, 0.01)) as unknown as V3,
+    params: params.map((b, i) => animated(b, on(`param${i}`))) as unknown as ItemValues["params"],
+    smoothK: animated(item.smoothK, on("smoothK"), false, 0.001),
+    emissionTracks: on("emission"),
+  };
+}
+
+/** Material in the IR: emission may be animated. */
+type MatEx = Omit<Material, "emission"> & { emission: Ex };
+
+function matEx(m: Material, emissionTracks: Track[]): MatEx {
+  return { ...m, emission: animated(m.emission, emissionTracks, false, 0) };
 }
 
 // ── IR ────────────────────────────────────────────────────────────────────────
@@ -78,14 +177,14 @@ interface ShapeRhs {
   accScl: V3 | null;
   scale: V3 | null;
   /** min(scale) * min(accScl) conservative distance factor. */
-  factor: number;
-  params: [number, number, number, number];
+  factor: Ex;
+  params: readonly [Ex, Ex, Ex, Ex];
   /** Index into Ir.images for shape "image"; -1 when the layer has no baked SDF. */
   imageIndex: number;
   /** Edge rounding radius for shape "image" (local units). */
   imageRound: number;
   /** Own material, else nearest ancestor group's, else the default. */
-  material: Material;
+  material: MatEx;
   /** Distance modifiers on the shape's own result (local units). */
   post: PostMod[];
   /** Generated function for shapeType "formula". */
@@ -100,7 +199,7 @@ type Rhs = ShapeRhs | VarRhs;
 /** Distance modifier. noise: `amount` = amplitude, sampled at `point`. */
 type PostMod =
   | { kind: "round" | "onion"; amount: number }
-  | { kind: "noise"; amount: number; scale: number; octaves: number; seed: number; point: string };
+  | { kind: "noise"; amount: number; scale: number; octaves: number; seed: number; speed: number; point: string };
 type RepeatMod = Extract<Modifier, { kind: "repeat" }>;
 
 type Stmt =
@@ -113,7 +212,7 @@ type Stmt =
   | { t: "scale"; name: string; k: number }
   | { t: "post"; name: string; mod: PostMod }
   | { t: "def"; name: string; rhs: Rhs }
-  | { t: "combine"; name: string; op: OpType; k: number; rhs: Rhs };
+  | { t: "combine"; name: string; op: OpType; k: Ex; rhs: Rhs };
 
 interface Ir {
   stmts: Stmt[];
@@ -123,6 +222,9 @@ interface Ir {
   usesSmin: boolean;
   usesModifiers: boolean;
   usesNoise: boolean;
+  /** Something reads the clock: exported functions take `time`. */
+  animated: boolean;
+  usesAnimNoise: boolean;
   /** Formula functions: [name, parsed source]. */
   formulas: [string, ReturnType<typeof parseFormula> & { ok: true }][];
   /** Distinct baked image SDF data URLs, in order of first use. */
@@ -157,7 +259,16 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   let usesSmin = false;
   let usesModifiers = false;
   let usesNoise = false;
+  let animatedScene = false;
+  let usesAnimNoise = false;
   const formulas = new Map<string, string>();
+  /** Item values with animation folded in; notes what the scene needs. */
+  const values = (item: SceneItem): ItemValues => {
+    const tracks = activeTracks(item.animation);
+    if (tracks.length > 0) animatedScene = true;
+    if (tracks.some((t) => t.wave === "noise")) usesAnimNoise = true;
+    return itemValues(item);
+  };
   const formulaList: Ir["formulas"] = [];
   let accN = 0;
   let ptN = 0;
@@ -172,7 +283,8 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       else if (m.kind === "onion") out.push({ kind: "onion", amount: m.thickness * unit });
       else if (m.kind === "noise") {
         usesNoise = true;
-        out.push({ kind: "noise", amount: m.amplitude * unit, scale: m.scale, octaves: m.octaves, seed: m.seed, point });
+        if (m.speed) animatedScene = true;
+        out.push({ kind: "noise", amount: m.amplitude * unit, scale: m.scale, octaves: m.octaves, seed: m.seed, speed: m.speed ?? 0, point });
       }
     }
     return out;
@@ -183,31 +295,38 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     point: string,
     accScl: V3,
     dropPos: boolean,
-    inherited: Material,
+    inherited: MatEx,
   ): ShapeRhs {
     usedShapes.add(layer.shapeType);
-    const rot = isZero(layer.rotation) ? null : toRad(layer.rotation);
+    const V = values(layer);
+    const rot = isZero(V.rotationDeg) ? null : toRad(V.rotationDeg);
     if (rot) usesRotation = true;
     let imageIndex = -1;
     if (layer.shapeType === "image" && layer.image) {
       imageIndex = images.indexOf(layer.image.sdf);
       if (imageIndex < 0) imageIndex = images.push(layer.image.sdf) - 1;
     }
+    let formulaFn: string | undefined;
+    if (layer.shapeType === "formula") {
+      const src = sanitizeFormula(layer.formula);
+      formulaFn = formulaName(src);
+      if (formulaUsesTime(src)) animatedScene = true;
+    }
     return {
       kind: "shape",
       shape: layer.shapeType,
       point,
-      pos: dropPos || isZero(layer.position) ? null : layer.position,
+      pos: dropPos || isZero(V.position) ? null : V.position,
       rotRad: rot,
       accScl: rot && !isUniform(accScl) ? accScl : null,
-      scale: isOne(layer.scale) ? null : layer.scale,
-      factor: minV(layer.scale) * minV(accScl),
-      params: layer.params,
+      scale: isOne(V.scale) ? null : V.scale,
+      factor: exMul(minV(V.scale), minV(accScl)),
+      params: V.params,
       imageIndex,
       imageRound: Math.max(0, layer.image?.round ?? 0),
-      material: layer.material ?? inherited,
+      material: layer.material ? matEx(layer.material, V.emissionTracks) : inherited,
       post: [],
-      formulaFn: layer.shapeType === "formula" ? formulaName(sanitizeFormula(layer.formula)) : undefined,
+      formulaFn,
     };
   }
 
@@ -252,7 +371,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   }
 
   /** A shape with modifiers: its value as an accumulator variable. */
-  function moddedShape(layer: ShapeLayer, point: string, accScl: V3, dropPos: boolean, inherited: Material): string | null {
+  function moddedShape(layer: ShapeLayer, point: string, accScl: V3, dropPos: boolean, inherited: MatEx): string | null {
     usesModifiers = true;
     const mods = activeModifiers(layer.modifiers);
     const pointMods = mods.filter((m) => POINT_MODIFIERS.has(m.kind));
@@ -269,7 +388,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
         rotRad: null,
         accScl: null,
         scale: null,
-        factor: full.factor * plan.invL,
+        factor: exMul(full.factor, plan.invL),
         post: postMods(mods, 1, local),
       };
       emit({ t: "def", name: acc, rhs });
@@ -278,9 +397,10 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   }
 
   function groupPoint(group: ObjectGroup, point: string, dropPos: boolean): string {
-    const pos = dropPos || isZero(group.position) ? null : group.position;
-    const rot = isZero(group.rotation) ? null : toRad(group.rotation);
-    const scale = isOne(group.scale) ? null : group.scale;
+    const V = values(group);
+    const pos = dropPos || isZero(V.position) ? null : V.position;
+    const rot = isZero(V.rotationDeg) ? null : toRad(V.rotationDeg);
+    const scale = isOne(V.scale) ? null : V.scale;
     if (!pos && !rot && !scale) return point;
     if (rot) usesRotation = true;
     const name = freshPoint();
@@ -289,10 +409,11 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   }
 
   /** A group's value (its own transform, modifiers, children) as a variable. */
-  function groupValue(group: ObjectGroup, point: string, accScl: V3, inherited: Material, dropPos: boolean): string | null {
+  function groupValue(group: ObjectGroup, point: string, accScl: V3, inherited: MatEx, dropPos: boolean): string | null {
     const childPoint = groupPoint(group, point, dropPos);
-    const childAcc = mulV(accScl, group.scale);
-    const material = group.material ?? inherited;
+    const V = itemValues(group);
+    const childAcc = mulV(accScl, V.scale);
+    const material = group.material ? matEx(group.material, V.emissionTracks) : inherited;
     const mods = activeModifiers(group.modifiers);
     if (mods.length === 0) return walkItems(group.items, childPoint, childAcc, material);
     usesModifiers = true;
@@ -302,11 +423,11 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     const acc = withMods(pointMods, plan, 0, childPoint, (q) => walkItems(group.items, q, childAcc, material));
     if (!acc) return null;
     if (Math.abs(plan.invL - 1) > 1e-9) emit({ t: "scale", name: acc, k: plan.invL });
-    for (const post of postMods(mods, minV(childAcc), childPoint)) emit({ t: "post", name: acc, mod: post });
+    for (const post of postMods(mods, exAtRest(minV(childAcc)), childPoint)) emit({ t: "post", name: acc, mod: post });
     return acc;
   }
 
-  function walkItems(items: SceneItem[], point: string, accScl: V3, inherited: Material): string | null {
+  function walkItems(items: SceneItem[], point: string, accScl: V3, inherited: MatEx): string | null {
     let acc: string | null = null;
     for (const item of items) {
       let rhs: Rhs | null = null;
@@ -327,7 +448,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
         emit({ t: "def", name: acc, rhs });
       } else {
         if (SMOOTH_OPS.has(item.op)) usesSmin = true;
-        emit({ t: "combine", name: acc, op: item.op, k: item.smoothK, rhs });
+        emit({ t: "combine", name: acc, op: item.op, k: itemValues(item).smoothK, rhs });
       }
     }
     return acc;
@@ -351,20 +472,33 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   };
   let result: string | null;
   if (selected?.kind === "layer") {
+    const inherited = matEx(inheritedAt(selected.id), []);
     if (activeModifiers(selected.modifiers).length > 0) {
-      result = moddedShape(selected, "p", [1, 1, 1], true, inheritedAt(selected.id));
+      result = moddedShape(selected, "p", [1, 1, 1], true, inherited);
     } else {
       const acc = `d${accN++}`;
-      emit({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true, inheritedAt(selected.id)) });
+      emit({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true, inherited) });
       result = acc;
     }
   } else if (selected?.kind === "group") {
-    result = groupValue(selected, "p", [1, 1, 1], inheritedAt(selected.id), true);
+    result = groupValue(selected, "p", [1, 1, 1], matEx(inheritedAt(selected.id), []), true);
   } else {
-    result = walkItems(root.items, "p", [1, 1, 1], DEFAULT_MATERIAL);
+    result = walkItems(root.items, "p", [1, 1, 1], matEx(DEFAULT_MATERIAL, []));
   }
 
-  return { stmts, result, usedShapes, usesRotation, usesSmin, usesModifiers, usesNoise, formulas: formulaList, images };
+  return {
+    stmts,
+    result,
+    usedShapes,
+    usesRotation,
+    usesSmin,
+    usesModifiers,
+    usesNoise,
+    animated: animatedScene,
+    usesAnimNoise,
+    formulas: formulaList,
+    images,
+  };
 }
 
 // Image SDF texel → distance. Must match sdImage in src/gpu/shader.ts.
@@ -463,14 +597,15 @@ const GLSL_SMIN = `float smin(float a, float b, float k) {
 interface Syntax {
   lang: FormulaLang;
   vec3(v: V3): string;
-  vec2(x: number, y: number): string;
+  vec2Expr(x: string, y: string): string;
   minFn: string;
   maxFn: string;
   divVec(e: string, v: V3): string;
   pointStmt(name: string, expr: string): string;
   defStmt(name: string, expr: string): string;
   assignStmt(name: string, expr: string): string;
-  fnOpen(fn: string): string;
+  /** `animated`: the function takes the clock as a second parameter, `time`. */
+  fnOpen(fn: string, animated: boolean): string;
   fnClose: string;
   absFn: string;
   clampFn: string;
@@ -507,32 +642,33 @@ function shapeLocalPoint(syn: Syntax, rhs: ShapeRhs): string {
   return lp;
 }
 
-function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
+function shapeCall(syn: Syntax, rhs: ShapeRhs, time: string): string {
   const lp = shapeLocalPoint(syn, rhs);
-  const [p0, p1, p2, p3] = rhs.params;
+  const P = rhs.params.map((p) => fmtEx(p, syn));
   let call: string;
   if (rhs.shape === "formula") {
-    call = `${rhs.formulaFn}(${lp}, ${fmt(p0)}, ${fmt(p1)})`;
+    call = `${rhs.formulaFn}(${lp}, ${P[0]}, ${P[1]}, ${time})`;
   } else if (rhs.shape === "image") {
     call =
       rhs.imageIndex < 0
         ? fmt(1e10) // layer without a baked SDF contributes nothing
-        : `sdImageTex${rhs.imageIndex}(${lp}, ${fmt(p0)}, ${fmt(p1)}, ${fmt(p2)}, ${fmt(rhs.imageRound)}, ${fmt(p3 > 0.5 ? 1 : 0)})`;
+        : `sdImageTex${rhs.imageIndex}(${lp}, ${P[0]}, ${P[1]}, ${P[2]}, ${fmt(rhs.imageRound)}, ${fmt(exAtRest(rhs.params[3]) > 0.5 ? 1 : 0)})`;
   } else {
-    call = primitiveCall(rhs.shape, lp, [fmt(p0), fmt(p1), fmt(p2), fmt(p3)], {
-      vec2: (x, y) => syn.vec2(Number(x), Number(y)),
-      vec3: (x, y, z) => syn.vec3([Number(x), Number(y), Number(z)]),
+    call = primitiveCall(rhs.shape, lp, [P[0], P[1], P[2], P[3]], {
+      vec2: (x, y) => syn.vec2Expr(x, y),
+      vec3: (x, y, z) => syn.vec3Expr([x, y, z]),
     });
   }
-  for (const m of rhs.post) call = postModExpr(syn, m, call);
-  return Math.abs(rhs.factor - 1) > 1e-9 ? `${call} * ${fmt(rhs.factor)}` : call;
+  for (const m of rhs.post) call = postModExpr(syn, m, call, time);
+  return isOneEx(rhs.factor) ? call : `${call} * ${fmtEx(rhs.factor, syn)}`;
 }
 
-function postModExpr(syn: Syntax, m: PostMod, d: string): string {
+function postModExpr(syn: Syntax, m: PostMod, d: string, time: string): string {
   if (m.kind !== "noise") {
     return m.kind === "round" ? `(${d} - ${fmt(m.amount)})` : `(${syn.absFn}(${d}) - ${fmt(m.amount)})`;
   }
-  const input = `${m.point} * ${fmt(m.scale)}${m.seed ? ` + ${syn.vec3([m.seed * 7.13, m.seed * 3.71, m.seed * 5.37])}` : ""}`;
+  const flow = m.speed ? ` + ${syn.vec3Expr(["0.0", `${time} * ${fmt(m.speed)}`, "0.0"])}` : "";
+  const input = `${m.point} * ${fmt(m.scale)}${m.seed ? ` + ${syn.vec3([m.seed * 7.13, m.seed * 3.71, m.seed * 5.37])}` : ""}${flow}`;
   return `(${d} + ${fmt(m.amount)} * fbm3(${input}, ${fmt(m.octaves)}))`;
 }
 
@@ -561,10 +697,11 @@ function modExpr(syn: Syntax, m: Modifier, q: string): string {
  * Statement lines for the SDF (msyn null) or the material function (msyn
  * set: every accumulator dN carries a material mN alongside).
  */
-function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, depth: number, out: string[]) {
+function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, depth: number, out: string[], time: string) {
   const pad = "  ".repeat(depth);
   const push = (line: string) => out.push(pad + line);
-  const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn!.lit(rhs.material));
+  const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn!.lit(rhs.material, syn));
+  const rhsExpr = (syn: Syntax, rhs: Rhs) => (rhs.kind === "var" ? rhs.name : shapeCall(syn, rhs, time));
   for (const stmt of stmts) {
     switch (stmt.t) {
       case "point":
@@ -587,7 +724,7 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         }
         const a = stmt.name;
         const m = matName(a);
-        const k = fmt(stmt.k);
+        const k = fmtEx(stmt.k, syn);
         let update = "";
         if (stmt.op === "union") update = ` if (t < ${a}) { ${m} = tm; }`;
         else if (stmt.op === "intersect") update = ` if (t > ${a}) { ${m} = tm; }`;
@@ -601,11 +738,11 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
       case "loop": {
         const n = `n${stmt.acc.slice(1)}`;
         push(syn.defStmt(stmt.acc, fmt(1e10)));
-        if (msyn) push(msyn.defMat(matName(stmt.acc), msyn.lit(DEFAULT_MATERIAL)));
+        if (msyn) push(msyn.defMat(matName(stmt.acc), msyn.lit(DEFAULT_MATERIAL, syn)));
         push(`  ${syn.loopOpen(n, 1 << stmt.mask.filter(Boolean).length)}`);
         const step = `cellStep(${n}, ${syn.vec3(stmt.mask.map((b) => (b ? 1 : 0)) as unknown as V3)})`;
         out.push(pad + "  " + syn.pointStmt(stmt.point, `opRepeatCell(${stmt.from}, ${syn.vec3(stmt.mod.spacing)}, ${syn.vec3(stmt.mod.count)}, ${step})`));
-        emitStmts(stmt.body, syn, msyn, depth + 1, out);
+        emitStmts(stmt.body, syn, msyn, depth + 1, out, time);
         if (msyn) push(`    if (${stmt.result} < ${stmt.acc}) { ${matName(stmt.acc)} = ${matName(stmt.result)}; }`);
         out.push(pad + "  " + syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${stmt.result})`));
         push("  }");
@@ -615,17 +752,14 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         push(syn.assignStmt(stmt.name, `${stmt.name} * ${fmt(stmt.k)}`));
         break;
       case "post":
-        push(syn.assignStmt(stmt.name, postModExpr(syn, stmt.mod, stmt.name)));
+        push(syn.assignStmt(stmt.name, postModExpr(syn, stmt.mod, stmt.name, time)));
         break;
     }
   }
 }
 
-function rhsExpr(syn: Syntax, rhs: Rhs): string {
-  return rhs.kind === "var" ? rhs.name : shapeCall(syn, rhs);
-}
-
-function combineExpr(syn: Syntax, acc: string, op: OpType, k: number, b: string): string {
+function combineExpr(syn: Syntax, acc: string, op: OpType, kEx: Ex, b: string): string {
+  const k = fmtEx(kEx, syn);
   switch (op) {
     case "union":
       return `${syn.minFn}(${acc}, ${b})`;
@@ -634,11 +768,11 @@ function combineExpr(syn: Syntax, acc: string, op: OpType, k: number, b: string)
     case "intersect":
       return `${syn.maxFn}(${acc}, ${b})`;
     case "sUnion":
-      return `smin(${acc}, ${b}, ${fmt(k)})`;
+      return `smin(${acc}, ${b}, ${k})`;
     case "sSubtract":
-      return `-smin(${neg(acc)}, ${b}, ${fmt(k)})`;
+      return `-smin(${neg(acc)}, ${b}, ${k})`;
     case "sIntersect":
-      return `-smin(${neg(acc)}, ${neg(b)}, ${fmt(k)})`;
+      return `-smin(${neg(acc)}, ${neg(b)}, ${k})`;
   }
 }
 
@@ -650,15 +784,20 @@ function pointExpr(syn: Syntax, stmt: Extract<Stmt, { t: "point" }>): string {
   return e;
 }
 
+/** What formulas and flowing noise read as the clock: the `time` parameter, or a still 0. */
+const clockArg = (ir: Ir) => (ir.animated ? "time" : "0.0");
+
 function render(ir: Ir, fnName: string, syn: Syntax): string {
   if (!ir.result) return PLACEHOLDER;
 
+  const time = clockArg(ir);
   const body: string[] = [];
   // Single shape → return the expression directly, no accumulator.
-  if (ir.stmts.length === 1 && ir.stmts[0].t === "def") {
-    body.push(`  return ${rhsExpr(syn, ir.stmts[0].rhs)};`);
+  const only = ir.stmts.length === 1 ? ir.stmts[0] : null;
+  if (only?.t === "def" && only.rhs.kind === "shape") {
+    body.push(`  return ${shapeCall(syn, only.rhs, time)};`);
   } else {
-    emitStmts(ir.stmts, syn, null, 0, body);
+    emitStmts(ir.stmts, syn, null, 0, body, time);
     body.push(`  return ${ir.result};`);
   }
 
@@ -672,11 +811,12 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   ir.images.forEach((url, i) => helpers.push(syn.helpers.image(i, url)));
   if (ir.usesRotation) helpers.push(syn.helpers.rot);
   if (ir.usesSmin) helpers.push(syn.helpers.smin);
+  if (ir.usesAnimNoise) helpers.push(ANIM_HELPERS[syn.lang]);
   if (ir.usesModifiers) helpers.push(syn.helpers.modifiers);
   // Last: formulas may call smin / noise.
   for (const [name, parsed] of ir.formulas) helpers.push(formulaFunction(name, parsed.ast, syn.lang));
 
-  return [...helpers, `${syn.fnOpen(fnName)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
+  return [...helpers, `${syn.fnOpen(fnName, ir.animated)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
 }
 
 // ── Material function (embed renderer) ──────────────────────────────────────
@@ -687,11 +827,11 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
 
 interface MaterialSyntax {
   decl: string;
-  lit(m: Material): string;
+  lit(m: MatEx, syn: Syntax): string;
   defMat(name: string, expr: string): string;
   tempF(name: string, expr: string): string;
   tempM(name: string, expr: string): string;
-  fnOpen(fn: string): string;
+  fnOpen(fn: string, animated: boolean): string;
 }
 
 const WGSL_MAT: MaterialSyntax = {
@@ -710,12 +850,12 @@ fn mixMaterial(a: SdfMaterial, b: SdfMaterial, t: f32) -> SdfMaterial {
 fn sminWeight(a: f32, b: f32, k: f32) -> f32 {
   return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
 }`,
-  lit: (m) =>
-    `SdfMaterial(vec3f(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmt(m.emission)})`,
+  lit: (m, syn) =>
+    `SdfMaterial(vec3f(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)})`,
   defMat: (n, e) => `  var ${n} = ${e};`,
   tempF: (n, e) => `let ${n} = ${e};`,
   tempM: (n, e) => `let ${n} = ${e};`,
-  fnOpen: (fn) => `fn ${fn}(p: vec3f) -> SdfMaterial {`,
+  fnOpen: (fn, animated) => `fn ${fn}(p: vec3f${animated ? ", time: f32" : ""}) -> SdfMaterial {`,
 };
 
 const GLSL_MAT: MaterialSyntax = {
@@ -734,12 +874,12 @@ SdfMaterial mixMaterial(SdfMaterial a, SdfMaterial b, float t) {
 float sminWeight(float a, float b, float k) {
   return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
 }`,
-  lit: (m) =>
-    `SdfMaterial(vec3(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmt(m.emission)})`,
+  lit: (m, syn) =>
+    `SdfMaterial(vec3(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)})`,
   defMat: (n, e) => `  SdfMaterial ${n} = ${e};`,
   tempF: (n, e) => `float ${n} = ${e};`,
   tempM: (n, e) => `SdfMaterial ${n} = ${e};`,
-  fnOpen: (fn) => `SdfMaterial ${fn}(vec3 p) {`,
+  fnOpen: (fn, animated) => `SdfMaterial ${fn}(vec3 p${animated ? ", float time" : ""}) {`,
 };
 
 const matName = (acc: string) => `m${acc.slice(1)}`;
@@ -747,25 +887,25 @@ const matName = (acc: string) => `m${acc.slice(1)}`;
 function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSyntax): string {
   const body: string[] = [];
   if (!ir.result) {
-    body.push(`  return ${msyn.lit(DEFAULT_MATERIAL)};`);
+    body.push(`  return ${msyn.lit(DEFAULT_MATERIAL, syn)};`);
   } else {
-    emitStmts(ir.stmts, syn, msyn, 0, body);
+    emitStmts(ir.stmts, syn, msyn, 0, body, clockArg(ir));
     body.push(`  return ${matName(ir.result)};`);
   }
-  return [msyn.decl, `${msyn.fnOpen(fnName)}\n${body.join("\n")}\n}`].join("\n\n");
+  return [msyn.decl, `${msyn.fnOpen(fnName, ir.animated)}\n${body.join("\n")}\n}`].join("\n\n");
 }
 
 const TG_SYNTAX: Syntax = {
   lang: "typegpu",
-  vec3: (v) => `d.vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
-  vec2: (x, y) => `d.vec2f(${fmt(x)}, ${fmt(y)})`,
+  vec3: (v) => `d.vec3f(${v.map((c) => fmtEx(c, TG_SYNTAX)).join(", ")})`,
+  vec2Expr: (x, y) => `d.vec2f(${x}, ${y})`,
   minFn: "std.min",
   maxFn: "std.max",
-  divVec: (e, v) => `${paren(e)} * d.vec3f(${fmtRecip(v[0])}, ${fmtRecip(v[1])}, ${fmtRecip(v[2])})`,
+  divVec: (e, v) => `${paren(e)} * d.vec3f(${v.map((c) => fmtRecipEx(c, TG_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  const ${n} = ${e};`,
   defStmt: (n, e) => `  let ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
-  fnOpen: (fn) => `const ${fn} = (p: d.v3f): number => {\n  "use gpu";`,
+  fnOpen: (fn, animated) => `const ${fn} = (p: d.v3f${animated ? ", time: number" : ""}): number => {\n  "use gpu";`,
   fnClose: "};",
   absFn: "std.abs",
   clampFn: "std.clamp",
@@ -777,15 +917,15 @@ const TG_SYNTAX: Syntax = {
 
 const WGSL_SYNTAX: Syntax = {
   lang: "wgsl",
-  vec3: (v) => `vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
-  vec2: (x, y) => `vec2f(${fmt(x)}, ${fmt(y)})`,
+  vec3: (v) => `vec3f(${v.map((c) => fmtEx(c, WGSL_SYNTAX)).join(", ")})`,
+  vec2Expr: (x, y) => `vec2f(${x}, ${y})`,
   minFn: "min",
   maxFn: "max",
-  divVec: (e, v) => `${paren(e)} / vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
+  divVec: (e, v) => `${paren(e)} / vec3f(${v.map((c) => fmtEx(c, WGSL_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  let ${n} = ${e};`,
   defStmt: (n, e) => `  var ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
-  fnOpen: (fn) => `fn ${fn}(p: vec3f) -> f32 {`,
+  fnOpen: (fn, animated) => `fn ${fn}(p: vec3f${animated ? ", time: f32" : ""}) -> f32 {`,
   fnClose: "}",
   absFn: "abs",
   clampFn: "clamp",
@@ -797,15 +937,15 @@ const WGSL_SYNTAX: Syntax = {
 
 const GLSL_SYNTAX: Syntax = {
   lang: "glsl",
-  vec3: (v) => `vec3(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
-  vec2: (x, y) => `vec2(${fmt(x)}, ${fmt(y)})`,
+  vec3: (v) => `vec3(${v.map((c) => fmtEx(c, GLSL_SYNTAX)).join(", ")})`,
+  vec2Expr: (x, y) => `vec2(${x}, ${y})`,
   minFn: "min",
   maxFn: "max",
-  divVec: (e, v) => `${paren(e)} / vec3(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
+  divVec: (e, v) => `${paren(e)} / vec3(${v.map((c) => fmtEx(c, GLSL_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  vec3 ${n} = ${e};`,
   defStmt: (n, e) => `  float ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
-  fnOpen: (fn) => `float ${fn}(vec3 p) {`,
+  fnOpen: (fn, animated) => `float ${fn}(vec3 p${animated ? ", float time" : ""}) {`,
   fnClose: "}",
   absFn: "abs",
   clampFn: "clamp",
@@ -857,6 +997,7 @@ export function generateSdfCode(root: SceneRoot, selectedItemId: string | null):
   const ir = buildIr(root, selectedItemId);
   return {
     fnName,
+    animated: ir.animated,
     typegpu: render(ir, fnName, TG_SYNTAX),
     wgsl: render(ir, fnName, WGSL_SYNTAX),
     glsl: render(ir, fnName, GLSL_SYNTAX),

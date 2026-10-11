@@ -1,7 +1,7 @@
 /**
  * Formula shapes: a user-written scalar field f(x, y, z), negative inside.
  *
- * A tiny, closed language — numbers, x / y / z, + − * / ^, parentheses,
+ * A tiny, closed language — numbers, x / y / z, t (seconds), + − * / ^, parentheses,
  * a whitelist of functions and constants — parsed here (recursive descent, no
  * eval) and emitted as WGSL, GLSL or TypeGPU. `y` points up (the editor's
  * world +Y points down on screen), so formulas read like math.
@@ -14,7 +14,7 @@ export type FormulaLang = "wgsl" | "glsl" | "typegpu";
 
 type Node =
   | { t: "num"; v: number }
-  | { t: "var"; name: "x" | "y" | "z" }
+  | { t: "var"; name: "x" | "y" | "z" | "t" }
   | { t: "neg"; a: Node }
   | { t: "bin"; op: "+" | "-" | "*" | "/" | "^"; a: Node; b: Node }
   | { t: "call"; fn: string; args: Node[] };
@@ -72,6 +72,8 @@ export const FORMULA_EXAMPLES: { name: string; source: string }[] = [
   { name: "Blobs", source: "length(x, y, z) - 0.35 + 0.08*sin(x*14)*sin(y*14)*sin(z*14)" },
   { name: "Rock", source: "length(x, y, z) - 0.35 + 0.06*fbm(x*5, y*5, z*5)" },
   { name: "Twisted", source: "max(abs(x*cos(y*6) - z*sin(y*6)) - 0.1, abs(x*sin(y*6) + z*cos(y*6)) - 0.1)" },
+  { name: "Ripples", source: "y + 0.05*sin(length(x, z)*25 - t*4)" },
+  { name: "Breathing", source: "length(x, y, z) - 0.3 - 0.05*sin(t*3)" },
 ];
 
 export const DEFAULT_FORMULA = FORMULA_EXAMPLES[0].source;
@@ -199,9 +201,9 @@ class Parser {
       }
       return { t: "call", fn: name, args };
     }
-    if (name === "x" || name === "y" || name === "z") return { t: "var", name };
+    if (name === "x" || name === "y" || name === "z" || name === "t") return { t: "var", name };
     if (Object.prototype.hasOwnProperty.call(CONSTANTS, name)) return { t: "num", v: CONSTANTS[name] };
-    return this.fail(`Unknown name “${name}” (use x, y, z, pi, tau, e)`, start);
+    return this.fail(`Unknown name “${name}” (use x, y, z, t, pi, tau, e)`, start);
   }
 }
 
@@ -298,14 +300,23 @@ export function formulaNeeds(ast: Node): { noise: boolean; smin: boolean } {
   return out;
 }
 
+/** Whether a (valid) formula reads the clock `t`. */
+export function formulaUsesTime(src: string): boolean {
+  const parsed = parseFormula(src);
+  if (!parsed.ok) return false;
+  const walk = (n: Node): boolean =>
+    n.t === "var" ? n.name === "t" : n.t === "neg" ? walk(n.a) : n.t === "bin" ? walk(n.a) || walk(n.b) : n.t === "call" ? n.args.some(walk) : false;
+  return walk(parsed.ast);
+}
+
 /**
- * The SDF of a formula shape as a function `name(p) -> distance` in `lang`:
- * field × safety, clipped to a cube of half size `size`.
+ * The SDF of a formula shape as a function `name(p, size, safety, t) ->
+ * distance` in `lang`: field × safety, clipped to a cube of half size `size`.
  */
 export function formulaFunction(name: string, ast: Node, lang: FormulaLang): string {
   const body = emitFormula(ast, lang);
   if (lang === "wgsl") {
-    return `fn ${name}(p: vec3f, size: f32, safety: f32) -> f32 {
+    return `fn ${name}(p: vec3f, size: f32, safety: f32, t: f32) -> f32 {
   let x = p.x;
   let y = -p.y;
   let z = p.z;
@@ -314,7 +325,7 @@ export function formulaFunction(name: string, ast: Node, lang: FormulaLang): str
 }`;
   }
   if (lang === "glsl") {
-    return `float ${name}(vec3 p, float size, float safety) {
+    return `float ${name}(vec3 p, float size, float safety, float t) {
   float x = p.x;
   float y = -p.y;
   float z = p.z;
@@ -322,7 +333,7 @@ export function formulaFunction(name: string, ast: Node, lang: FormulaLang): str
   return max((${body}) * safety, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
 }`;
   }
-  return `const ${name} = (p: d.v3f, size: number, safety: number): number => {
+  return `const ${name} = (p: d.v3f, size: number, safety: number, t: number): number => {
   "use gpu";
   const x = p.x;
   const y = -p.y;

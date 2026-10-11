@@ -12,6 +12,8 @@ export interface EmbedScene {
     /** Keep a sphere of this radius around `target` in frame. */
     fit?: number;
   };
+  /** Animated scene: seconds before the clock (the shaders' time) wraps. */
+  loop?: number;
 }
 
 export interface MountOptions {
@@ -19,6 +21,8 @@ export interface MountOptions {
   zoom?: boolean;
   /** Radians per second; 0 = still. */
   autoRotate?: number;
+  /** Play the scene's animation (default true; off under prefers-reduced-motion). */
+  animate?: boolean;
   maxDpr?: number;
   backend?: "auto" | "webgpu" | "webgl2";
 }

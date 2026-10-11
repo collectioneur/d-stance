@@ -38,6 +38,8 @@ export type Modifier = (
       /** Fractal layers, each half the size of the last. */
       octaves: number;
       seed: number;
+      /** Flow: how fast the bumps travel (noise units per second); 0 = still. */
+      speed?: number;
     }
 ) & {
   /** Temporarily switched off (kept in the list). */
@@ -161,6 +163,7 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
         scale: num(raw.scale, 6, 0.1, 100),
         octaves: int(raw.octaves, 4, 1, MAX_OCTAVES),
         seed: int(raw.seed, 0, 0, 9999),
+        ...(num(raw.speed, 0, -50, 50) !== 0 ? { speed: num(raw.speed, 0, -50, 50) } : {}),
         ...off,
       };
     default:

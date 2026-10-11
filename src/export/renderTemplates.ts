@@ -31,6 +31,8 @@ export interface RenderConstants {
   floorY: number;
   floorCenter: readonly [number, number, number];
   floorReach: number;
+  /** Animated scene: the clock wraps every `loop` seconds, like the editor's timeline. */
+  loop?: number;
 }
 
 /** The scene SDF and material functions the renderer calls. */
@@ -39,7 +41,12 @@ export interface SceneFns {
   sdfName: string;
   material: string;
   materialName: string;
+  /** Both functions take the clock as a second argument (animated scene). */
+  animated: boolean;
 }
+
+/** `fn(p)`, or `fn(p, clock)` for an animated scene. */
+const call = (fns: SceneFns, fn: string, clock: string) => `${fn}(p${fns.animated ? `, ${clock}` : ""})`;
 
 const num = (n: number) => {
   const s = parseFloat(n.toFixed(6)).toString();
@@ -83,7 +90,7 @@ const FLOOR_REACH = ${num(c.floorReach)};
 const KEY_LIGHT = vec3f(-0.33282, -0.83205, -0.44376); // normalize(-1.2, -3, -1.6)
 
 fn map(p: vec3f) -> f32 {
-  return ${fns.sdfName}(p);
+  return ${call(fns, fns.sdfName, "view.time")};
 }
 
 fn orbitRot(v: vec2f, a: f32) -> vec2f {
@@ -223,7 +230,7 @@ fn shadeChrome(p: vec3f, n: vec3f, rd: vec3f) -> vec3f {
   let h = normalize(normalize(vec3f(-1.5, -2.5, -2.0)) + v);
   let spec = pow(max(dot(n, h), 0.0), 220.0) * 2.5;
   let ao = ambientOcclusion(p, n);
-  let m = ${fns.materialName}(p);
+  let m = ${call(fns, fns.materialName, "view.time")};
   let hdr = (refl * fresnel + vec3f(spec)) * mix(0.5, 1.0, ao) + m.color * m.emission;
   return pow(aces(hdr), vec3f(1.0 / 2.2)) * chromeTint(m.color);
 }
@@ -234,7 +241,7 @@ fn shadeStudio(p: vec3f, n: vec3f, rd: vec3f) -> vec3f {
   var shadow = 0.0;
   if (ndl > 0.0) { shadow = softShadow(p + n * 0.003, KEY_LIGHT); }
   let ao = ambientOcclusion(p, n);
-  let m = ${fns.materialName}(p);
+  let m = ${call(fns, fns.materialName, "view.time")};
   let albedo = pow(max(m.color, vec3f(0.0)), vec3f(2.2));
   let rough = clamp(m.roughness, 0.045, 1.0);
   let metal = clamp(m.metalness, 0.0, 1.0);
@@ -271,7 +278,7 @@ fn shade(ro: vec3f, rd: vec3f, t: f32, iterations: f32) -> vec3f {
   let n = normal(p);
   if (STYLE == 1) { return shadeChrome(p, n, rd); }
   if (STYLE == 2) { return shadeStudio(p, n, rd); }
-  return shadeClassic(n, -rd, iterations, ${fns.materialName}(p));
+  return shadeClassic(n, -rd, iterations, ${call(fns, fns.materialName, "view.time")});
 }
 
 // Studio floor under the scene: (light, coverage). light 1 = lit, coverage 0 = off the floor.
@@ -336,7 +343,7 @@ const float FLOOR_REACH = ${num(c.floorReach)};
 const vec3 KEY_LIGHT = vec3(-0.33282, -0.83205, -0.44376);
 
 float map(vec3 p) {
-  return ${fns.sdfName}(p);
+  return ${call(fns, fns.sdfName, "uTime")};
 }
 
 vec2 orbitRot(vec2 v, float a) {
@@ -466,7 +473,7 @@ vec3 shadeChrome(vec3 p, vec3 n, vec3 rd) {
   vec3 h = normalize(normalize(vec3(-1.5, -2.5, -2.0)) + v);
   float spec = pow(max(dot(n, h), 0.0), 220.0) * 2.5;
   float ao = ambientOcclusion(p, n);
-  SdfMaterial m = ${fns.materialName}(p);
+  SdfMaterial m = ${call(fns, fns.materialName, "uTime")};
   vec3 hdr = (refl * fresnel + vec3(spec)) * mix(0.5, 1.0, ao) + m.color * m.emission;
   return pow(aces(hdr), vec3(1.0 / 2.2)) * chromeTint(m.color);
 }
@@ -476,7 +483,7 @@ vec3 shadeStudio(vec3 p, vec3 n, vec3 rd) {
   float ndl = max(dot(n, KEY_LIGHT), 0.0);
   float shadow = ndl > 0.0 ? softShadow(p + n * 0.003, KEY_LIGHT) : 0.0;
   float ao = ambientOcclusion(p, n);
-  SdfMaterial m = ${fns.materialName}(p);
+  SdfMaterial m = ${call(fns, fns.materialName, "uTime")};
   vec3 albedo = pow(max(m.color, 0.0), vec3(2.2));
   float rough = clamp(m.roughness, 0.045, 1.0);
   float metal = clamp(m.metalness, 0.0, 1.0);
@@ -515,7 +522,7 @@ vec3 shade(vec3 ro, vec3 rd, float t, float iterations) {
 #elif STYLE == 2
   return shadeStudio(p, n, rd);
 #else
-  return shadeClassic(n, -rd, iterations, ${fns.materialName}(p));
+  return shadeClassic(n, -rd, iterations, ${call(fns, fns.materialName, "uTime")});
 #endif
 }
 
@@ -613,12 +620,14 @@ ${glslScene(fns)}
 vec2 uRes;
 vec2 uRot;
 float uDist;
+float uTime;
 vec3 uTarget;
 
 ${glslRenderer(fns, c)}
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   uRes = iResolution.xy;
+  uTime = ${c.loop ? `mod(iTime, ${num(c.loop)})` : "iTime"};
   uRot = vec2(${num(view.rotX)}, ${num(view.rotY)});
   if (iMouse.x > 0.0) uRot += (iMouse.xy / iResolution.xy - 0.5) * vec2(6.2831853, -3.1415926);
   uDist = ${num(view.distance)};

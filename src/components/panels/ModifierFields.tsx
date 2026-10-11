@@ -193,6 +193,7 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
           <ScalarRow label="Scale" value={m.scale} min={0.1} max={100} step={0.5} onChange={(scale) => onChange({ ...m, scale })} />
           <ScalarRow label="Octaves" value={m.octaves} min={1} max={MAX_OCTAVES} step={1} integer onChange={(octaves) => onChange({ ...m, octaves })} />
           <ScalarRow label="Seed" value={m.seed} min={0} max={9999} step={1} integer onChange={(seed) => onChange({ ...m, seed })} />
+          <ScalarRow label="Flow" value={m.speed ?? 0} min={-50} max={50} step={0.1} onChange={(speed) => onChange({ ...m, speed })} />
         </>
       );
   }
