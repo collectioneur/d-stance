@@ -125,3 +125,65 @@ describe("generateSdfCode modifiers", () => {
     expect(out.glsl).toMatchSnapshot("glsl");
   });
 });
+
+describe("generateSdfCode animation", () => {
+  const spin = { target: "rotation.y" as const, wave: "linear" as const, amount: 360, period: 4, phase: 0 };
+
+  test("still scenes keep the one-argument signature", () => {
+    const out = generateSdfCode(scene([shape("sphere")], "Still"), null);
+    expect(out.animated).toBe(false);
+    expect(out.wgsl).toContain("fn sdStill(p: vec3f) -> f32");
+    expect(out.wgsl).not.toContain("time");
+  });
+
+  test("animated numbers become expressions of time in every language", () => {
+    const root = scene([shape("box", { animation: [spin] }), shape("sphere", { op: "sUnion", animation: [{ ...spin, target: "smoothK", wave: "sine", amount: 0.05 }] })], "Spin");
+    const out = generateSdfCode(root, null);
+    expect(out.animated).toBe(true);
+    expect(out.wgsl).toContain("fn sdSpin(p: vec3f, time: f32) -> f32");
+    expect(out.glsl).toContain("float sdSpin(vec3 p, float time)");
+    expect(out.typegpu).toContain("const sdSpin = (p: d.v3f, time: number): number =>");
+    expect(out.wgsl).toContain("applyInvRotXYZ(p, vec3f(0.0, ((0.0 + 360.0 * (time / 4.0)) * 0.0174532925), 0.0))");
+    expect(out.wgsl).toMatch(/smin\(d0, sdSphere\(p, 0\.5\), max\(\(0\.1 \+ 0\.05 \* sin\(6\.2831853 \* time \/ 4\.0\)\), 0\.001\)\)/);
+    expect(out.typegpu).toContain("std.sin(");
+  });
+
+  test("animated scale divides the point and the distance factor follows", () => {
+    const pulse = { target: "scale" as const, wave: "sine" as const, amount: 0.2, period: 1, phase: 0 };
+    const out = generateSdfCode(scene([shape("sphere", { animation: [pulse] })], "Pulse"), null);
+    expect(out.wgsl).toContain("p / vec3f(max((1.0 * (1.0 + 0.2 * sin(6.2831853 * time / 1.0))), 0.01)");
+    expect(out.wgsl).toMatch(/\* min\(min\(max\(/);
+    expect(out.typegpu).toMatch(/p \* d\.vec3f\(\(1\.0 \/ std\.max\(/);
+  });
+
+  test("noise waves ship their helper; others do not", () => {
+    const wobble = { ...spin, wave: "noise" as const, target: "position.x" as const, amount: 0.1 };
+    expect(generateSdfCode(scene([shape("box", { animation: [wobble] })]), null).wgsl).toContain("fn animNoise(");
+    expect(generateSdfCode(scene([shape("box", { animation: [spin] })]), null).wgsl).not.toContain("animNoise");
+  });
+
+  test("formulas reading t and flowing noise animate the export too", () => {
+    const f = generateSdfCode(scene([shape("formula", { formula: "length(x, y, z) - 0.3 - 0.05 * sin(t)" })]), null);
+    expect(f.animated).toBe(true);
+    expect(f.wgsl).toContain("formula0(p, 0.5, 0.5, time)");
+    const n = generateSdfCode(
+      scene([shape("sphere", { modifiers: [{ kind: "noise", amplitude: 0.05, scale: 4, octaves: 3, seed: 0, speed: 0.5 }] })]),
+      null,
+    );
+    expect(n.animated).toBe(true);
+    expect(n.wgsl).toContain("vec3f(0.0, time * 0.5, 0.0)");
+  });
+
+  test("switched-off tracks export a still scene", () => {
+    const out = generateSdfCode(scene([shape("box", { animation: [{ ...spin, off: true }] })]), null);
+    expect(out.animated).toBe(false);
+  });
+
+  test("glow animation reaches the material function", () => {
+    const mat = { color: [1, 0.5, 0] as [number, number, number], roughness: 0.4, metalness: 0, emission: 1 };
+    const glow = { ...spin, target: "emission" as const, wave: "sine" as const, amount: 1, period: 2 };
+    const out = generateMaterialCode(scene([shape("sphere", { material: mat, animation: [glow] })], "Lamp"));
+    expect(out.wgsl).toContain("fn sdLampMaterial(p: vec3f, time: f32) -> SdfMaterial");
+    expect(out.wgsl).toContain("max((1.0 + 1.0 * sin(6.2831853 * time / 2.0)), 0.0)");
+  });
+});

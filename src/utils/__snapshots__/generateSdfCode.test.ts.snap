@@ -393,7 +393,7 @@ vec3 opBend(vec3 q, float k, int axis) {
   return vec3(r.x, r.y, q.z);
 }
 
-float formula0(vec3 p, float size, float safety) {
+float formula0(vec3 p, float size, float safety, float t) {
   float x = p.x;
   float y = -p.y;
   float z = p.z;
@@ -432,7 +432,7 @@ float sdScene(vec3 p) {
   vec3 q3 = p;
   float d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + vec3(14.26, 7.42, 10.74), 3.0)) * 0.565611;
   d0 = min(d0, d3);
-  d0 = min(d0, formula0(p, 0.5, 0.5));
+  d0 = min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 }"
@@ -867,7 +867,7 @@ const opBend = tgpu.fn([d.vec3f, d.f32, d.u32], d.vec3f)\`(q, k, axis) {
   return vec3f(r.x, r.y, q.z);
 }\`.$uses({ rot2 });
 
-const formula0 = (p: d.v3f, size: number, safety: number): number => {
+const formula0 = (p: d.v3f, size: number, safety: number, t: number): number => {
   "use gpu";
   const x = p.x;
   const y = -p.y;
@@ -908,7 +908,7 @@ const sdScene = (p: d.v3f): number => {
   const q3 = p;
   let d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + d.vec3f(14.26, 7.42, 10.74), 3.0)) * 0.565611;
   d0 = std.min(d0, d3);
-  d0 = std.min(d0, formula0(p, 0.5, 0.5));
+  d0 = std.min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = std.min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 };"
@@ -1312,7 +1312,7 @@ fn opBend(q: vec3f, k: f32, axis: u32) -> vec3f {
   return vec3f(r.x, r.y, q.z);
 }
 
-fn formula0(p: vec3f, size: f32, safety: f32) -> f32 {
+fn formula0(p: vec3f, size: f32, safety: f32, t: f32) -> f32 {
   let x = p.x;
   let y = -p.y;
   let z = p.z;
@@ -1351,7 +1351,7 @@ fn sdScene(p: vec3f) -> f32 {
   let q3 = p;
   var d3 = (sdGyroid(q3, 0.4, 0.25, 0.02) + 0.02 * fbm3(q3 * 8.0 + vec3f(14.26, 7.42, 10.74), 3.0)) * 0.565611;
   d0 = min(d0, d3);
-  d0 = min(d0, formula0(p, 0.5, 0.5));
+  d0 = min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
   return d0;
 }"

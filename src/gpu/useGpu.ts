@@ -56,7 +56,9 @@ import {
   type RingDragState,
   type ScaleDragState,
 } from "./gizmo";
-import { compileScene, type CompiledScene } from "./sceneCompiler";
+import { compileScene, sceneUsesTime as compileUsesTime, type CompiledScene } from "./sceneCompiler";
+import { evaluateAnimations, hasAnimation } from "../store/animation";
+import { useTimelineStore } from "../store/timelineStore";
 import { SpawnAnimator } from "./spawnAnim";
 import { IMAGE_SDF_EMPTY_HALF, IMAGE_SDF_RES, decodeSdfPng } from "../utils/imageSdf";
 
@@ -238,7 +240,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
        * Compile the drawn root when it changed, promote a ready program, and
        * upload values that match the active program's layout.
        */
-      function syncSceneProgram(drawnRoot: SceneRoot, renderMode: RenderMode): boolean {
+      let writtenTime = -1;
+
+      function syncSceneProgram(drawnRoot: SceneRoot, renderMode: RenderMode, time: number): boolean {
         if (drawnRoot !== latestRoot) {
           uploadImageSlots(drawnRoot);
           latest = compileScene(drawnRoot, COMPILE_OPTIONS);
@@ -257,19 +261,22 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           active = { program: active.program, scene: latest };
           pickItemIds = latest.leafIds;
         }
-        if (!active || !dataDirty) return false;
+        if (!active || (!dataDirty && time === writtenTime)) return false;
         const scene = active.scene;
-        writeMarks(scene);
-        root.device.queue.writeBuffer(sceneDataGpu, 0, scene.values);
+        if (dataDirty) {
+          writeMarks(scene);
+          root.device.queue.writeBuffer(sceneDataGpu, 0, scene.values);
+        }
         const { rootSelected } = useSceneStore.getState();
         sceneUniforms.write({
           boundsRadius: scene.boundsRadius,
           _pad0: 0,
           selectAll: rootSelected && scene.leafIds.length > 0 ? 1 : 0,
-          _pad1: 0,
+          time,
           boundsCenter: d.vec3f(0, 0, 0),
           _pad2: 0,
         });
+        writtenTime = time;
         dataDirty = false;
         return true;
       }
@@ -1197,6 +1204,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let lastHoverFrame = 0;
       let lastView = "";
       let lastDrawnRoot: SceneRoot | null = null;
+      let sceneAnimated = false;
+      let animatedFor: SceneRoot | null = null;
+      let lastTick = performance.now();
       let lastActive: { program: Program; scene: CompiledScene } | null = null;
       lastSelectedIds = initialState.selectedIds;
       lastRootSelected = initialState.rootSelected;
@@ -1217,7 +1227,22 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           lastQuality = quality;
         }
         if (lastRoot && sceneRoot !== lastRoot) spawnAnim.rootChanged(lastRoot, sceneRoot, now);
-        const drawn = spawnAnim.frame(sceneRoot, now);
+        const spawned = spawnAnim.frame(sceneRoot, now);
+        // Procedural animation: the clock runs only while something moves; a
+        // dragged item holds its rest pose so the gizmo moves what you see.
+        if (sceneRoot !== animatedFor) {
+          sceneAnimated = hasAnimation(sceneRoot.items) || compileUsesTime(sceneRoot);
+          animatedFor = sceneRoot;
+        }
+        const timeline = useTimelineStore.getState();
+        if (sceneAnimated && timeline.playing) timeline.tick(Math.min(0.1, (now - lastTick) / 1000));
+        lastTick = now;
+        const time = sceneAnimated ? useTimelineStore.getState().time : 0;
+        const still = gizmoDragging ? new Set(useSceneStore.getState().selectedIds) : undefined;
+        const drawn = {
+          root: sceneAnimated ? evaluateAnimations(spawned.root, time, still) : spawned.root,
+          animating: spawned.animating,
+        };
         if (
           selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
@@ -1231,7 +1256,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         lastRenderMode = renderMode;
         updateHoverUniforms(Math.min(0.1, (now - lastHoverFrame) / 1000));
         lastHoverFrame = now;
-        const dataChanged = syncSceneProgram(drawn.root, renderMode);
+        const dataChanged = syncSceneProgram(drawn.root, renderMode, time);
 
         // Highlight only while dragging; hover feedback stays cursor-only.
         const activeGizmoAxis = gizmoDragging ? gizmoDragAxis : null;

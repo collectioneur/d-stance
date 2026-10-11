@@ -123,3 +123,22 @@ describe("persistence v9 formulas", () => {
     expect("formula" in d).toBe(false);
   });
 });
+
+describe("persistence v10 animation", () => {
+  test("tracks are sanitized; hostile ones drop, empty lists vanish", () => {
+    const ok = shape("sphere", { id: "ok", animation: [{ target: "rotation.y", wave: "linear", amount: 360, period: 4, phase: 0 }] });
+    const bad = { ...shape("box", { id: "bad" }), animation: [{ target: "__proto__", wave: "sine" }, { target: "scale", wave: "sine", period: -1 }] };
+    const junk = { ...shape("box", { id: "junk" }), animation: "spin" };
+    const g = { ...group([shape("torus")], { id: "g" }), animation: [{ target: "position.y", wave: "bounce", amount: -0.2, period: 1, phase: 0 }] };
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad as never, junk as never, g as never])));
+    const [a, b, c, d] = decoded!.root.items;
+    expect(a.animation).toEqual(ok.animation);
+    expect(b.animation).toEqual([{ target: "scale", wave: "sine", amount: 0, period: 0.05, phase: 0 }]);
+    expect("animation" in c).toBe(false);
+    expect(d.animation).toHaveLength(1);
+  });
+
+  test("v9 blobs still load", () => {
+    expect(decodeHash(blob(9, scene([shape("sphere")])))?.root.items).toHaveLength(1);
+  });
+});

@@ -1,5 +1,6 @@
 import type { Material, Modifier, ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
 import { defaultParams } from "../store/sceneStore";
+import type { Track } from "../store/animation";
 
 type V3 = [number, number, number];
 
@@ -25,6 +26,7 @@ export function shape(
     ...(opts.material ? { material: opts.material } : {}),
     ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
     ...(opts.formula ? { formula: opts.formula } : {}),
+    ...(opts.animation ? { animation: opts.animation } : {}),
   };
 }
 
@@ -40,6 +42,7 @@ export function group(
     smoothK: number;
     material: Material;
     modifiers: Modifier[];
+    animation: Track[];
   }> = {},
 ): ObjectGroup {
   return {
@@ -53,6 +56,7 @@ export function group(
     smoothK: opts.smoothK ?? 0.1,
     ...(opts.material ? { material: opts.material } : {}),
     ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
+    ...(opts.animation ? { animation: opts.animation } : {}),
     items,
   };
 }

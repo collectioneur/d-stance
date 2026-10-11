@@ -19,7 +19,8 @@ import {
   type SceneFns,
 } from "./renderTemplates";
 import { generateMaterialCode, generateSdfCode, PLACEHOLDER } from "../utils/generateSdfCode";
-import { sceneFloorY, sceneFrameSphere, sceneMarchRadius } from "../sdf/itemBounds";
+import { sceneFloorY, sceneFrameSphere, sceneMarchRadius, type Sphere } from "../sdf/itemBounds";
+import { evaluateAnimations, hasAnimation } from "../store/animation";
 import { IMAGE_SDF_PREFIX } from "../utils/imageSdf";
 import type { SceneItem, SceneRoot } from "../store/sceneStore";
 import type {
@@ -39,6 +40,8 @@ export interface EmbedOptions {
   /** "fit": orbit the scene's own center at a distance that frames it. */
   framing: ExportFraming;
   view: ViewState;
+  /** Animation loop length (the editor timeline's), seconds. */
+  loop?: number;
 }
 
 type ExportView = ViewState & { target: [number, number, number]; fit?: number };
@@ -51,7 +54,7 @@ export interface EmbedExport {
   /** Shapes Shadertoy cannot show (image layers need textures). */
   shadertoyDropped: number;
   /** Raw scene object handed to `mount` (tests, previews). */
-  scene: { wgsl: string; glsl: string; images: string[]; view: ExportView };
+  scene: { wgsl: string; glsl: string; images: string[]; view: ExportView; loop?: number };
   mountOptions: { autoRotate: number; maxDpr: number };
 }
 
@@ -94,28 +97,80 @@ function slug(name: string): string {
 /** `export function mount` → `function mount` for inline (non-imported) use. */
 const runtimeInline = runtimeSource.replace(/^export function mount/m, "function mount");
 
+/** Editor default (timelineStore). */
+const DEFAULT_LOOP = 8;
+
+interface Extent {
+  /** Ray-march bound around the origin. */
+  march: number;
+  floorY: number;
+  /** Null when empty or unbounded. */
+  frame: Sphere | null;
+}
+
+/**
+ * Where the scene can be. A moving scene is sampled over its loop: the march
+ * bound, floor and framing cover every pose, not just the first one.
+ */
+function sceneExtent(root: SceneRoot, loop: number): Extent {
+  const at = (items: SceneItem[]): Extent => ({
+    march: items.length > 0 ? sceneMarchRadius(items) : 0,
+    floorY: sceneFloorY(items),
+    frame: sceneFrameSphere(items),
+  });
+  const rest = at(root.items);
+  if (!hasAnimation(root.items)) return rest;
+  // ~30 poses a second, at most 240; the margin covers motion between samples.
+  const n = Math.min(240, Math.max(16, Math.ceil(loop * 30)));
+  let { march, floorY } = rest;
+  let reach = rest.frame?.r ?? 0;
+  let bounded = rest.frame !== null;
+  for (let i = 1; i < n; i++) {
+    const pose = at(evaluateAnimations(root, (loop * i) / n).items);
+    march = Math.max(march, pose.march);
+    floorY = Math.max(floorY, pose.floorY);
+    if (!pose.frame || !rest.frame) {
+      bounded = false;
+      continue;
+    }
+    const c = rest.frame.c;
+    const f = pose.frame;
+    reach = Math.max(reach, Math.hypot(f.c[0] - c[0], f.c[1] - c[1], f.c[2] - c[2]) + f.r);
+  }
+  const grow = (v: number) => Math.round(v * 1.03 * 1e4) / 1e4;
+  return {
+    march: grow(march),
+    floorY: Math.round((floorY + 0.03 * (floorY - rest.floorY)) * 1e4) / 1e4,
+    frame: bounded && rest.frame ? { c: rest.frame.c, r: grow(reach) } : null,
+  };
+}
+
 export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport {
   const quality = QUALITY[opts.quality];
-  const fit = sceneFrameSphere(root.items);
+  const fns = sceneFns(root);
+  const loop = fns.wgsl.animated ? (opts.loop ?? DEFAULT_LOOP) : undefined;
+  const extent = sceneExtent(root, loop ?? DEFAULT_LOOP);
+  const fit = extent.frame;
   const constants: RenderConstants = {
     style: opts.style,
     background: opts.background,
     maxSteps: quality.maxSteps,
     reflSteps: quality.reflSteps,
     shadowSteps: quality.shadowSteps,
-    bounds: root.items.length > 0 ? sceneMarchRadius(root.items) : 0,
-    floorY: sceneFloorY(root.items),
+    bounds: extent.march,
+    floorY: extent.floorY,
     floorCenter: fit?.c ?? [0, 0, 0],
     floorReach: Math.max(fit?.r ?? 1, 0.2),
+    ...(loop ? { loop } : {}),
   };
-  const fns = sceneFns(root);
   const images = collectImages(root.items);
-  const view = exportView(root, opts);
+  const view = exportView(fit, opts);
   const scene = {
     wgsl: renderWgsl(fns.wgsl, constants),
     glsl: renderGlsl(fns.glsl, constants),
     images,
     view,
+    ...(loop ? { loop } : {}),
   };
   const mountOptions = { autoRotate: AUTO_ROTATE[opts.motion], maxDpr: quality.maxDpr };
   // Stable per scene, distinct between scenes sharing a page.
@@ -179,10 +234,10 @@ ${html.replace(' style="display:block;width:100%;height:420px"', "")}</body>
 /** Vertical half-FOV of the viewport camera (rd = normalize(uv, 1)). */
 const HALF_FOV = Math.PI / 4;
 
-function exportView(root: SceneRoot, opts: EmbedOptions): ExportView {
+function exportView(frame: Sphere | null, opts: EmbedOptions): ExportView {
   const { rotX, rotY, distance } = opts.view;
   // Unbounded scenes (infinite repeat) keep the editor's view.
-  const sphere = opts.framing === "fit" ? sceneFrameSphere(root.items) : null;
+  const sphere = opts.framing === "fit" ? frame : null;
   if (!sphere) return { rotX, rotY, distance, target: [0, 0, 0] };
   const round = (v: number) => Math.round(v * 1e5) / 1e5;
   const radius = round(Math.max(sphere.r, 0.05));
@@ -207,12 +262,14 @@ function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
       sdfName: name,
       material: mat.wgsl,
       materialName: mat.fnName,
+      animated: sdf.animated,
     },
     glsl: {
       sdf: empty ? `float ${name}(vec3 p) {\n  return 1e10;\n}` : sdf.glsl.replace(DATA_URL_LINE, ""),
       sdfName: name,
       material: mat.glsl,
       materialName: mat.fnName,
+      animated: sdf.animated,
     },
   };
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSceneStore } from "../../store/sceneStore";
 import { useRenderStore } from "../../store/renderStore";
 import { useExportStore } from "../../store/exportStore";
+import { useTimelineStore } from "../../store/timelineStore";
 import { useViewStore } from "../../store/viewStore";
 import { generateSdfCode, type CodeLang } from "../../utils/generateSdfCode";
 import { exportFileName, generateEmbed } from "../../export/embed";
@@ -83,6 +84,7 @@ export default function CodeView() {
   };
 
   const isScene = lang === "embed" || lang === "shadertoy";
+  const loop = useTimelineStore((s) => s.duration);
   const generated = useMemo(
     () => (isScene ? null : generateSdfCode(root, selectedItemId)),
     [isScene, root, selectedItemId],
@@ -97,9 +99,10 @@ export default function CodeView() {
             quality,
             framing,
             view: { rotX: view.rotX, rotY: view.rotY, distance: view.distance },
+            loop,
           })
         : null,
-    [isScene, root, look, renderMode, background, motion, quality, framing, view.rotX, view.rotY, view.distance],
+    [isScene, root, look, renderMode, background, motion, quality, framing, view.rotX, view.rotY, view.distance, loop],
   );
   const code = exp
     ? lang === "shadertoy"

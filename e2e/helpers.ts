@@ -26,7 +26,7 @@ export function box(extra: Record<string, unknown> = {}) {
   return { ...sphere(), id: uid("box"), shapeType: "box", name: "Box", params: [0.4, 0.4, 0.4, 0], ...extra };
 }
 
-export function encodeScene(root: SceneJson, v = 8): string {
+export function encodeScene(root: SceneJson, v = 10): string {
   const json = JSON.stringify({ v, root, counters: {}, groupCounter: 0 });
   return Buffer.from(json, "utf8").toString("base64");
 }

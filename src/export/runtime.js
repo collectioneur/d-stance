@@ -160,8 +160,13 @@ async function createWebGl(canvas, scene) {
 }
 
 export function mount(canvas, scene, options = {}) {
-  const opts = { orbit: true, zoom: true, autoRotate: 0, maxDpr: 2, backend: "auto", ...options };
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) opts.autoRotate = 0;
+  const opts = { orbit: true, zoom: true, autoRotate: 0, animate: true, maxDpr: 2, backend: "auto", ...options };
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    opts.autoRotate = 0;
+    opts.animate = false;
+  }
+  // Animated scenes loop their clock like the editor's timeline.
+  const loop = opts.animate && scene.loop > 0 ? scene.loop : 0;
   const view = {
     rotX: scene.view.rotX,
     rotY: scene.view.rotY,
@@ -203,13 +208,16 @@ export function mount(canvas, scene, options = {}) {
       view.rotX += opts.autoRotate * dt;
       dirty = true;
     }
-    view.time = (now - start) / 1000;
+    if (loop) {
+      view.time = ((now - start) / 1000) % loop;
+      dirty = true;
+    }
     if (dirty && visible && renderer) {
       resize();
       renderer.draw(view);
       dirty = false;
     }
-    if (opts.autoRotate || dirty) schedule();
+    if (opts.autoRotate || loop || dirty) schedule();
   };
   const schedule = () => {
     if (!raf && !destroyed && visible) raf = requestAnimationFrame(frame);

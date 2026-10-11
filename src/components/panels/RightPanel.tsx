@@ -17,6 +17,7 @@ import { NumericInput, common } from "./fields";
 import { MaterialFields } from "./MaterialFields";
 import { ModifierFields } from "./ModifierFields";
 import { FormulaField } from "./FormulaField";
+import { AnimationFields } from "./AnimationFields";
 
 // ── Shape size field definitions ──────────────────────────────────────────────
 
@@ -305,6 +306,7 @@ function GroupProperties({
       <NumericInput label="Sz" value={group.scale[2]} min={0.01} fallback={1} decimals={2} onChange={(v) => setScale(2, v)} />
 
       {shared.length === 1 && <ModifierFields item={group} />}
+      {shared.length === 1 && <AnimationFields item={group} />}
       <MaterialFields items={shared} />
     </div>
   );
@@ -436,6 +438,7 @@ function LayerProperties({
         <FormulaField key={layer.id} layer={layer} containerId={containerId} />
       )}
       {shared.length === 1 && <ModifierFields item={layer} />}
+      {shared.length === 1 && <AnimationFields item={layer} />}
       <MaterialFields items={shared} />
     </div>
   );

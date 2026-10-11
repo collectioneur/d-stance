@@ -109,3 +109,38 @@ describe("embed export", () => {
     expect(exportFileName(scene([], "!!!"), "module")).toBe("scene.js");
   });
 });
+
+describe("embed animation", () => {
+  const orbit = [
+    { target: "position.x" as const, wave: "sine" as const, amount: 1, period: 4, phase: 0 },
+    { target: "position.y" as const, wave: "sine" as const, amount: 0.5, period: 4, phase: 0.25 },
+  ];
+
+  test("still scenes carry no clock", () => {
+    const out = generateEmbed(scene([shape("sphere")], "Still"), OPTS);
+    expect(out.scene.loop).toBeUndefined();
+    expect(out.shadertoy).toContain("uTime = iTime;");
+  });
+
+  test("animated scenes pass the looped clock to the scene functions", () => {
+    const out = generateEmbed(scene([shape("sphere", { animation: orbit })], "Orbit"), { ...OPTS, loop: 6 });
+    expect(out.scene.loop).toBe(6);
+    expect(out.scene.wgsl).toContain("return sdOrbit(p, view.time);");
+    expect(out.scene.wgsl).toContain("sdOrbitMaterial(p, view.time)");
+    expect(out.scene.glsl).toContain("return sdOrbit(p, uTime);");
+    expect(out.shadertoy).toContain("uTime = mod(iTime, 6.0);");
+    expect(out.html).toContain('"loop": 6');
+  });
+
+  test("bounds, floor and framing cover every pose of the loop", () => {
+    const rest = generateEmbed(scene([shape("sphere")]), { ...OPTS, style: "studio", framing: "fit" });
+    const moving = generateEmbed(scene([shape("sphere", { animation: orbit })]), { ...OPTS, style: "studio", framing: "fit" });
+    const bound = (wgsl: string) => Number(wgsl.match(/const BOUNDS = ([\d.]+);/)![1]);
+    const floor = (wgsl: string) => Number(wgsl.match(/const FLOOR_Y = (-?[\d.]+);/)![1]);
+    expect(bound(rest.scene.wgsl)).toBeCloseTo(0.55, 5);
+    // Farthest pose: 1 off center (x and y swing out of phase), plus the 0.5 radius and 0.05 slack.
+    expect(bound(moving.scene.wgsl)).toBeGreaterThanOrEqual(1.55);
+    expect(floor(moving.scene.wgsl)).toBeGreaterThanOrEqual(1);
+    expect(moving.scene.view.fit!).toBeGreaterThanOrEqual(1.5);
+  });
+});

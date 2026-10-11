@@ -214,3 +214,36 @@ export function noiseScene() {
     ],
   };
 }
+
+/** A little of everything that moves. */
+export function animationScene() {
+  return {
+    id: "root",
+    name: "Motion",
+    items: [
+      layer("box", [0.15, 0.15, 0.15, 0.0], {
+        position: [-0.55, -0.3, 0] as V3,
+        animation: [{ target: "rotation.y", wave: "linear", amount: 360, period: 4, phase: 0 }],
+        material: { color: [0.2, 0.45, 0.95], roughness: 0.4, metalness: 0, emission: 0 },
+      }),
+      layer("sphere", [0.15, 0, 0, 0], {
+        position: [0, -0.3, 0] as V3,
+        animation: [{ target: "position.y", wave: "sine", amount: 0.12, period: 2, phase: 0 }],
+        material: { color: [0.9, 0.25, 0.2], roughness: 0.3, metalness: 0, emission: 0 },
+      }),
+      layer("formula", [0.3, 0.5, 0, 0], {
+        position: [0.6, -0.1, 0] as V3,
+        formula: "y + 0.04*sin(length(x, z)*25 - t*4)",
+      }),
+      layer("torus", [0.12, 0.04, 0, 0], {
+        position: [0, -0.3, 0.55] as V3,
+        animation: [
+          { target: "scale", wave: "sine", amount: 0.3, period: 1, phase: 0 },
+          { target: "position.x", wave: "noise", amount: 0.05, period: 0.7, phase: 0 },
+          { target: "emission", wave: "triangle", amount: 0.8, period: 2, phase: 0.5 },
+        ],
+        material: { color: [0.25, 0.85, 1], roughness: 0.4, metalness: 0, emission: 0.8 },
+      }),
+    ],
+  };
+}

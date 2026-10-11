@@ -5,6 +5,7 @@ import { IMAGE_SDF_RES } from "../utils/imageSdf";
 import {
   DATA_IDENT,
   DATA_SLOTS,
+  SCENE_IDENT,
   IMAGE_SAMPLER_IDENT,
   IMAGE_TEX_IDENT,
 } from "./sceneCompiler";
@@ -26,7 +27,7 @@ const SceneUniforms = d.struct({
   boundsRadius: d.f32, // conservative world-space bounding sphere of scene
   _pad0: d.u32,
   selectAll: d.u32, // 1 = scene root selected: every surface glows
-  _pad1: d.f32,
+  time: d.f32, // animation clock (seconds): formulas `t`, noise flow
   boundsCenter: d.vec3f,
   _pad2: d.f32,
 });
@@ -118,7 +119,7 @@ export function createShader(root: TgpuRoot) {
     boundsRadius: 0,
     _pad0: 0,
     selectAll: 0,
-    _pad1: 0,
+    time: 0,
     boundsCenter: d.vec3f(0, 0, 0),
     _pad2: 0,
   });
@@ -956,6 +957,7 @@ export function createShader(root: TgpuRoot) {
   function createScenePipeline(code: string, renderMode: number) {
     const decl = tgpu["~unstable"].declare(code).$uses({
       [DATA_IDENT]: sceneData,
+      [SCENE_IDENT]: sceneUniforms,
       [IMAGE_TEX_IDENT]: imageSdfView,
       [IMAGE_SAMPLER_IDENT]: imageSdfSampler,
     });
