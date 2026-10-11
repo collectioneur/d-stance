@@ -693,3 +693,149 @@ export function primitiveCall(
       return `${fn}(${lp}, ${p0}, ${p1})`;
   }
 }
+
+// ── Modifier helpers (src/store/modifiers.ts) ────────────────────────────────
+// One source per language for the viewport compiler (WGSL, prefixed ds_) and
+// the export. Axis arguments: 0 = x, 1 = y, 2 = z.
+
+export const MODIFIER_WGSL = `// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it.
+fn opRepeat(q: vec3f, s: vec3f, c: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let lim = clamp(round(q / s - shift) + shift, -h, h);
+  return q - s * select(lim, round(q / s), c < vec3f(0.5));
+}
+
+// The cell nearest to q, or (step = 1 on an axis) its neighbor toward q.
+fn opRepeatCell(q: vec3f, s: vec3f, c: vec3f, step: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  let inf = c < vec3f(0.5);
+  let base = select(round(q / s - shift) + shift, round(q / s), inf);
+  let id = base + sign(q / s - base) * step;
+  return q - s * select(clamp(id, -h, h), id, inf);
+}
+
+// Bits of n spread over the axes set in mask (neighbor cell n of 2^axes).
+fn cellStep(n: u32, mask: vec3f) -> vec3f {
+  var bit = 0u;
+  var out = vec3f(0.0);
+  if (mask.x > 0.5) { out.x = f32(n & 1u); bit = 1u; }
+  if (mask.y > 0.5) { out.y = f32((n >> bit) & 1u); bit += 1u; }
+  if (mask.z > 0.5) { out.z = f32((n >> bit) & 1u); }
+  return out;
+}
+
+fn rot2(v: vec2f, a: f32) -> vec2f {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Polar repetition around an axis; sector = 2π / count.
+fn opPolar(q: vec3f, sector: f32, axis: u32) -> vec3f {
+  var uv = q.yz;
+  if (axis == 1u) { uv = q.xz; } else if (axis == 2u) { uv = q.xy; }
+  let r = rot2(uv, -sector * round(atan2(uv.y, uv.x) / sector));
+  if (axis == 0u) { return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { return vec3f(r.x, q.y, r.y); }
+  return vec3f(r.x, r.y, q.z);
+}
+
+fn opTwist(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.x); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.xz, k * q.y); return vec3f(r.x, q.y, r.y); }
+  let r = rot2(q.xy, k * q.z);
+  return vec3f(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+fn opBend(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.y); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.zx, k * q.z); return vec3f(r.y, q.y, r.x); }
+  let r = rot2(q.xy, k * q.x);
+  return vec3f(r.x, r.y, q.z);
+}`;
+
+export const MODIFIER_GLSL = `// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it.
+vec3 opRepeat(vec3 q, vec3 s, vec3 c) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  vec3 shift = h - floor(h);
+  vec3 lim = clamp(round(q / s - shift) + shift, -h, h);
+  return q - s * mix(lim, round(q / s), lessThan(c, vec3(0.5)));
+}
+
+// The cell nearest to q, or (step = 1 on an axis) its neighbor toward q.
+vec3 opRepeatCell(vec3 q, vec3 s, vec3 c, vec3 step) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  vec3 shift = h - floor(h);
+  bvec3 inf = lessThan(c, vec3(0.5));
+  vec3 base = mix(round(q / s - shift) + shift, round(q / s), inf);
+  vec3 id = base + sign(q / s - base) * step;
+  return q - s * mix(clamp(id, -h, h), id, inf);
+}
+
+// Bits of n spread over the axes set in mask (neighbor cell n of 2^axes).
+vec3 cellStep(int n, vec3 mask) {
+  int bit = 0;
+  vec3 o = vec3(0.0);
+  if (mask.x > 0.5) { o.x = float(n & 1); bit = 1; }
+  if (mask.y > 0.5) { o.y = float((n >> bit) & 1); bit += 1; }
+  if (mask.z > 0.5) { o.z = float((n >> bit) & 1); }
+  return o;
+}
+
+vec2 rot2(vec2 v, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Polar repetition around an axis; sector = 2π / count.
+vec3 opPolar(vec3 q, float sector, int axis) {
+  vec2 uv = axis == 0 ? q.yz : axis == 1 ? q.xz : q.xy;
+  vec2 r = rot2(uv, -sector * round(atan(uv.y, uv.x) / sector));
+  if (axis == 0) return vec3(q.x, r.x, r.y);
+  if (axis == 1) return vec3(r.x, q.y, r.y);
+  return vec3(r.x, r.y, q.z);
+}
+
+vec3 opTwist(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.x); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.xz, k * q.y); return vec3(r.x, q.y, r.y); }
+  vec2 r = rot2(q.xy, k * q.z);
+  return vec3(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+vec3 opBend(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.y); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.zx, k * q.z); return vec3(r.y, q.y, r.x); }
+  vec2 r = rot2(q.xy, k * q.x);
+  return vec3(r.x, r.y, q.z);
+}`;
+
+/** TypeGPU export: the WGSL helpers as typed raw-WGSL functions. */
+export const MODIFIER_TG = (() => {
+  const fns: [string, string, string][] = [
+    ["opRepeat", "[d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, c)"],
+    ["opRepeatCell", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, c, step)"],
+    ["cellStep", "[d.u32, d.vec3f], d.vec3f", "(n, mask)"],
+    ["rot2", "[d.vec2f, d.f32], d.vec2f", "(v, a)"],
+    ["opPolar", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, sector, axis)"],
+    ["opTwist", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)"],
+    ["opBend", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)"],
+  ];
+  const body = (name: string) => {
+    const m = MODIFIER_WGSL.match(new RegExp(`fn ${name}\\([^)]*\\) -> \\w+ (\\{[\\s\\S]*?\\n\\})`));
+    return m ? m[1] : "{}";
+  };
+  return fns
+    .map(([name, sig, params]) => {
+      const uses = name === "opPolar" || name === "opTwist" || name === "opBend" ? ".$uses({ rot2 })" : "";
+      return `const ${name} = tgpu.fn(${sig})\`${params} ${body(name)}\`${uses};`;
+    })
+    .join("\n\n");
+})();

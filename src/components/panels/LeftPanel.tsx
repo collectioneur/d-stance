@@ -19,6 +19,7 @@ import {
   ChevronDown,
   ChevronRight,
   Plus,
+  Wand2,
   X,
 } from "lucide-react";
 import { GROUP_ICON, SHAPE_ICONS } from "../../utils/commands";
@@ -125,6 +126,11 @@ function SceneNode({
         <NodeRenameInput node={node} />
       ) : (
         <span className="scene-item-name">{data.name}</span>
+      )}
+      {data.mods && !isEditing && (
+        <span className="scene-item-mods" title={`${data.mods} modifier${data.mods > 1 ? "s" : ""}`}>
+          <Wand2 size={11} />
+        </span>
       )}
       {data.color && !isEditing && (
         <span className="scene-item-color" style={{ background: data.color }} aria-hidden />

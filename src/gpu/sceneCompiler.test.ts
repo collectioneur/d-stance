@@ -169,3 +169,68 @@ describe("scene compiler materials", () => {
     expect(info).toContain("return DsInfo(info.x, info.y, mat.c.xyz, mat.c.w, mat.e.x, mat.e.y);");
   });
 });
+
+describe("scene compiler modifiers", () => {
+  const rep = (count: [number, number, number], spacing = 1) => ({
+    kind: "repeat" as const,
+    spacing: [spacing, spacing, spacing] as [number, number, number],
+    count,
+  });
+
+  test("a group with point modifiers evaluates its children in its own frame", () => {
+    const code = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([3, 1, 1])] })])).code;
+    const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    expect(sdf).toMatch(/let q\d+ = ds_xf\(p, \d+u\);/);
+    expect(sdf).toMatch(/let q\d+ = ds_opRepeat\(q\d+, /);
+    expect(sdf).toMatch(/ds_sdSphere\(ds_xf\(q\d+, \d+u\)/);
+  });
+
+  test("copies that overlap their cell loop over neighbor cells", () => {
+    const tight = compile(scene([group([shape("sphere", { params: [0.48, 0, 0, 0] })], { modifiers: [rep([3, 1, 3])] })])).code;
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"));
+    expect(body(tight)).toContain("< 4u; n");
+    expect(body(tight)).toContain("ds_opRepeatCell(");
+    const loose = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([3, 1, 3])] })])).code;
+    expect(body(loose)).not.toContain("ds_opRepeatCell(");
+  });
+
+  test("twist and bend scale the result by 1 / Lipschitz", () => {
+    const out = compile(scene([shape("box", { modifiers: [{ kind: "twist", amount: 3, axis: 1 }] })]));
+    const factor = out.values[16];
+    expect(factor).toBeGreaterThan(0);
+    expect(factor).toBeLessThan(1);
+  });
+
+  test("infinite repetition is unbounded and the march radius is capped", () => {
+    const out = compile(scene([group([shape("sphere")], { modifiers: [rep([0, 1, 0])] })]));
+    expect(out.boundsRadius).toBeLessThanOrEqual(100);
+    expect(out.boundsRadius).toBeGreaterThan(50);
+  });
+
+  test("bounds grow with limited repetition", () => {
+    const plain = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })])])).boundsRadius;
+    const repeated = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([5, 1, 1])] })])).boundsRadius;
+    expect(repeated).toBeGreaterThan(plain + 1.9);
+  });
+
+  test("a scaled group with modifiers keeps its children inside its bounds", () => {
+    const out = compile(
+      scene([group([shape("sphere", { position: [0.5, 0, 0], params: [0.3, 0, 0, 0] })], { scale: [3, 3, 3], modifiers: [{ kind: "mirror", axes: [true, false, false] }] })]),
+    );
+    // group bound slot: radius must cover the mirrored sphere: (0.5 + 0.3) * 3
+    expect(out.values[7]).toBeGreaterThanOrEqual(2.4);
+  });
+
+  test("distance modifiers rewrite the result; switched-off ones vanish", () => {
+    const code = compile(scene([shape("sphere", { modifiers: [{ kind: "onion", thickness: 0.05 }] })])).code;
+    expect(code).toMatch(/\(abs\(ds_sdSphere\(q\d+, dsData\[\d+\]\.x\)\) - dsData\[\d+\]\.x\)/);
+    const off = compile(scene([shape("sphere", { modifiers: [{ kind: "onion", thickness: 0.05, off: true }] })])).code;
+    expect(off).toBe(compile(scene([shape("sphere")])).code);
+  });
+
+  test("modifier amounts are values, not code", () => {
+    const a = compile(scene([group([shape("sphere", { params: [0.1, 0, 0, 0] })], { modifiers: [rep([3, 1, 1], 1)] })])).code;
+    const b = compile(scene([group([shape("sphere", { params: [0.1, 0, 0, 0] })], { modifiers: [rep([5, 1, 1], 2)] })])).code;
+    expect(a).toBe(b);
+  });
+});

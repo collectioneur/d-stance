@@ -1409,6 +1409,171 @@ canvas {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
+/* Modifier stack */
+.modifier-add {
+  max-width: 84px;
+  padding: 2px 18px 2px 6px;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='rgba(255,255,255,0.35)'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  appearance: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.modifier-add:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+}
+
+.modifier-add:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.modifier-add option {
+  background: var(--bg-option);
+  color: var(--text-2);
+}
+
+.modifier-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.modifier-card--off > :not(.modifier-card-head) {
+  opacity: 0.4;
+}
+
+.modifier-card-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 22px;
+}
+
+.modifier-card-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.modifier-card--off .modifier-card-name {
+  color: var(--text-3);
+}
+
+.modifier-card-kind {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-4);
+}
+
+.modifier-card-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-4);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.modifier-card-btn:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--bg-hover);
+}
+
+.modifier-card-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.modifier-card .prop-row {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
+
+.vec3-field {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.prop-input--compact {
+  padding: 5px 4px;
+  text-align: center;
+}
+
+.prop-input--compact::-webkit-inner-spin-button,
+.prop-input--compact::-webkit-outer-spin-button {
+  display: none;
+}
+
+.axis-picker {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.axis-picker-btn {
+  padding: 4px 0;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.axis-picker-btn:hover {
+  color: var(--text-1);
+  border-color: var(--border-1);
+}
+
+.axis-picker-btn--active {
+  background: var(--accent-mid);
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+}
+
+/* Tree: modifier badge */
+.scene-item-mods {
+  flex-shrink: 0;
+  margin-left: 4px;
+  color: var(--text-4);
+  display: flex;
+}
+
 /* Embed export: settings + live preview above the code */
 .embed-panel {
   display: flex;

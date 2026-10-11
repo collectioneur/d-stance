@@ -86,7 +86,7 @@ fn map(p: vec3f) -> f32 {
   return ${fns.sdfName}(p);
 }
 
-fn rot2(v: vec2f, a: f32) -> vec2f {
+fn orbitRot(v: vec2f, a: f32) -> vec2f {
   let c = cos(a);
   let s = sin(a);
   return vec2f(c * v.x + s * v.y, -s * v.x + c * v.y);
@@ -299,12 +299,12 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let uv = vec2f(uvn.x * view.res.x / view.res.y, uvn.y);
   var ro = vec3f(0.0, 0.0, -view.dist);
   var rd = normalize(vec3f(uv, 1.0));
-  let roXZ = rot2(ro.xz, view.rot.x);
-  let rdXZ = rot2(rd.xz, view.rot.x);
+  let roXZ = orbitRot(ro.xz, view.rot.x);
+  let rdXZ = orbitRot(rd.xz, view.rot.x);
   ro = vec3f(roXZ.x, ro.y, roXZ.y);
   rd = vec3f(rdXZ.x, rd.y, rdXZ.y);
-  let roYZ = rot2(ro.yz, view.rot.y);
-  let rdYZ = rot2(rd.yz, view.rot.y);
+  let roYZ = orbitRot(ro.yz, view.rot.y);
+  let rdYZ = orbitRot(rd.yz, view.rot.y);
   ro = vec3f(ro.x, roYZ.x, roYZ.y) + view.center;
   rd = vec3f(rd.x, rdYZ.x, rdYZ.y);
 
@@ -339,7 +339,7 @@ float map(vec3 p) {
   return ${fns.sdfName}(p);
 }
 
-vec2 rot2(vec2 v, float a) {
+vec2 orbitRot(vec2 v, float a) {
   float c = cos(a);
   float s = sin(a);
   return vec2(c * v.x + s * v.y, -s * v.x + c * v.y);
@@ -541,12 +541,12 @@ vec4 render(vec2 frag) {
   vec2 uv = vec2(uvn.x * uRes.x / uRes.y, uvn.y);
   vec3 ro = vec3(0.0, 0.0, -uDist);
   vec3 rd = normalize(vec3(uv, 1.0));
-  vec2 roXZ = rot2(ro.xz, uRot.x);
-  vec2 rdXZ = rot2(rd.xz, uRot.x);
+  vec2 roXZ = orbitRot(ro.xz, uRot.x);
+  vec2 rdXZ = orbitRot(rd.xz, uRot.x);
   ro = vec3(roXZ.x, ro.y, roXZ.y);
   rd = vec3(rdXZ.x, rd.y, rdXZ.y);
-  vec2 roYZ = rot2(ro.yz, uRot.y);
-  vec2 rdYZ = rot2(rd.yz, uRot.y);
+  vec2 roYZ = orbitRot(ro.yz, uRot.y);
+  vec2 rdYZ = orbitRot(rd.yz, uRot.y);
   ro = vec3(ro.x, roYZ.x, roYZ.y) + uTarget;
   rd = vec3(rd.x, rdYZ.x, rdYZ.y);
 

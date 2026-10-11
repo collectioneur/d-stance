@@ -94,3 +94,34 @@ describe("generateMaterialCode", () => {
     expect(out.glsl).toContain("SdfMaterial m0 = SdfMaterial(vec3(0.0, 0.0, 1.0)");
   });
 });
+
+describe("generateSdfCode modifiers", () => {
+  test("modifiers are emitted with helpers, in every language", () => {
+    const root = scene([
+      group([shape("sphere", { params: [0.48, 0, 0, 0] })], {
+        modifiers: [{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1] }, { kind: "twist", amount: 2, axis: 1 }],
+      }),
+      shape("box", { op: "sUnion", modifiers: [{ kind: "round", radius: 0.05 }, { kind: "mirror", axes: [true, false, false] }] }),
+    ]);
+    const out = generateSdfCode(root, null);
+    for (const code of [out.wgsl, out.glsl, out.typegpu]) {
+      expect(code).toContain("opRepeatCell(");
+      expect(code).toContain("opTwist(");
+      expect(code).toMatch(/- 0\.05\)/);
+    }
+    expect(out.wgsl).toContain("fn opRepeat(");
+    expect(out.glsl).toContain("vec3 opRepeat(");
+    expect(out.typegpu).toContain("const opRepeat = tgpu.fn(");
+    expect(out.wgsl).toMatch(/d0 = d0 \* 0\.\d+;/);
+  });
+
+  test("modifier output is stable", () => {
+    const root = scene([
+      group([shape("capsule")], { modifiers: [{ kind: "polar", count: 6, axis: 1 }, { kind: "elongate", size: [0.1, 0, 0] }] }),
+      shape("torus", { op: "subtract", modifiers: [{ kind: "onion", thickness: 0.02 }, { kind: "bend", amount: 1, axis: 2 }] }),
+    ]);
+    const out = generateSdfCode(root, null);
+    expect(out.wgsl).toMatchSnapshot("wgsl");
+    expect(out.glsl).toMatchSnapshot("glsl");
+  });
+});
