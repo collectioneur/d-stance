@@ -9,7 +9,8 @@ import {
 } from "../store/sceneStore";
 import { IMAGE_SDF_RES, IMAGE_SDF_STEP_PX } from "./imageSdf";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
-import { ANIM_HELPERS, activeTracks, animationExpr, type Track } from "../store/animation";
+import { ANIM_HELPERS, activeTracks, animationExpr, type Track, type TrackTarget } from "../store/animation";
+import { activeReactions, isItemTrigger, type InteractiveSlots, type Trigger } from "../store/interaction";
 import {
   GLSL_HELPERS,
   MODIFIER_GLSL,
@@ -56,12 +57,15 @@ const DEG_TO_RAD = Math.PI / 180;
  */
 type Ex =
   | number
-  | { k: "anim"; base: number; tracks: Track[]; mul: boolean; min?: number }
+  | { k: "anim"; base: number; tracks: Track[]; mul: boolean; min?: number; reacts: React[] }
   | { k: "mul"; a: Ex; b: Ex }
   | { k: "min3"; a: Ex; b: Ex; c: Ex }
   | { k: "scale"; a: Ex; s: number };
 
 type V3 = readonly [Ex, Ex, Ex];
+
+/** A reaction term: amount · state, `slot` indexes the per-item states (hover / click). */
+type React = { trigger: Trigger; slot: number; amount: number };
 
 const isNum = (e: Ex): e is number => typeof e === "number";
 const isZero = (v: V3) => v.every((c) => isNum(c) && Math.abs(c) < 1e-9);
@@ -69,8 +73,13 @@ const isOne = (v: V3) => v.every((c) => isNum(c) && Math.abs(c - 1) < 1e-9);
 const isUniform = (v: V3) => v.every(isNum) && v[0] === v[1] && v[1] === v[2];
 const exMul = (a: Ex, b: Ex): Ex =>
   isNum(a) && isNum(b) ? a * b : isNum(a) && a === 1 ? b : isNum(b) && b === 1 ? a : { k: "mul", a, b };
+const sameEx = (a: Ex, b: Ex) => a === b || JSON.stringify(a) === JSON.stringify(b);
 const minV = (v: V3): Ex =>
-  v.every(isNum) ? Math.min(...(v as unknown as number[])) : { k: "min3", a: v[0], b: v[1], c: v[2] };
+  v.every(isNum)
+    ? Math.min(...(v as unknown as number[]))
+    : sameEx(v[0], v[1]) && sameEx(v[1], v[2])
+      ? v[0]
+      : { k: "min3", a: v[0], b: v[1], c: v[2] };
 const mulV = (a: V3, b: V3): V3 => [exMul(a[0], b[0]), exMul(a[1], b[1]), exMul(a[2], b[2])];
 const toRad = (deg: V3): V3 => deg.map((c) => (isNum(c) ? c * DEG_TO_RAD : { k: "scale", a: c, s: DEG_TO_RAD })) as unknown as V3;
 const isOneEx = (e: Ex) => isNum(e) && Math.abs(e - 1) < 1e-9;
@@ -111,8 +120,9 @@ function fmtEx(e: Ex, syn: Syntax): string {
   if (isNum(e)) return fmt(e);
   switch (e.k) {
     case "anim": {
-      const x = animationExpr(e.base, e.tracks, "time", syn.lang, e.mul);
-      return e.min !== undefined ? `${syn.maxFn}(${x}, ${fmt(e.min)})` : x;
+      const extra = e.reacts.map((r) => `${fmt(r.amount)} * ${stateRef(syn.lang, r)}`);
+      const x = animationExpr(e.base, e.tracks, "time", syn.lang, e.mul, extra);
+      return hoisted(e.min !== undefined ? `${syn.maxFn}(${x}, ${fmt(e.min)})` : x, syn);
     }
     case "mul":
       return `(${fmtEx(e.a, syn)} * ${fmtEx(e.b, syn)})`;
@@ -123,46 +133,113 @@ function fmtEx(e: Ex, syn: Syntax): string {
   }
 }
 
+/**
+ * Moving values depend only on the clock and the viewer's state, never on
+ * the point: render() lifts each distinct one into a `let aN` at the top of
+ * the function instead of repeating it at every use.
+ */
+let hoist: { names: Map<string, string>; lines: string[] } | null = null;
+
+function hoisted(expr: string, syn: Syntax): string {
+  if (!hoist) return expr;
+  let name = hoist.names.get(expr);
+  if (!name) {
+    name = `a${hoist.names.size}`;
+    hoist.names.set(expr, name);
+    hoist.lines.push(syn.scalarStmt(name, expr));
+  }
+  return name;
+}
+
+/** Runs `emit` with hoisting on; returns the hoisted lines followed by the body. */
+function withHoisting(emit: (body: string[]) => void): string[] {
+  const outer = hoist;
+  hoist = { names: new Map(), lines: [] };
+  try {
+    const body: string[] = [];
+    emit(body);
+    return [...hoist.lines, ...body];
+  } finally {
+    hoist = outer;
+  }
+}
+
+/**
+ * Where an embed keeps the viewer's state (renderTemplates.ts declares them):
+ * per-item vec4 (hover, click, -, -) and the pointer in −1..1.
+ */
+function stateRef(lang: FormulaLang, r: React): string {
+  if (lang === "typegpu") throw new Error("interactive export is WGSL / GLSL only");
+  const ix = lang === "wgsl" ? "ix" : "uIx";
+  const pointer = lang === "wgsl" ? "view.pointer" : "uPointer";
+  switch (r.trigger) {
+    case "hover":
+      return `${ix}[${r.slot}].x`;
+    case "click":
+      return `${ix}[${r.slot}].y`;
+    case "pointerX":
+      return `${pointer}.x`;
+    case "pointerY":
+      return `${pointer}.y`;
+  }
+}
+
 function fmtRecipEx(e: Ex, syn: Syntax): string {
   return isNum(e) ? fmtRecip(e) : `(1.0 / ${fmtEx(e, syn)})`;
 }
 
-/** An item's numbers with its animation tracks folded in. */
+/** An item's numbers with its animation tracks (and reactions) folded in. */
 interface ItemValues {
   position: V3;
   rotationDeg: V3;
   scale: V3;
   params: readonly [Ex, Ex, Ex, Ex];
   smoothK: Ex;
-  emissionTracks: Track[];
+  /** The item's emission driven by its glow tracks / reactions. */
+  emission(base: number): Ex;
 }
 
-function animated(base: number, tracks: Track[], mul = false, min?: number): Ex {
-  return tracks.length === 0 ? base : { k: "anim", base, tracks, mul, ...(min !== undefined ? { min } : {}) };
+/** Everything driving one target: tracks and reactions. */
+type Drivers = { tracks: Track[]; reacts: React[] };
+
+function animated(base: number, on: Drivers, mul = false, min?: number): Ex {
+  if (on.tracks.length === 0 && on.reacts.length === 0) return base;
+  return { k: "anim", base, tracks: on.tracks, mul, reacts: on.reacts, ...(min !== undefined ? { min } : {}) };
 }
 
-function itemValues(item: SceneItem): ItemValues {
+/** `ix`: reactions become state terms (embed); without it items sit at rest. */
+function itemValues(item: SceneItem, ix?: InteractiveSlots): ItemValues {
   const tracks = activeTracks(item.animation);
-  const on = (target: string) => tracks.filter((t) => t.target === target);
-  const axis = (prefix: string, v: readonly number[]) =>
-    v.map((b, a) => animated(b, on(`${prefix}.${"xyz"[a]}`))) as unknown as V3;
-  const scaleTracks = on("scale");
+  const slot = ix?.slot.get(item.id);
+  const reacts: (React & { target: TrackTarget })[] = [];
+  if (ix) {
+    for (const r of activeReactions(item.interaction)) {
+      if (isItemTrigger(r.trigger) && slot === undefined) continue; // past MAX_INTERACTIVE
+      reacts.push({ trigger: r.trigger, slot: slot ?? -1, amount: r.amount, target: r.target });
+    }
+  }
+  const on = (target: TrackTarget): Drivers => ({
+    tracks: tracks.filter((t) => t.target === target),
+    reacts: reacts.filter((r) => r.target === target),
+  });
+  const axis = (prefix: "position" | "rotation", v: readonly number[]) =>
+    v.map((b, a) => animated(b, on(`${prefix}.${"xyz"[a]}` as TrackTarget))) as unknown as V3;
   const params = item.kind === "layer" ? item.params : [0, 0, 0, 0];
   return {
     position: axis("position", item.position),
     rotationDeg: axis("rotation", item.rotation),
-    scale: item.scale.map((b) => animated(b, scaleTracks, true, 0.01)) as unknown as V3,
-    params: params.map((b, i) => animated(b, on(`param${i}`))) as unknown as ItemValues["params"],
+    scale: item.scale.map((b) => animated(b, on("scale"), true, 0.01)) as unknown as V3,
+    params: params.map((b, i) => animated(b, on(`param${i}` as TrackTarget))) as unknown as ItemValues["params"],
     smoothK: animated(item.smoothK, on("smoothK"), false, 0.001),
-    emissionTracks: on("emission"),
+    emission: (base) => animated(base, on("emission"), false, 0),
   };
 }
 
-/** Material in the IR: emission may be animated. */
-type MatEx = Omit<Material, "emission"> & { emission: Ex };
+/** Material in the IR: emission may be animated; `id` is the interactive owner (embed pick). */
+type MatEx = Omit<Material, "emission"> & { emission: Ex; id?: number };
 
-function matEx(m: Material, emissionTracks: Track[]): MatEx {
-  return { ...m, emission: animated(m.emission, emissionTracks, false, 0) };
+function matEx(m: Material, V?: ItemValues): MatEx {
+  return { ...m, emission: V ? V.emission(m.emission) : m.emission };
 }
 
 // ── IR ────────────────────────────────────────────────────────────────────────
@@ -224,6 +301,8 @@ interface Ir {
   usesNoise: boolean;
   /** Something reads the clock: exported functions take `time`. */
   animated: boolean;
+  /** Reactions read the embed's state uniforms; materials carry an owner id. */
+  interactive: boolean;
   usesAnimNoise: boolean;
   /** Formula functions: [name, parsed source]. */
   formulas: [string, ReturnType<typeof parseFormula> & { ok: true }][];
@@ -250,7 +329,7 @@ function findItemIn(items: SceneItem[], itemId: string): SceneItem | null {
  * rotation under non-uniform ancestor scale, min-scale distance factors.
  * Selected node's own position is dropped so the model sits at the origin.
  */
-function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
+function buildIr(root: SceneRoot, selectedItemId: string | null, ix?: InteractiveSlots): Ir {
   const stmts: Stmt[] = [];
   let sink = stmts;
   const usedShapes = new Set<ShapeType>();
@@ -267,7 +346,14 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     const tracks = activeTracks(item.animation);
     if (tracks.length > 0) animatedScene = true;
     if (tracks.some((t) => t.wave === "noise")) usesAnimNoise = true;
-    return itemValues(item);
+    return itemValues(item, ix);
+  };
+  /** The material a shape / group draws with, tagged with its interactive owner. */
+  const owned = (item: SceneItem, V: ItemValues, inherited: MatEx): MatEx => {
+    const base = item.material ? matEx(item.material, V) : inherited;
+    if (!ix) return base;
+    const slot = ix.slot.get(item.id);
+    return { ...base, id: slot !== undefined ? slot + 1 : (inherited.id ?? 0) };
   };
   const formulaList: Ir["formulas"] = [];
   let accN = 0;
@@ -324,7 +410,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       params: V.params,
       imageIndex,
       imageRound: Math.max(0, layer.image?.round ?? 0),
-      material: layer.material ? matEx(layer.material, V.emissionTracks) : inherited,
+      material: owned(layer, V, inherited),
       post: [],
       formulaFn,
     };
@@ -411,9 +497,9 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   /** A group's value (its own transform, modifiers, children) as a variable. */
   function groupValue(group: ObjectGroup, point: string, accScl: V3, inherited: MatEx, dropPos: boolean): string | null {
     const childPoint = groupPoint(group, point, dropPos);
-    const V = itemValues(group);
+    const V = itemValues(group, ix);
     const childAcc = mulV(accScl, V.scale);
-    const material = group.material ? matEx(group.material, V.emissionTracks) : inherited;
+    const material = owned(group, V, inherited);
     const mods = activeModifiers(group.modifiers);
     if (mods.length === 0) return walkItems(group.items, childPoint, childAcc, material);
     usesModifiers = true;
@@ -448,7 +534,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
         emit({ t: "def", name: acc, rhs });
       } else {
         if (SMOOTH_OPS.has(item.op)) usesSmin = true;
-        emit({ t: "combine", name: acc, op: item.op, k: itemValues(item).smoothK, rhs });
+        emit({ t: "combine", name: acc, op: item.op, k: itemValues(item, ix).smoothK, rhs });
       }
     }
     return acc;
@@ -472,7 +558,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   };
   let result: string | null;
   if (selected?.kind === "layer") {
-    const inherited = matEx(inheritedAt(selected.id), []);
+    const inherited = matEx(inheritedAt(selected.id));
     if (activeModifiers(selected.modifiers).length > 0) {
       result = moddedShape(selected, "p", [1, 1, 1], true, inherited);
     } else {
@@ -481,9 +567,9 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       result = acc;
     }
   } else if (selected?.kind === "group") {
-    result = groupValue(selected, "p", [1, 1, 1], matEx(inheritedAt(selected.id), []), true);
+    result = groupValue(selected, "p", [1, 1, 1], matEx(inheritedAt(selected.id)), true);
   } else {
-    result = walkItems(root.items, "p", [1, 1, 1], matEx(DEFAULT_MATERIAL, []));
+    result = walkItems(root.items, "p", [1, 1, 1], ix ? { ...DEFAULT_MATERIAL, id: 0 } : DEFAULT_MATERIAL);
   }
 
   return {
@@ -495,6 +581,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     usesModifiers,
     usesNoise,
     animated: animatedScene,
+    interactive: !!ix,
     usesAnimNoise,
     formulas: formulaList,
     images,
@@ -602,6 +689,8 @@ interface Syntax {
   maxFn: string;
   divVec(e: string, v: V3): string;
   pointStmt(name: string, expr: string): string;
+  /** A hoisted scalar (see `hoisted`). */
+  scalarStmt(name: string, expr: string): string;
   defStmt(name: string, expr: string): string;
   assignStmt(name: string, expr: string): string;
   /** `animated`: the function takes the clock as a second parameter, `time`. */
@@ -791,15 +880,16 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   if (!ir.result) return PLACEHOLDER;
 
   const time = clockArg(ir);
-  const body: string[] = [];
-  // Single shape → return the expression directly, no accumulator.
-  const only = ir.stmts.length === 1 ? ir.stmts[0] : null;
-  if (only?.t === "def" && only.rhs.kind === "shape") {
-    body.push(`  return ${shapeCall(syn, only.rhs, time)};`);
-  } else {
-    emitStmts(ir.stmts, syn, null, 0, body, time);
-    body.push(`  return ${ir.result};`);
-  }
+  const body = withHoisting((body) => {
+    // Single shape → return the expression directly, no accumulator.
+    const only = ir.stmts.length === 1 ? ir.stmts[0] : null;
+    if (only?.t === "def" && only.rhs.kind === "shape") {
+      body.push(`  return ${shapeCall(syn, only.rhs, time)};`);
+    } else {
+      emitStmts(ir.stmts, syn, null, 0, body, time);
+      body.push(`  return ${ir.result};`);
+    }
+  });
 
   const helpers: string[] = [];
   // Noise first: GLSL needs functions declared before use.
@@ -834,64 +924,70 @@ interface MaterialSyntax {
   fnOpen(fn: string, animated: boolean): string;
 }
 
-const WGSL_MAT: MaterialSyntax = {
-  decl: `struct SdfMaterial {
+/** `withId`: the material also carries its interactive owner (embed pick; 0 = none). */
+function wgslMat(withId: boolean): MaterialSyntax {
+  return {
+    decl: `struct SdfMaterial {
   color: vec3f,   // sRGB
   roughness: f32,
   metalness: f32,
-  emission: f32,
+  emission: f32,${withId ? "\n  id: f32,       // interactive item under this point (0 = none)" : ""}
 }
 
 fn mixMaterial(a: SdfMaterial, b: SdfMaterial, t: f32) -> SdfMaterial {
-  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t));
+  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t)${withId ? ", select(a.id, b.id, t > 0.5)" : ""});
 }
 
 // Weight of b in smin(a, b, k): 0 = all a, 1 = all b.
 fn sminWeight(a: f32, b: f32, k: f32) -> f32 {
   return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
 }`,
-  lit: (m, syn) =>
-    `SdfMaterial(vec3f(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)})`,
-  defMat: (n, e) => `  var ${n} = ${e};`,
-  tempF: (n, e) => `let ${n} = ${e};`,
-  tempM: (n, e) => `let ${n} = ${e};`,
-  fnOpen: (fn, animated) => `fn ${fn}(p: vec3f${animated ? ", time: f32" : ""}) -> SdfMaterial {`,
-};
+    lit: (m, syn) =>
+      `SdfMaterial(vec3f(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)}${withId ? `, ${fmt(m.id ?? 0)}` : ""})`,
+    defMat: (n, e) => `  var ${n} = ${e};`,
+    tempF: (n, e) => `let ${n} = ${e};`,
+    tempM: (n, e) => `let ${n} = ${e};`,
+    fnOpen: (fn, animated) => `fn ${fn}(p: vec3f${animated ? ", time: f32" : ""}) -> SdfMaterial {`,
+  };
+}
 
-const GLSL_MAT: MaterialSyntax = {
-  decl: `struct SdfMaterial {
+function glslMat(withId: boolean): MaterialSyntax {
+  return {
+    decl: `struct SdfMaterial {
   vec3 color; // sRGB
   float roughness;
   float metalness;
-  float emission;
+  float emission;${withId ? "\n  float id; // interactive item under this point (0 = none)" : ""}
 };
 
 SdfMaterial mixMaterial(SdfMaterial a, SdfMaterial b, float t) {
-  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t));
+  return SdfMaterial(mix(a.color, b.color, t), mix(a.roughness, b.roughness, t), mix(a.metalness, b.metalness, t), mix(a.emission, b.emission, t)${withId ? ", t > 0.5 ? b.id : a.id" : ""});
 }
 
 // Weight of b in smin(a, b, k): 0 = all a, 1 = all b.
 float sminWeight(float a, float b, float k) {
   return 1.0 - clamp(0.5 + 0.5 * (b - a) / max(k, 1e-6), 0.0, 1.0);
 }`,
-  lit: (m, syn) =>
-    `SdfMaterial(vec3(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)})`,
-  defMat: (n, e) => `  SdfMaterial ${n} = ${e};`,
-  tempF: (n, e) => `float ${n} = ${e};`,
-  tempM: (n, e) => `SdfMaterial ${n} = ${e};`,
-  fnOpen: (fn, animated) => `SdfMaterial ${fn}(vec3 p${animated ? ", float time" : ""}) {`,
-};
+    lit: (m, syn) =>
+      `SdfMaterial(vec3(${m.color.map(fmt).join(", ")}), ${fmt(m.roughness)}, ${fmt(m.metalness)}, ${fmtEx(m.emission, syn)}${withId ? `, ${fmt(m.id ?? 0)}` : ""})`,
+    defMat: (n, e) => `  SdfMaterial ${n} = ${e};`,
+    tempF: (n, e) => `float ${n} = ${e};`,
+    tempM: (n, e) => `SdfMaterial ${n} = ${e};`,
+    fnOpen: (fn, animated) => `SdfMaterial ${fn}(vec3 p${animated ? ", float time" : ""}) {`,
+  };
+}
 
 const matName = (acc: string) => `m${acc.slice(1)}`;
 
 function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSyntax): string {
-  const body: string[] = [];
-  if (!ir.result) {
-    body.push(`  return ${msyn.lit(DEFAULT_MATERIAL, syn)};`);
-  } else {
-    emitStmts(ir.stmts, syn, msyn, 0, body, clockArg(ir));
-    body.push(`  return ${matName(ir.result)};`);
-  }
+  const body = withHoisting((body) => {
+    if (!ir.result) {
+      body.push(`  return ${msyn.lit(DEFAULT_MATERIAL, syn)};`);
+    } else {
+      emitStmts(ir.stmts, syn, msyn, 0, body, clockArg(ir));
+      body.push(`  return ${matName(ir.result)};`);
+    }
+  });
   return [msyn.decl, `${msyn.fnOpen(fnName, ir.animated)}\n${body.join("\n")}\n}`].join("\n\n");
 }
 
@@ -903,6 +999,7 @@ const TG_SYNTAX: Syntax = {
   maxFn: "std.max",
   divVec: (e, v) => `${paren(e)} * d.vec3f(${v.map((c) => fmtRecipEx(c, TG_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  const ${n} = ${e};`,
+  scalarStmt: (n, e) => `  const ${n} = ${e};`,
   defStmt: (n, e) => `  let ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn, animated) => `const ${fn} = (p: d.v3f${animated ? ", time: number" : ""}): number => {\n  "use gpu";`,
@@ -923,6 +1020,7 @@ const WGSL_SYNTAX: Syntax = {
   maxFn: "max",
   divVec: (e, v) => `${paren(e)} / vec3f(${v.map((c) => fmtEx(c, WGSL_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  let ${n} = ${e};`,
+  scalarStmt: (n, e) => `  let ${n} = ${e};`,
   defStmt: (n, e) => `  var ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn, animated) => `fn ${fn}(p: vec3f${animated ? ", time: f32" : ""}) -> f32 {`,
@@ -943,6 +1041,7 @@ const GLSL_SYNTAX: Syntax = {
   maxFn: "max",
   divVec: (e, v) => `${paren(e)} / vec3(${v.map((c) => fmtEx(c, GLSL_SYNTAX)).join(", ")})`,
   pointStmt: (n, e) => `  vec3 ${n} = ${e};`,
+  scalarStmt: (n, e) => `  float ${n} = ${e};`,
   defStmt: (n, e) => `  float ${n} = ${e};`,
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn, animated) => `float ${fn}(vec3 p${animated ? ", float time" : ""}) {`,
@@ -991,14 +1090,22 @@ function sdfFnName(nodeName: string): string {
   return fn;
 }
 
-export function generateSdfCode(root: SceneRoot, selectedItemId: string | null): GeneratedSdf {
+export interface CodeOptions {
+  /**
+   * Embed export: reactions read the viewer's state (`ix` / `uIx`, pointer)
+   * instead of sitting at rest. WGSL / GLSL only (no TypeGPU output).
+   */
+  interactive?: InteractiveSlots;
+}
+
+export function generateSdfCode(root: SceneRoot, selectedItemId: string | null, opts: CodeOptions = {}): GeneratedSdf {
   const selected = selectedItemId ? findItemIn(root.items, selectedItemId) : null;
   const fnName = sdfFnName(selected ? selected.name : root.name);
-  const ir = buildIr(root, selectedItemId);
+  const ir = buildIr(root, selectedItemId, opts.interactive);
   return {
     fnName,
     animated: ir.animated,
-    typegpu: render(ir, fnName, TG_SYNTAX),
+    typegpu: ir.interactive ? "// TypeGPU export has no interaction states" : render(ir, fnName, TG_SYNTAX),
     wgsl: render(ir, fnName, WGSL_SYNTAX),
     glsl: render(ir, fnName, GLSL_SYNTAX),
   };
@@ -1015,12 +1122,12 @@ export interface GeneratedMaterial {
  * Material function for the whole scene, pairing with `generateSdfCode(root,
  * null)`'s SDF (same name + "Material"). Needs that SDF's helpers in scope.
  */
-export function generateMaterialCode(root: SceneRoot): GeneratedMaterial {
+export function generateMaterialCode(root: SceneRoot, opts: CodeOptions = {}): GeneratedMaterial {
   const fnName = `${sdfFnName(root.name)}Material`;
-  const ir = buildIr(root, null);
+  const ir = buildIr(root, null, opts.interactive);
   return {
     fnName,
-    wgsl: renderMaterial(ir, fnName, WGSL_SYNTAX, WGSL_MAT),
-    glsl: renderMaterial(ir, fnName, GLSL_SYNTAX, GLSL_MAT),
+    wgsl: renderMaterial(ir, fnName, WGSL_SYNTAX, wgslMat(ir.interactive)),
+    glsl: renderMaterial(ir, fnName, GLSL_SYNTAX, glslMat(ir.interactive)),
   };
 }

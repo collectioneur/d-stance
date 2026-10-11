@@ -1,5 +1,6 @@
 import { useGizmoStore, type GizmoMode } from "../../store/gizmoStore";
 import { useSceneStore } from "../../store/sceneStore";
+import { useTryStore } from "../../store/tryStore";
 import { GIZMO_ICONS } from "../../utils/commands";
 import type { IconComponent } from "../MaskIcon";
 
@@ -12,7 +13,8 @@ const MODES: { value: GizmoMode; label: string; icon: IconComponent; hotkey: str
 export default function GizmoPanel() {
   const mode = useGizmoStore((s) => s.mode);
   const setMode = useGizmoStore((s) => s.setMode);
-  const hasSelection = useSceneStore((s) => s.selectedItemId !== null);
+  const trying = useTryStore((s) => s.trying);
+  const hasSelection = useSceneStore((s) => s.selectedItemId !== null) && !trying;
 
   const activeIndex = MODES.findIndex((m) => m.value === mode);
 

@@ -43,6 +43,12 @@ export interface SceneFns {
   materialName: string;
   /** Both functions take the clock as a second argument (animated scene). */
   animated: boolean;
+  /**
+   * Set when generated with `interactive`: how many items have hover / click
+   * states (the material carries their id and the module gets a pick entry
+   * point when > 0). 0 = only pointer reactions.
+   */
+  interactiveCount?: number;
 }
 
 /** `fn(p)`, or `fn(p, clock)` for an animated scene. */
@@ -74,10 +80,14 @@ struct View {
   rot: vec2f,     // orbit yaw, pitch (radians)
   dist: f32,      // orbit distance
   time: f32,      // seconds
+  pointer: vec2f, // pointer over the canvas, −1..1 from the top-left
   center: vec3f,  // orbit center
+  pick: vec2f,    // pixel the pick pass looks through
 }
 @group(0) @binding(100) var<uniform> view: View;
-
+${fns.interactiveCount ? `// Per interactive item: (hover, click, 0, 0), each eased 0..1.
+@group(0) @binding(101) var<uniform> ix: array<vec4f, ${fns.interactiveCount}>;
+` : ""}
 const MAX_STEPS = ${c.maxSteps};
 const REFL_STEPS = ${c.reflSteps};
 const SHADOW_STEPS = ${c.shadowSteps};
@@ -97,6 +107,26 @@ fn orbitRot(v: vec2f, a: f32) -> vec2f {
   let c = cos(a);
   let s = sin(a);
   return vec2f(c * v.x + s * v.y, -s * v.x + c * v.y);
+}
+
+struct Ray {
+  ro: vec3f,
+  rd: vec3f,
+}
+
+// Orbit camera ray through a pixel (from the top-left).
+fn cameraRay(px: vec2f) -> Ray {
+  let uvn = px / view.res * 2.0 - 1.0;
+  let uv = vec2f(uvn.x * view.res.x / view.res.y, uvn.y);
+  var ro = vec3f(0.0, 0.0, -view.dist);
+  var rd = normalize(vec3f(uv, 1.0));
+  let roXZ = orbitRot(ro.xz, view.rot.x);
+  let rdXZ = orbitRot(rd.xz, view.rot.x);
+  ro = vec3f(roXZ.x, ro.y, roXZ.y);
+  rd = vec3f(rdXZ.x, rd.y, rdXZ.y);
+  let roYZ = orbitRot(ro.yz, view.rot.y);
+  let rdYZ = orbitRot(rd.yz, view.rot.y);
+  return Ray(vec3f(ro.x, roYZ.x, roYZ.y) + view.center, vec3f(rd.x, rdYZ.x, rdYZ.y));
 }
 
 // Ray vs the scene's bounding sphere: (tEnter, tExit), tExit < 0 = miss.
@@ -304,16 +334,9 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let uvn = frag.xy / view.res * 2.0 - 1.0;
   let uv = vec2f(uvn.x * view.res.x / view.res.y, uvn.y);
-  var ro = vec3f(0.0, 0.0, -view.dist);
-  var rd = normalize(vec3f(uv, 1.0));
-  let roXZ = orbitRot(ro.xz, view.rot.x);
-  let rdXZ = orbitRot(rd.xz, view.rot.x);
-  ro = vec3f(roXZ.x, ro.y, roXZ.y);
-  rd = vec3f(rdXZ.x, rd.y, rdXZ.y);
-  let roYZ = orbitRot(ro.yz, view.rot.y);
-  let rdYZ = orbitRot(rd.yz, view.rot.y);
-  ro = vec3f(ro.x, roYZ.x, roYZ.y) + view.center;
-  rd = vec3f(rd.x, rdYZ.x, rdYZ.y);
+  let ray = cameraRay(frag.xy);
+  let ro = ray.ro;
+  let rd = ray.rd;
 
   let hit = march(ro, rd);
   if (hit.x >= 0.0) { return vec4f(shade(ro, rd, hit.x, hit.y), 1.0); }
@@ -322,7 +345,17 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
   let bg = mix(vec3f(0.055), vec3f(0.118), clamp(uvn.y * 0.5 + 0.5, 0.0, 1.0)) * clamp(1.0 - 0.175 * dot(uv, uv), 0.0, 1.0);
   return vec4f(bg * mix(1.0, fl.x, fl.y * 0.9) + vec3f(0.035) * (fl.y * fl.x), 1.0);
 }
-`;
+${fns.interactiveCount ? `
+// Interactive item under view.pick as id / 255 (0 = none), for hover and click.
+@fragment
+fn fs_pick() -> @location(0) vec4f {
+  let ray = cameraRay(view.pick);
+  let hit = march(ray.ro, ray.rd);
+  if (hit.x < 0.0) { return vec4f(0.0); }
+  let p = ray.ro + ray.rd * hit.x;
+  return vec4f(${call(fns, fns.materialName, "view.time")}.id / 255.0, 0.0, 0.0, 1.0);
+}
+` : ""}`;
 }
 
 /**
@@ -542,12 +575,12 @@ vec2 floorLight(vec3 ro, vec3 rd) {
 #endif
 }
 
-// frag: pixel position from the top-left corner.
-vec4 render(vec2 frag) {
-  vec2 uvn = frag / uRes * 2.0 - 1.0;
+// Orbit camera ray through a pixel (from the top-left).
+void cameraRay(vec2 px, out vec3 ro, out vec3 rd) {
+  vec2 uvn = px / uRes * 2.0 - 1.0;
   vec2 uv = vec2(uvn.x * uRes.x / uRes.y, uvn.y);
-  vec3 ro = vec3(0.0, 0.0, -uDist);
-  vec3 rd = normalize(vec3(uv, 1.0));
+  ro = vec3(0.0, 0.0, -uDist);
+  rd = normalize(vec3(uv, 1.0));
   vec2 roXZ = orbitRot(ro.xz, uRot.x);
   vec2 rdXZ = orbitRot(rd.xz, uRot.x);
   ro = vec3(roXZ.x, ro.y, roXZ.y);
@@ -556,6 +589,15 @@ vec4 render(vec2 frag) {
   vec2 rdYZ = orbitRot(rd.yz, uRot.y);
   ro = vec3(ro.x, roYZ.x, roYZ.y) + uTarget;
   rd = vec3(rd.x, rdYZ.x, rdYZ.y);
+}
+
+// frag: pixel position from the top-left corner.
+vec4 render(vec2 frag) {
+  vec2 uvn = frag / uRes * 2.0 - 1.0;
+  vec2 uv = vec2(uvn.x * uRes.x / uRes.y, uvn.y);
+  vec3 ro;
+  vec3 rd;
+  cameraRay(frag, ro, rd);
 
   vec2 hit = march(ro, rd);
   if (hit.x >= 0.0) return vec4(shade(ro, rd, hit.x, hit.y), 1.0);
@@ -588,16 +630,29 @@ uniform vec2 uRot;    // orbit yaw, pitch (radians)
 uniform float uDist;  // orbit distance
 uniform float uTime;  // seconds
 uniform vec3 uTarget; // orbit center
-out vec4 outColor;
+${fns.interactiveCount !== undefined ? "uniform vec2 uPointer; // pointer over the canvas, −1..1 from the top-left\n" : ""}${fns.interactiveCount ? `uniform vec2 uPick;    // pixel the pick pass looks through
+uniform vec4 uIx[${fns.interactiveCount}];  // per interactive item: (hover, click, 0, 0), each eased 0..1
+` : ""}out vec4 outColor;
 
 ${glslScene(fns)}
 
 // ── Renderer ────────────────────────────────────────────────────────────────
 
 ${glslRenderer(fns, c)}
-
+${fns.interactiveCount ? `
+// Interactive item under uPick as id / 255 (0 = none). Compiled with PICK defined.
+vec4 pick() {
+  vec3 ro;
+  vec3 rd;
+  cameraRay(uPick, ro, rd);
+  vec2 hit = march(ro, rd);
+  if (hit.x < 0.0) return vec4(0.0);
+  vec3 p = ro + rd * hit.x;
+  return vec4(${call(fns, fns.materialName, "uTime")}.id / 255.0, 0.0, 0.0, 1.0);
+}
+` : ""}
 void main() {
-  outColor = render(vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y));
+${fns.interactiveCount ? "#ifdef PICK\n  outColor = pick();\n  return;\n#endif\n" : ""}  outColor = render(vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y));
 }
 `;
 }

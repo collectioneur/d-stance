@@ -18,6 +18,7 @@ import { MaterialFields } from "./MaterialFields";
 import { ModifierFields } from "./ModifierFields";
 import { FormulaField } from "./FormulaField";
 import { AnimationFields } from "./AnimationFields";
+import { InteractionFields } from "./InteractionFields";
 
 // ── Shape size field definitions ──────────────────────────────────────────────
 
@@ -307,6 +308,7 @@ function GroupProperties({
 
       {shared.length === 1 && <ModifierFields item={group} />}
       {shared.length === 1 && <AnimationFields item={group} />}
+      {shared.length === 1 && <InteractionFields item={group} />}
       <MaterialFields items={shared} />
     </div>
   );
@@ -439,6 +441,7 @@ function LayerProperties({
       )}
       {shared.length === 1 && <ModifierFields item={layer} />}
       {shared.length === 1 && <AnimationFields item={layer} />}
+      {shared.length === 1 && <InteractionFields item={layer} />}
       <MaterialFields items={shared} />
     </div>
   );

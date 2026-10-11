@@ -144,3 +144,42 @@ describe("embed animation", () => {
     expect(moving.scene.view.fit!).toBeGreaterThanOrEqual(1.5);
   });
 });
+
+describe("embed interaction", () => {
+  const ball = () =>
+    shape("sphere", { id: "s", interaction: [{ trigger: "hover", target: "position.y", amount: -1 }, { trigger: "pointerX", target: "position.x", amount: 1 }] });
+
+  test("interactive scenes ship states, a pick pass and the payload; Shadertoy stays at rest", () => {
+    const out = generateEmbed(scene([ball()], "Hi"), OPTS);
+    expect(out.scene.interact).toEqual({ parent: [-1], hoverable: [true], clickable: [false], pointer: true });
+    expect(out.scene.wgsl).toContain("@group(0) @binding(101) var<uniform> ix: array<vec4f, 1>;");
+    expect(out.scene.wgsl).toContain("fn fs_pick()");
+    expect(out.scene.glsl).toContain("uniform vec4 uIx[1];");
+    expect(out.scene.glsl).toContain("#ifdef PICK");
+    expect(out.shadertoy).not.toMatch(/uIx|uPointer/);
+  });
+
+  test("pointer-only scenes track the pointer without a pick pass", () => {
+    const s = shape("sphere", { interaction: [{ trigger: "pointerY", target: "rotation.x", amount: 20 }] });
+    const out = generateEmbed(scene([s]), OPTS);
+    expect(out.scene.interact).toEqual({ parent: [], hoverable: [], clickable: [], pointer: true });
+    expect(out.scene.wgsl).not.toContain("fs_pick");
+    expect(out.scene.glsl).toContain("uniform vec2 uPointer;");
+    expect(out.scene.glsl).not.toContain("uIx");
+  });
+
+  test("still scenes are unchanged: no states, no pick", () => {
+    const out = generateEmbed(scene([shape("sphere")]), OPTS);
+    expect(out.scene.interact).toBeUndefined();
+    expect(out.scene.wgsl).not.toMatch(/fs_pick|binding\(101\)/);
+  });
+
+  test("bounds and floor cover the reacting poses", () => {
+    const bound = (wgsl: string) => Number(wgsl.match(/const BOUNDS = ([\d.]+);/)![1]);
+    const rest = generateEmbed(scene([shape("sphere")]), OPTS);
+    const moving = generateEmbed(scene([ball()]), OPTS);
+    // Hover lifts by 1 while the pointer pushes 1 sideways: |(1, -1)| + 0.5.
+    expect(bound(rest.scene.wgsl)).toBeCloseTo(0.55, 5);
+    expect(bound(moving.scene.wgsl)).toBeGreaterThanOrEqual(Math.SQRT2 + 0.5);
+  });
+});

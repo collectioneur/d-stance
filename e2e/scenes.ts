@@ -247,3 +247,30 @@ export function animationScene() {
     ],
   };
 }
+
+/** Hover a sphere (left), click a box (right). Seen from the front at distance 2.5. */
+export function interactionScene() {
+  return {
+    id: "root",
+    name: "Reactive",
+    items: [
+      layer("sphere", [0.4, 0, 0, 0], {
+        id: "ix-sphere",
+        name: "Ball",
+        position: [-0.7, 0, 0] as V3,
+        material: { color: [0.9, 0.3, 0.2], roughness: 0.35, metalness: 0, emission: 0 },
+        interaction: [
+          { trigger: "hover", target: "scale", amount: 0.2 },
+          { trigger: "hover", target: "emission", amount: 1.5 },
+        ],
+      }),
+      layer("box", [0.3, 0.3, 0.3, 0], {
+        id: "ix-box",
+        name: "Crate",
+        position: [0.7, 0, 0] as V3,
+        material: { color: [0.25, 0.5, 0.95], roughness: 0.4, metalness: 0, emission: 0 },
+        interaction: [{ trigger: "click", target: "rotation.z", amount: 45 }],
+      }),
+    ],
+  };
+}

@@ -17,6 +17,7 @@ import {
   resumeHistory,
   MAX_IMAGES,
   type ObjectGroup,
+  type SceneItem,
   type SceneRoot,
 } from "../store/sceneStore";
 import { useGizmoStore } from "../store/gizmoStore";
@@ -59,6 +60,16 @@ import {
 import { compileScene, sceneUsesTime as compileUsesTime, type CompiledScene } from "./sceneCompiler";
 import { evaluateAnimations, hasAnimation } from "../store/animation";
 import { useTimelineStore } from "../store/timelineStore";
+import { useTryStore } from "../store/tryStore";
+import {
+  easeToward,
+  hasInteraction,
+  interactiveSlots,
+  reactionOffsets,
+  slotChain,
+  type InteractionState,
+  type InteractiveSlots,
+} from "../store/interaction";
 import { SpawnAnimator } from "./spawnAnim";
 import { IMAGE_SDF_EMPTY_HALF, IMAGE_SDF_RES, decodeSdfPng } from "../utils/imageSdf";
 
@@ -225,6 +236,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       function writeMarks(scene: CompiledScene) {
         const v = scene.values;
         for (const index of scene.markIndex.values()) v[index] = 0;
+        if (useTryStore.getState().trying) return; // the scene as the viewer sees it
         const { root: sceneRoot, selectedIds } = useSceneStore.getState();
         for (const id of topLevelSelection(sceneRoot, selectedIds)) {
           const index = scene.markIndex.get(id);
@@ -271,7 +283,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         sceneUniforms.write({
           boundsRadius: scene.boundsRadius,
           _pad0: 0,
-          selectAll: rootSelected && scene.leafIds.length > 0 ? 1 : 0,
+          selectAll: rootSelected && scene.leafIds.length > 0 && !useTryStore.getState().trying ? 1 : 0,
           time,
           boundsCenter: d.vec3f(0, 0, 0),
           _pad2: 0,
@@ -391,6 +403,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       } | null = null;
 
       function isGizmoVisibleMode(): boolean {
+        if (useTryStore.getState().trying) return false;
         const mode = useGizmoStore.getState().mode;
         return mode === "translate" || mode === "rotate" || mode === "scale";
       }
@@ -950,6 +963,11 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           const { root: sceneRoot, selectItem, toggleSelected, deselect } =
             useSceneStore.getState();
 
+          if (useTryStore.getState().trying) {
+            if (pickId > 0 && ids[pickId - 1]) tryClick(ids[pickId - 1]);
+            return;
+          }
+
           if (pickId === 0) {
             if (!additive) deselect();
             return;
@@ -980,6 +998,93 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           dragStartX = e.clientX;
           dragStartY = e.clientY;
         });
+      };
+
+      // ── Try mode: hover / click / pointer drive reactions (like the embed) ──
+      let ixSlots: InteractiveSlots | null = null;
+      let ixSlotsFor: SceneRoot | null = null;
+      const ixHover = new Map<string, number>();
+      const ixClick = new Map<string, number>();
+      /** Items toggled on by clicks (ids). */
+      const ixClicked = new Set<string>();
+      const ixPointer: [number, number] = [0, 0];
+      const ixPointerTo: [number, number] = [0, 0];
+      let ixState: InteractionState | null = null;
+
+      function slotsFor(sceneRoot: SceneRoot): InteractiveSlots | null {
+        if (sceneRoot !== ixSlotsFor) {
+          ixSlots = hasInteraction(sceneRoot.items) ? interactiveSlots(sceneRoot.items) : null;
+          ixSlotsFor = sceneRoot;
+        }
+        return ixSlots;
+      }
+
+      /** The interactive items a shape belongs to: its own slot and its interactive ancestors'. */
+      function interactiveChain(sceneRoot: SceneRoot, shapeId: string): string[] {
+        const slots = slotsFor(sceneRoot);
+        if (!slots) return [];
+        const path = [...(getItemAncestorGroups(sceneRoot, shapeId) ?? []).map((g) => g.id), shapeId];
+        for (let i = path.length - 1; i >= 0; i--) {
+          const slot = slots.slot.get(path[i]);
+          if (slot !== undefined) return slotChain(slots, slot).map((s) => slots.ids[s]);
+        }
+        return [];
+      }
+
+      function tryClick(shapeId: string) {
+        const sceneRoot = useSceneStore.getState().root;
+        const slots = slotsFor(sceneRoot);
+        if (!slots) return;
+        for (const id of interactiveChain(sceneRoot, shapeId)) {
+          if (!slots.clickable[slots.slot.get(id)!]) continue;
+          if (ixClicked.has(id)) ixClicked.delete(id);
+          else ixClicked.add(id);
+        }
+      }
+
+      /**
+       * Eases every state toward what the viewer is doing (all back to rest
+       * outside Try mode). Returns the state to draw with, null at rest.
+       */
+      function stepInteraction(sceneRoot: SceneRoot, dt: number): InteractionState | null {
+        const trying = useTryStore.getState().trying;
+        if (!trying) {
+          ixClicked.clear();
+          ixPointerTo[0] = 0;
+          ixPointerTo[1] = 0;
+        }
+        const hovered = new Set(trying && hoverItemId ? interactiveChain(sceneRoot, hoverItemId) : []);
+        let moving = false;
+        const step = (states: Map<string, number>, on: Set<string>) => {
+          for (const id of on) if (!states.has(id)) states.set(id, 0);
+          for (const [id, v] of states) {
+            const next = easeToward(v, on.has(id) ? 1 : 0, dt);
+            if (next === 0 && !on.has(id)) states.delete(id);
+            else states.set(id, next);
+            if (next !== v) moving = true;
+          }
+        };
+        step(ixHover, hovered);
+        step(ixClick, ixClicked);
+        for (let a = 0; a < 2; a++) {
+          const next = easeToward(ixPointer[a], ixPointerTo[a], dt);
+          if (next !== ixPointer[a]) moving = true;
+          ixPointer[a] = next;
+        }
+        const atRest = ixHover.size === 0 && ixClick.size === 0 && ixPointer[0] === 0 && ixPointer[1] === 0;
+        if (atRest) {
+          ixState = null;
+        } else if (moving || !ixState) {
+          ixState = { hover: new Map(ixHover), click: new Map(ixClick), pointer: [ixPointer[0], ixPointer[1]] };
+        }
+        return ixState;
+      }
+
+      const onTryPointer = (e: PointerEvent) => {
+        if (!useTryStore.getState().trying) return;
+        const r = canvas!.getBoundingClientRect();
+        ixPointerTo[0] = Math.max(-1, Math.min(1, ((e.clientX - r.left) / r.width) * 2 - 1));
+        ixPointerTo[1] = Math.max(-1, Math.min(1, ((e.clientY - r.top) / r.height) * 2 - 1));
       };
 
       // ── Object hover glow: the shape under the cursor, cross-faded ──
@@ -1042,7 +1147,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         // No hover glow on a gizmo handle (that's the target) or on the
         // selection (it already glows).
         const target =
-          gizmoHoverAxis || !hoverItemId || isInSelection(hoverItemId) ? null : hoverItemId;
+          gizmoHoverAxis || !hoverItemId || useTryStore.getState().trying || isInSelection(hoverItemId) ? null : hoverItemId;
         if (target !== null && target !== glowCur.id) {
           if (target === glowPrev.id) {
             // Back onto the shape still fading out: pick it up where it is.
@@ -1151,6 +1256,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       canvas.addEventListener("pointerdown", onPointerDown);
       canvas.addEventListener("pointerleave", clearObjectHover);
       window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointermove", onTryPointer);
       window.addEventListener("pointerup", onPointerUp);
       canvas.addEventListener("wheel", onWheel, { passive: false });
 
@@ -1205,6 +1311,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let lastView = "";
       let lastDrawnRoot: SceneRoot | null = null;
       let sceneAnimated = false;
+      let lastTrying = false;
       let animatedFor: SceneRoot | null = null;
       let lastTick = performance.now();
       let lastActive: { program: Program; scene: CompiledScene } | null = null;
@@ -1239,17 +1346,22 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         lastTick = now;
         const time = sceneAnimated ? useTimelineStore.getState().time : 0;
         const still = gizmoDragging ? new Set(useSceneStore.getState().selectedIds) : undefined;
+        const ix = stepInteraction(sceneRoot, Math.min(0.1, (now - lastHoverFrame) / 1000));
+        const react = ix ? (item: unknown) => reactionOffsets(item as SceneItem, ix) : undefined;
         const drawn = {
-          root: sceneAnimated ? evaluateAnimations(spawned.root, time, still) : spawned.root,
+          root: sceneAnimated || ix ? evaluateAnimations(spawned.root, time, still, react) : spawned.root,
           animating: spawned.animating,
         };
+        const trying = useTryStore.getState().trying;
         if (
           selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
-          renderMode !== lastRenderMode
+          renderMode !== lastRenderMode ||
+          trying !== lastTrying
         ) {
           dataDirty = true;
         }
+        lastTrying = trying;
         lastRoot = sceneRoot;
         lastSelectedIds = selectedIds;
         lastRootSelected = rootSelected;
@@ -1266,7 +1378,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         const [rx, ry] = getCameraRot();
         const view = [
           rx, ry, distance, canvas!.width, canvas!.height,
-          useGizmoStore.getState().mode, activeGizmoAxis, imagesVersion,
+          useGizmoStore.getState().mode, activeGizmoAxis, imagesVersion, trying,
           active?.program.code.length, quality,
         ].join("|");
         if (active && (dataChanged || view !== lastView || drawn.root !== lastDrawnRoot || active !== lastActive)) {
@@ -1328,6 +1440,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         canvas.removeEventListener("pointerleave", clearObjectHover);
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointermove", onTryPointer);
         canvas.removeEventListener("wheel", onWheel);
         root.destroy();
         pickTexture.destroy();

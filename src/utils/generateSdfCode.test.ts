@@ -143,17 +143,20 @@ describe("generateSdfCode animation", () => {
     expect(out.wgsl).toContain("fn sdSpin(p: vec3f, time: f32) -> f32");
     expect(out.glsl).toContain("float sdSpin(vec3 p, float time)");
     expect(out.typegpu).toContain("const sdSpin = (p: d.v3f, time: number): number =>");
-    expect(out.wgsl).toContain("applyInvRotXYZ(p, vec3f(0.0, ((0.0 + 360.0 * (time / 4.0)) * 0.0174532925), 0.0))");
-    expect(out.wgsl).toMatch(/smin\(d0, sdSphere\(p, 0\.5\), max\(\(0\.1 \+ 0\.05 \* sin\(6\.2831853 \* time \/ 4\.0\)\), 0\.001\)\)/);
+    // Each moving value is computed once, at the top.
+    expect(out.wgsl).toContain("fn sdSpin(p: vec3f, time: f32) -> f32 {\n  let a0 = (360.0 * (time / 4.0));\n  let a1 = max((0.1 + 0.05 * sin(6.2831853 * time / 4.0)), 0.001);");
+    expect(out.wgsl).toContain("applyInvRotXYZ(p, vec3f(0.0, (a0 * 0.0174532925), 0.0))");
+    expect(out.wgsl).toContain("d0 = smin(d0, sdSphere(p, 0.5), a1);");
     expect(out.typegpu).toContain("std.sin(");
   });
 
   test("animated scale divides the point and the distance factor follows", () => {
     const pulse = { target: "scale" as const, wave: "sine" as const, amount: 0.2, period: 1, phase: 0 };
     const out = generateSdfCode(scene([shape("sphere", { animation: [pulse] })], "Pulse"), null);
-    expect(out.wgsl).toContain("p / vec3f(max((1.0 * (1.0 + 0.2 * sin(6.2831853 * time / 1.0))), 0.01)");
-    expect(out.wgsl).toMatch(/\* min\(min\(max\(/);
-    expect(out.typegpu).toMatch(/p \* d\.vec3f\(\(1\.0 \/ std\.max\(/);
+    expect(out.wgsl).toContain("let a0 = max((1.0 * (1.0 + 0.2 * sin(6.2831853 * time / 1.0))), 0.01);");
+    expect(out.wgsl).toContain("return sdSphere(p / vec3f(a0, a0, a0), 0.5) * a0;");
+    expect(out.typegpu).toContain("const a0 = std.max(");
+    expect(out.typegpu).toContain("p * d.vec3f((1.0 / a0), (1.0 / a0), (1.0 / a0))");
   });
 
   test("noise waves ship their helper; others do not", () => {
@@ -185,5 +188,41 @@ describe("generateSdfCode animation", () => {
     const out = generateMaterialCode(scene([shape("sphere", { material: mat, animation: [glow] })], "Lamp"));
     expect(out.wgsl).toContain("fn sdLampMaterial(p: vec3f, time: f32) -> SdfMaterial");
     expect(out.wgsl).toContain("max((1.0 + 1.0 * sin(6.2831853 * time / 2.0)), 0.0)");
+  });
+});
+
+describe("generateSdfCode interaction", () => {
+  const hover = { trigger: "hover" as const, target: "scale" as const, amount: 0.2 };
+  const root = () =>
+    scene(
+      [
+        group([shape("box", { id: "b", interaction: [{ trigger: "click", target: "rotation.z", amount: 45 }] })], { id: "g", interaction: [hover] }),
+        shape("sphere", { id: "s", op: "sUnion", interaction: [{ trigger: "pointerY", target: "position.y", amount: 0.1 }] }),
+      ],
+      "Ix",
+    );
+
+  test("without the option reactions sit at rest (code tab)", () => {
+    const out = generateSdfCode(root(), null);
+    expect(out.wgsl).not.toMatch(/ix\[|pointer/);
+    expect(generateMaterialCode(root()).wgsl).not.toContain("id:");
+  });
+
+  test("embed code reads per-item states and the pointer; materials carry the owner id", async () => {
+    const { interactiveSlots } = await import("../store/interaction");
+    const ix = interactiveSlots(root().items);
+    const out = generateSdfCode(root(), null, { interactive: ix });
+    expect(out.wgsl).toContain("let a0 = max((1.0 * (1.0 + 0.2 * ix[0].x)), 0.01);");
+    expect(out.wgsl).toContain("(45.0 * ix[1].y)");
+    expect(out.wgsl).toContain("(0.1 * view.pointer.y)");
+    expect(out.glsl).toContain("uIx[0].x");
+    expect(out.glsl).toContain("uPointer.y");
+    const mat = generateMaterialCode(root(), { interactive: ix });
+    expect(mat.wgsl).toContain("id: f32,");
+    expect(mat.wgsl).toContain("select(a.id, b.id, t > 0.5)");
+    // Box: own slot 1 → id 2; sphere: no item trigger, no interactive parent → 0.
+    expect(mat.wgsl).toMatch(/SdfMaterial\(vec3f\(0\.72, 0\.72, 0\.72\), 0\.5, 0\.0, 0\.0, 2\.0\)/);
+    expect(mat.wgsl).toMatch(/SdfMaterial\(vec3f\(0\.72, 0\.72, 0\.72\), 0\.5, 0\.0, 0\.0, 0\.0\)/);
+    expect(mat.glsl).toContain("t > 0.5 ? b.id : a.id");
   });
 });

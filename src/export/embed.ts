@@ -21,6 +21,14 @@ import {
 import { generateMaterialCode, generateSdfCode, PLACEHOLDER } from "../utils/generateSdfCode";
 import { sceneFloorY, sceneFrameSphere, sceneMarchRadius, type Sphere } from "../sdf/itemBounds";
 import { evaluateAnimations, hasAnimation } from "../store/animation";
+import {
+  hasInteraction,
+  interactiveSlots,
+  reactionOffsets,
+  REST_STATE,
+  type InteractionState,
+  type InteractiveSlots,
+} from "../store/interaction";
 import { IMAGE_SDF_PREFIX } from "../utils/imageSdf";
 import type { SceneItem, SceneRoot } from "../store/sceneStore";
 import type {
@@ -54,8 +62,18 @@ export interface EmbedExport {
   /** Shapes Shadertoy cannot show (image layers need textures). */
   shadertoyDropped: number;
   /** Raw scene object handed to `mount` (tests, previews). */
-  scene: { wgsl: string; glsl: string; images: string[]; view: ExportView; loop?: number };
+  scene: { wgsl: string; glsl: string; images: string[]; view: ExportView; loop?: number; interact?: EmbedInteract };
   mountOptions: { autoRotate: number; maxDpr: number };
+}
+
+/** What the runtime needs to drive reactions (absent when nothing reacts). */
+export interface EmbedInteract {
+  /** Per interactive item (pick id − 1): its nearest interactive ancestor, −1 = none. */
+  parent: number[];
+  hoverable: boolean[];
+  clickable: boolean[];
+  /** Something follows the pointer: track it over the page. */
+  pointer: boolean;
 }
 
 /** "balanced" is the editor's default preset ("high"): the embed looks like the viewport. */
@@ -112,21 +130,32 @@ interface Extent {
  * Where the scene can be. A moving scene is sampled over its loop: the march
  * bound, floor and framing cover every pose, not just the first one.
  */
-function sceneExtent(root: SceneRoot, loop: number): Extent {
+function sceneExtent(root: SceneRoot, loop: number, slots: InteractiveSlots | null): Extent {
   const at = (items: SceneItem[]): Extent => ({
     march: items.length > 0 ? sceneMarchRadius(items) : 0,
     floorY: sceneFloorY(items),
     frame: sceneFrameSphere(items),
   });
   const rest = at(root.items);
-  if (!hasAnimation(root.items)) return rest;
-  // ~30 poses a second, at most 240; the margin covers motion between samples.
-  const n = Math.min(240, Math.max(16, Math.ceil(loop * 30)));
+  const animated = hasAnimation(root.items);
+  if (!animated && !slots) return rest;
+  // Reactions: everything hovered and clicked, the pointer in each corner.
+  const states: InteractionState[] = [REST_STATE];
+  if (slots) {
+    const all = new Map(slots.ids.map((id) => [id, 1]));
+    for (const pointer of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) states.push({ hover: all, click: all, pointer });
+  }
+  // ~30 poses a second, at most 240 in all; the margin covers motion between samples.
+  const n = animated ? Math.max(8, Math.floor(Math.min(240, Math.max(16, Math.ceil(loop * 30))) / states.length)) : 1;
   let { march, floorY } = rest;
   let reach = rest.frame?.r ?? 0;
   let bounded = rest.frame !== null;
-  for (let i = 1; i < n; i++) {
-    const pose = at(evaluateAnimations(root, (loop * i) / n).items);
+  for (let k = 0; k < n * states.length; k++) {
+    const state = states[k % states.length];
+    const i = Math.floor(k / states.length);
+    if (i === 0 && state === REST_STATE) continue;
+    const extra = state === REST_STATE ? undefined : (item: Parameters<typeof reactionOffsets>[0]) => reactionOffsets(item, state);
+    const pose = at(evaluateAnimations(root, (loop * i) / n, undefined, extra).items);
     march = Math.max(march, pose.march);
     floorY = Math.max(floorY, pose.floorY);
     if (!pose.frame || !rest.frame) {
@@ -147,9 +176,10 @@ function sceneExtent(root: SceneRoot, loop: number): Extent {
 
 export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport {
   const quality = QUALITY[opts.quality];
-  const fns = sceneFns(root);
+  const slots = hasInteraction(root.items) ? interactiveSlots(root.items) : null;
+  const fns = sceneFns(root, slots);
   const loop = fns.wgsl.animated ? (opts.loop ?? DEFAULT_LOOP) : undefined;
-  const extent = sceneExtent(root, loop ?? DEFAULT_LOOP);
+  const extent = sceneExtent(root, loop ?? DEFAULT_LOOP, slots);
   const fit = extent.frame;
   const constants: RenderConstants = {
     style: opts.style,
@@ -171,6 +201,9 @@ export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport 
     images,
     view,
     ...(loop ? { loop } : {}),
+    ...(slots
+      ? { interact: { parent: slots.parent, hoverable: slots.hoverable, clickable: slots.clickable, pointer: slots.pointer } }
+      : {}),
   };
   const mountOptions = { autoRotate: AUTO_ROTATE[opts.motion], maxDpr: quality.maxDpr };
   // Stable per scene, distinct between scenes sharing a page.
@@ -214,7 +247,8 @@ ${html.replace(' style="display:block;width:100%;height:420px"', "")}</body>
 `;
 
   const dropped = countImages(root.items);
-  const toyFns = dropped > 0 ? sceneFns({ ...root, items: withoutImages(root.items) }) : fns;
+  // Shadertoy has no hover / click: reactions sit at rest there.
+  const toyFns = dropped > 0 || slots ? sceneFns(dropped > 0 ? { ...root, items: withoutImages(root.items) } : root, null) : fns;
   const shadertoy = renderShadertoy(toyFns.glsl, constants, view);
 
   return {
@@ -251,9 +285,11 @@ function exportView(frame: Sphere | null, opts: EmbedOptions): ExportView {
 }
 
 /** Scene SDF + material functions per language; empty scenes get stubs that compile. */
-function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
-  const sdf = generateSdfCode(root, null);
-  const mat = generateMaterialCode(root);
+function sceneFns(root: SceneRoot, slots: InteractiveSlots | null): { wgsl: SceneFns; glsl: SceneFns } {
+  const opts = slots ? { interactive: slots } : {};
+  const sdf = generateSdfCode(root, null, opts);
+  const mat = generateMaterialCode(root, opts);
+  const interactiveCount = slots ? { interactiveCount: slots.ids.length } : {};
   const empty = sdf.wgsl === PLACEHOLDER;
   const name = sdf.fnName;
   return {
@@ -263,6 +299,7 @@ function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
       material: mat.wgsl,
       materialName: mat.fnName,
       animated: sdf.animated,
+      ...interactiveCount,
     },
     glsl: {
       sdf: empty ? `float ${name}(vec3 p) {\n  return 1e10;\n}` : sdf.glsl.replace(DATA_URL_LINE, ""),
@@ -270,6 +307,7 @@ function sceneFns(root: SceneRoot): { wgsl: SceneFns; glsl: SceneFns } {
       material: mat.glsl,
       materialName: mat.fnName,
       animated: sdf.animated,
+      ...interactiveCount,
     },
   };
 }

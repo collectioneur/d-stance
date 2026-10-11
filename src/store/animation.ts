@@ -163,41 +163,47 @@ export function hasAnimation(items: readonly { animation?: Track[]; items?: unkn
   return false;
 }
 
-/** `item` with its tracks applied at time t (same object when nothing moves). */
-export function animateItem<T extends Animatable>(item: T, t: number): T {
-  const tracks = activeTracks(item.animation);
-  if (tracks.length === 0) return item;
+/** A change to one animatable number: added, or for scale a fraction of the base. */
+export type Offset = { target: TrackTarget; value: number };
+
+/**
+ * `item` with offsets applied (same object when there are none). Offsets on
+ * one target add up; scale is base · (1 + Σ), clamped like the shader.
+ */
+export function applyOffsets<T extends Animatable>(item: T, offsets: readonly Offset[]): T {
+  if (offsets.length === 0) return item;
   const position = [...item.position] as [number, number, number];
   const rotation = [...item.rotation] as [number, number, number];
-  const scale = [...item.scale] as [number, number, number];
   const params = item.params ? ([...item.params] as [number, number, number, number]) : undefined;
   let smoothK = item.smoothK;
+  let scaleSum = 0;
   let emissionOffset = 0;
   let touchedMaterial = false;
-  for (const track of tracks) {
-    const v = trackOffset(track, t);
-    switch (track.target) {
+  let touchedSmooth = false;
+  for (const { target, value: v } of offsets) {
+    switch (target) {
       case "position.x":
       case "position.y":
       case "position.z":
-        position["xyz".indexOf(track.target[9])] += v;
+        position["xyz".indexOf(target[9])] += v;
         break;
       case "rotation.x":
       case "rotation.y":
       case "rotation.z":
-        rotation["xyz".indexOf(track.target[9])] += v;
+        rotation["xyz".indexOf(target[9])] += v;
         break;
       case "scale":
-        for (let a = 0; a < 3; a++) scale[a] = Math.max(0.01, scale[a] * (1 + v));
+        scaleSum += v;
         break;
       case "param0":
       case "param1":
       case "param2":
       case "param3":
-        if (params) params[Number(track.target[5])] += v;
+        if (params) params[Number(target[5])] += v;
         break;
       case "smoothK":
-        smoothK = Math.max(0.001, smoothK + v);
+        smoothK += v;
+        touchedSmooth = true;
         break;
       case "emission":
         emissionOffset += v;
@@ -205,7 +211,8 @@ export function animateItem<T extends Animatable>(item: T, t: number): T {
         break;
     }
   }
-  const out = { ...item, position, rotation, scale, smoothK } as T;
+  const scale = item.scale.map((b) => Math.max(0.01, b * (1 + scaleSum))) as [number, number, number];
+  const out = { ...item, position, rotation, scale, smoothK: touchedSmooth ? Math.max(0.001, smoothK) : smoothK } as T;
   if (params) (out as Animatable).params = params;
   if (touchedMaterial && item.material) {
     (out as Animatable).material = { ...item.material, emission: Math.max(0, item.material.emission + emissionOffset) };
@@ -213,18 +220,36 @@ export function animateItem<T extends Animatable>(item: T, t: number): T {
   return out;
 }
 
+/** `item` with its tracks applied at time t (same object when nothing moves). */
+export function animateItem<T extends Animatable>(item: T, t: number): T {
+  return applyOffsets(item, trackOffsets(item, t));
+}
+
+function trackOffsets(item: Animatable, t: number): Offset[] {
+  return activeTracks(item.animation).map((track) => ({ target: track.target, value: trackOffset(track, t) }));
+}
+
 type Tree = { items: (Animatable & { kind: string; id: string; items?: unknown[] })[] };
 
 /**
- * The tree with every track applied at time t. Items in `still` (e.g. the one
- * being dragged with the gizmo) keep their rest pose. Subtrees without tracks
- * are shared, not copied.
+ * The tree with every track applied at time t, plus `extra` offsets per item
+ * (interaction reactions). Items in `still` (e.g. the one being dragged with
+ * the gizmo) keep their rest pose. Subtrees that do not move are shared.
  */
-export function evaluateAnimations<R extends Tree>(root: R, t: number, still?: ReadonlySet<string>): R {
+export function evaluateAnimations<R extends Tree>(
+  root: R,
+  t: number,
+  still?: ReadonlySet<string>,
+  extra?: (item: Tree["items"][number]) => readonly Offset[],
+): R {
   const walk = (items: Tree["items"]): Tree["items"] => {
     let changed = false;
     const out = items.map((item) => {
-      let next = still?.has(item.id) ? item : animateItem(item, t);
+      let next = item;
+      if (!still?.has(item.id)) {
+        const more = extra?.(item) ?? [];
+        next = applyOffsets(item, more.length > 0 ? [...trackOffsets(item, t), ...more] : trackOffsets(item, t));
+      }
       if (item.kind === "group" && Array.isArray(item.items)) {
         const kids = walk(item.items as Tree["items"]);
         if (kids !== item.items) next = { ...next, items: kids };
@@ -341,14 +366,23 @@ function waveExpr(wave: Waveform, u: string, lang: AnimLang): string {
 
 /**
  * Expression for `base` driven by `tracks` hitting one property at time
- * `time`. Scale tracks multiply; everything else adds.
+ * `time`, plus `extra` terms (interaction reactions). Scale tracks multiply;
+ * everything else adds.
  */
-export function animationExpr(base: number, tracks: Track[], time: string, lang: AnimLang, multiply = false): string {
-  if (tracks.length === 0) return lit(base);
+export function animationExpr(
+  base: number,
+  tracks: Track[],
+  time: string,
+  lang: AnimLang,
+  multiply = false,
+  extra: readonly string[] = [],
+): string {
+  if (tracks.length === 0 && extra.length === 0) return lit(base);
   const terms = tracks.map((t) => {
     const u = t.phase ? `(${time} / ${lit(t.period)} + ${lit(t.phase)})` : `${time} / ${lit(t.period)}`;
     return `${lit(t.amount)} * ${waveExpr(t.wave, u, lang)}`;
   });
+  terms.push(...extra);
   if (multiply) return `(${lit(base)} * (1.0 + ${terms.join(" + ")}))`;
-  return `(${lit(base)} + ${terms.join(" + ")})`;
+  return base === 0 ? `(${terms.join(" + ")})` : `(${lit(base)} + ${terms.join(" + ")})`;
 }

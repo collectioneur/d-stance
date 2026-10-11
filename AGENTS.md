@@ -101,11 +101,18 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 - Export writes the same formula into code (`animationExpr`; `fmtEx` in generateSdfCode). An animated scene's SDF and material functions take a second parameter, `time`; still scenes keep the one-argument signature byte-for-byte. `waveAt` (CPU) and `waveExpr` (shader) must agree — `animation.test.ts` runs the GLSL expression in JS against the CPU for every waveform. `animHash` is bit-identical to the shader hash.
 - Embeds loop the clock over the editor's loop length (`scene.loop`, `mod(iTime, loop)` on Shadertoy); the runtime redraws every frame only when the scene is animated, and holds the first pose under `prefers-reduced-motion`. Export bounds / floor / framing are sampled over the loop (`sceneExtent` in embed.ts).
 
+### 2f. Interaction
+
+- Reactions (`src/store/interaction.ts`): `value = base + amount · state`, same targets and units as tracks. Hover / click states are per item (eased 0..1); pointer X / Y are −1..1 over the canvas. Items with hover / click reactions get **slots** (`interactiveSlots`, tree order, capped at `MAX_INTERACTIVE`); a hovered shape activates its nearest interactive ancestor-or-self and every interactive ancestor above it (`slotChain`).
+- Editor: "Try" mode (`tryStore`) feeds the same offsets through `evaluateAnimations(…, extra)` on the CPU; selection, hover glow and the gizmo rest while trying.
+- Embed: `generateSdfCode(…, { interactive })` turns reactions into terms of `ix[slot]` / `view.pointer` (GLSL `uIx` / `uPointer`); without the option (code tab, Shadertoy) reactions sit at rest. The material gets an `id` (slot + 1 of the owner) so `fs_pick` / GLSL `PICK` can report the hovered item; pick ids fit one byte. Code-tab output for scenes without the option is unchanged.
+- Moving values (time / states) are hoisted once per function (`let aN`); they never depend on `p`.
+
 ### 2b. Embed export
 
 - `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
 - `runtime.js` is plain JS on purpose: its source is inlined verbatim into every export (`?raw`). No imports, no TypeScript. Its types live in `runtime.d.ts`.
-- The WebGPU view uniform is 48 bytes (`res, rot, dist, time, center`) at `@group(0) @binding(100)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. Avoid WGSL reserved words in templates (`target` is one).
+- The WebGPU view uniform is 64 bytes (`res, rot, dist, time, pointer, center, pick`) at `@group(0) @binding(100)`; `runtime.js` `viewFloats` writes it. Interaction states (`ix: array<vec4f, N>`) sit at `binding(101)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. The runtime builds one explicit bind group layout for the draw and pick pipelines. Avoid WGSL reserved words in templates (`target` is one).
 - The runtime compiles the WebGPU pipeline before calling `getContext("webgpu")`: a canvas keeps its first context type, and WebGL2 must stay possible as the fallback.
 - Inline JSON goes through `scriptJson` (escapes `<`). Scene names are user data.
 
@@ -128,7 +135,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 10` (v4–v9 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 11` (v4–v10 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`, v11 optional `interaction` reactions). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.
@@ -145,6 +152,8 @@ Losing a scene is data loss. Treat persist mistakes like a security bug.
 | `MAX_TRANSFORM_DEPTH` | 16 | Nested group depth |
 | `DATA_SLOTS` | 4096 | vec4f value slots (64 KiB uniform); `countDataSlots` stays far below it inside `MAX_INSTRUCTIONS` |
 | `MAX_IMAGES` | 8 | Distinct image SDFs per scene (texture array layers) |
+| `MAX_TRACKS` / `MAX_REACTIONS` | 8 / 8 | Animation tracks / interaction reactions per item |
+| `MAX_INTERACTIVE` | 64 | Items with hover / click states per embed (pick id is one byte) |
 
 UI toasts exist for cap / cycle / depth. Do not raise a cap in one file and leave the others.
 

@@ -26,7 +26,7 @@ export function box(extra: Record<string, unknown> = {}) {
   return { ...sphere(), id: uid("box"), shapeType: "box", name: "Box", params: [0.4, 0.4, 0.4, 0], ...extra };
 }
 
-export function encodeScene(root: SceneJson, v = 10): string {
+export function encodeScene(root: SceneJson, v = 11): string {
   const json = JSON.stringify({ v, root, counters: {}, groupCounter: 0 });
   return Buffer.from(json, "utf8").toString("base64");
 }
@@ -175,4 +175,37 @@ export async function bakeTestImage(page: Page): Promise<string> {
 export async function openHtml(page: Page, html: string, path = "/__embed-test.html") {
   await page.route(`**${path}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(path);
+}
+
+/**
+ * Client coordinates of world point `p` in the editor viewport (the orbit
+ * camera of shader.ts / renderTemplates.ts: yaw in XZ, then pitch in YZ).
+ */
+export async function projectToScreen(page: Page, p: [number, number, number]): Promise<{ x: number; y: number }> {
+  return page.evaluate(async (pt) => {
+    const { useViewStore } = await import("/src/store/viewStore.ts");
+    const { rotX, rotY, distance } = useViewStore.getState();
+    const rot = (v: [number, number], a: number): [number, number] => [
+      Math.cos(a) * v[0] + Math.sin(a) * v[1],
+      -Math.sin(a) * v[0] + Math.cos(a) * v[1],
+    ];
+    // Camera basis = the rotation applied to the canonical axes.
+    const turn = (v: [number, number, number]): [number, number, number] => {
+      const [x, z] = rot([v[0], v[2]], rotX);
+      const [y, z2] = rot([v[1], z], rotY);
+      return [x, y, z2];
+    };
+    const ro = turn([0, 0, -distance]);
+    const right = turn([1, 0, 0]);
+    const down = turn([0, 1, 0]);
+    const fwd = turn([0, 0, 1]);
+    const v = [pt[0] - ro[0], pt[1] - ro[1], pt[2] - ro[2]];
+    const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const z = dot(v, fwd);
+    const ux = dot(v, right) / z;
+    const uy = dot(v, down) / z;
+    const r = document.querySelector("canvas")!.getBoundingClientRect();
+    const aspect = r.width / r.height;
+    return { x: r.left + ((ux / aspect + 1) / 2) * r.width, y: r.top + ((uy + 1) / 2) * r.height };
+  }, p);
 }
