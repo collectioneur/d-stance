@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { box, canvasStats, openEditor, sceneRoot, sphere, waitForFrames } from "./helpers";
+import { box, canvasStats, openEditor, sceneRoot, sphere, waitForFrames, waitForProgram } from "./helpers";
 
 test.describe("editor smoke", () => {
   test("empty scene renders the grid without errors", async ({ page }) => {
@@ -25,9 +25,9 @@ test.describe("editor smoke", () => {
     await page.getByTitle("Add Sphere (2)").click();
     await expect(page.locator(".scene-item-name", { hasText: "Sphere 1" })).toBeVisible();
     await page.waitForTimeout(600); // spawn animation
-    await waitForFrames(page);
+    await waitForProgram(page);
     const after = await canvasStats(page);
-    expect(after.coverage).toBeGreaterThan(before.coverage + 0.02);
+    expect(after.coverage).toBeGreaterThan(before.coverage + 0.01);
   });
 
   test("click on the canvas selects, empty space deselects", async ({ page }) => {

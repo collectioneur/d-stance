@@ -1,0 +1,522 @@
+/**
+ * Scene compiler: CSG tree → WGSL + a flat value buffer.
+ *
+ * The tree's *structure* (node kinds, shape types, CSG ops, which subtrees can
+ * be culled) becomes straight-line WGSL; every *number* (baked transforms,
+ * params, smooth k, bounds, highlight marks) lives in `dsData`, a uniform
+ * array of vec4f. Dragging a gizmo or a slider only rewrites values; adding,
+ * removing, re-parenting or changing a shape type / op produces new code,
+ * which useGpu.ts compiles in the background (see ProgramCache there).
+ *
+ * Two functions are generated from the same walk:
+ *   ds_sdScene(p)   → f32        hot path: march, normals, AO, reflections
+ *   ds_sceneInfo(p) → vec4f      once per pixel at the hit:
+ *                                 x = highlight glow (selection / hover)
+ *                                 y = pick id (leaf index + 1, 0 = none)
+ *
+ * Primitive sources are the exact WGSL the code export emits
+ * (src/sdf/primitives.ts), prefixed `ds_` so they cannot collide with names
+ * TypeGPU generates for the rest of the shader.
+ */
+import { WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
+import {
+  ALL_SHAPE_TYPES,
+  type ObjectGroup,
+  type OpType,
+  type SceneItem,
+  type SceneRoot,
+  type ShapeLayer,
+} from "../store/sceneStore";
+import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
+import { maxAbsScale, sceneBoundRadius, shapeBoundRadius } from "./bounds";
+import { itemLocalToWorldPosition } from "./gizmo";
+
+/** vec4f slots in the uniform value buffer (64 KiB = default binding limit). */
+export const DATA_SLOTS = 4096;
+/**
+ * Cull a union-only subtree to its bounding sphere only beyond this distance.
+ * The march hits at `HIT_EPS·t` / leftover `REST_HIT_EPS`; returning a smaller
+ * sphere distance would paint the bounding sphere as the surface.
+ */
+export const CULL_DIST = 0.15;
+/** Slack so a tight primitive sphere never culls through on float error. */
+export const BOUND_EPS = 1e-3;
+/** Highlight band: |own SDF| below LO glows fully, fades out by HI. */
+export const GLOW_BAND_LO = 0.004;
+export const GLOW_BAND_HI = 0.035;
+
+/** Data identifier inside generated WGSL; useGpu binds it via `$uses`. */
+export const DATA_IDENT = "dsData";
+export const IMAGE_TEX_IDENT = "dsImageTex";
+export const IMAGE_SAMPLER_IDENT = "dsImageSampler";
+
+export interface CompiledScene {
+  /** WGSL declarations. Equal code ⇔ same value layout (cache key). */
+  code: string;
+  /** `slotCount` vec4f values, ready for the uniform buffer. */
+  values: Float32Array<ArrayBuffer>;
+  slotCount: number;
+  /** Pick id − 1 → layer id. */
+  leafIds: string[];
+  /** Item id → float index of its highlight strength in `values`. */
+  markIndex: Map<string, number>;
+  /** Conservative origin-centered scene bounding radius. */
+  boundsRadius: number;
+}
+
+export interface CompileOptions {
+  /** Texture array layer holding this baked image SDF. */
+  imageLayer(sdf: string): number;
+}
+
+// ── IR ───────────────────────────────────────────────────────────────────────
+
+interface LeafNode {
+  kind: "leaf";
+  layer: ShapeLayer;
+  base: number;
+  /** Every CSG op from this node to the scene root is hard union. */
+  cull: boolean;
+  pickId: number;
+  center: [number, number, number];
+  radius: number;
+}
+
+interface GroupNode {
+  kind: "group";
+  group: ObjectGroup;
+  base: number;
+  cull: boolean;
+  children: IrNode[];
+  center: [number, number, number];
+  radius: number;
+}
+
+/**
+ * Virtual subgroup of a long run of hard-union siblings (min is associative,
+ * so regrouping never changes the result). Its sphere gates all members at
+ * once — a cheap two-level hierarchy for flat scenes. Membership follows list
+ * order, not positions, so moving shapes never changes the code.
+ */
+interface ChunkNode {
+  kind: "chunk";
+  base: number;
+  members: IrNode[];
+  center: [number, number, number];
+  radius: number;
+}
+
+type IrNode = LeafNode | GroupNode | ChunkNode;
+
+/** Hard-union runs at least this long are split into chunks of CHUNK_SIZE. */
+const CHUNK_MIN_RUN = 8;
+const CHUNK_SIZE = 8;
+
+function nodeOp(node: IrNode): OpType {
+  return node.kind === "leaf" ? node.layer.op : node.kind === "group" ? node.group.op : "union";
+}
+
+function boundSlotOf(node: IrNode): number {
+  return node.kind === "leaf" ? node.base + 5 : node.kind === "group" ? node.base + 1 : node.base;
+}
+
+const LEAF_SLOTS = 6; // rows+offset ×3, params, misc, bound
+const IMAGE_EXTRA_SLOTS = 1; // round, invert, layer
+const GROUP_SLOTS = 2; // misc, bound
+
+/** misc slot layout (both kinds): x = factor (leaf), y = smooth k, z = highlight. */
+const MISC = 0;
+
+function itemContributes(item: SceneItem): boolean {
+  if (item.kind === "layer") return true;
+  return item.items.some(itemContributes);
+}
+
+const SMOOTH_OPS: ReadonlySet<OpType> = new Set(["sUnion", "sSubtract", "sIntersect"]);
+
+/** Smallest sphere-ish enclosure of child spheres (centroid + max reach). */
+function encloseSpheres(nodes: IrNode[]): { center: [number, number, number]; radius: number } {
+  const center: [number, number, number] = [0, 0, 0];
+  for (const n of nodes) for (let k = 0; k < 3; k++) center[k] += n.center[k] / nodes.length;
+  let radius = 0;
+  for (const n of nodes) {
+    const d = Math.hypot(n.center[0] - center[0], n.center[1] - center[1], n.center[2] - center[2]);
+    radius = Math.max(radius, d + n.radius);
+  }
+  return { center, radius };
+}
+
+class Builder {
+  slots = 0;
+  values: number[] = [];
+  leafIds: string[] = [];
+  markIndex = new Map<string, number>();
+
+  constructor(private opts: CompileOptions) {}
+
+  alloc(n: number): number {
+    const base = this.slots;
+    this.slots += n;
+    for (let i = 0; i < n * 4; i++) this.values.push(0);
+    return base;
+  }
+
+  set(slot: number, x: number, y: number, z: number, w: number) {
+    const i = slot * 4;
+    this.values[i] = x;
+    this.values[i + 1] = y;
+    this.values[i + 2] = z;
+    this.values[i + 3] = w;
+  }
+
+  leaf(layer: ShapeLayer, ctx: BakeCtx, ancestors: ObjectGroup[], cull: boolean): LeafNode {
+    const image = layer.shapeType === "image";
+    const base = this.alloc(LEAF_SLOTS + (image ? IMAGE_EXTRA_SLOTS : 0));
+    const baked = bakeShape(ctx, layer.position, layer.rotation, layer.scale);
+    this.set(base, ...baked.row0, baked.offset[0]);
+    this.set(base + 1, ...baked.row1, baked.offset[1]);
+    this.set(base + 2, ...baked.row2, baked.offset[2]);
+    const [a, b, c, w] = layer.params;
+    this.set(base + 3, a, b, c, w);
+    this.set(base + 4 + MISC, baked.factor, layer.smoothK, 0, 0);
+    const center = itemLocalToWorldPosition(layer.position, ancestors) as [number, number, number];
+    let radius = shapeBoundRadius(layer);
+    for (const g of ancestors) radius *= maxAbsScale(g);
+    radius += BOUND_EPS;
+    this.set(base + 5, ...center, radius);
+    if (image) {
+      const round = Math.max(0, layer.image?.round ?? 0);
+      const layerIdx = layer.image ? this.opts.imageLayer(layer.image.sdf) : 0;
+      this.set(base + 6, round, w > 0.5 ? 1 : 0, layerIdx, layer.image ? 1 : 0);
+    }
+    this.markIndex.set(layer.id, (base + 4) * 4 + 2);
+    this.leafIds.push(layer.id);
+    return { kind: "leaf", layer, base, cull, pickId: this.leafIds.length, center, radius };
+  }
+
+  /**
+   * Postorder walk mirroring the old instruction packer: an item may be culled
+   * to its bounding sphere only when every op consuming it — here and above —
+   * is hard union (sphere distance is a lower bound; only min() keeps the
+   * zero set identical).
+   */
+  items(items: SceneItem[], ctx: BakeCtx, ancestors: ObjectGroup[], unionAbove: boolean): IrNode[] {
+    const list = items.filter(itemContributes);
+    const out: IrNode[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      let cull = unionAbove;
+      if (cull && i > 0 && item.op !== "union") cull = false;
+      if (cull) {
+        for (let j = i + 1; j < list.length; j++) {
+          if (list[j].op !== "union") {
+            cull = false;
+            break;
+          }
+        }
+      }
+      if (item.kind === "layer") {
+        out.push(this.leaf(item, ctx, ancestors, cull));
+      } else {
+        const base = this.alloc(GROUP_SLOTS);
+        const children = this.items(
+          item.items,
+          composeGroupCtx(ctx, item.position, item.rotation, item.scale),
+          [...ancestors, item],
+          cull,
+        );
+        const sphere = encloseSpheres(children);
+        // Smooth ops bulge the surface outward by at most k/4.
+        let bulge = 0;
+        for (let c = 1; c < children.length; c++) {
+          const child = children[c];
+          if (child.kind === "chunk") continue; // hard union only
+          const op = nodeOp(child);
+          const k = child.kind === "leaf" ? child.layer.smoothK : child.group.smoothK;
+          if (SMOOTH_OPS.has(op)) bulge = Math.max(bulge, Math.abs(k) * 0.25);
+        }
+        const radius = sphere.radius + bulge + BOUND_EPS;
+        this.set(base + MISC, 0, item.smoothK, 0, 0);
+        this.set(base + 1, ...sphere.center, radius);
+        this.markIndex.set(item.id, (base + MISC) * 4 + 2);
+        out.push({ kind: "group", group: item, base, cull, children, center: sphere.center, radius });
+      }
+    }
+    return this.chunkRuns(out);
+  }
+
+  /** Splits long runs of hard-union siblings (never the list head) into chunks. */
+  chunkRuns(list: IrNode[]): IrNode[] {
+    const out: IrNode[] = list.slice(0, 1);
+    let i = 1;
+    while (i < list.length) {
+      let j = i;
+      while (j < list.length && nodeOp(list[j]) === "union") j++;
+      if (j - i >= CHUNK_MIN_RUN) {
+        out.push(...this.chunk(list.slice(i, j)));
+        i = j;
+      } else {
+        out.push(list[i]);
+        i++;
+      }
+    }
+    return out;
+  }
+
+  chunk(run: IrNode[]): IrNode[] {
+    if (run.length < CHUNK_MIN_RUN) return run;
+    const chunks: IrNode[] = [];
+    for (let i = 0; i < run.length; i += CHUNK_SIZE) {
+      const members = run.slice(i, i + CHUNK_SIZE);
+      if (members.length === 1) {
+        chunks.push(members[0]);
+        continue;
+      }
+      const base = this.alloc(1);
+      const sphere = encloseSpheres(members);
+      this.set(base, ...sphere.center, sphere.radius + BOUND_EPS);
+      chunks.push({ kind: "chunk", base, members, center: sphere.center, radius: sphere.radius + BOUND_EPS });
+    }
+    return this.chunk(chunks);
+  }
+}
+
+// ── WGSL emission ────────────────────────────────────────────────────────────
+
+const f = (n: number) => (Number.isInteger(n) ? `${n}.0` : `${n}`);
+
+/** Generated function names that must not collide with TypeGPU's. */
+const PRIMITIVE_HELPERS = (() => {
+  const names = new Set<string>();
+  for (const t of ALL_SHAPE_TYPES) {
+    for (const m of WGSL_HELPERS[t].matchAll(/fn (\w+)\(/g)) names.add(m[1]);
+  }
+  return names;
+})();
+
+function prefixHelpers(src: string): string {
+  return src.replace(/\b([A-Za-z_]\w*)\b/g, (m) => (PRIMITIVE_HELPERS.has(m) ? `ds_${m}` : m));
+}
+
+const D = DATA_IDENT;
+const slot = (i: number) => `${D}[${i}]`;
+const CALL_SYNTAX = {
+  vec2: (x: string, y: string) => `vec2f(${x}, ${y})`,
+  vec3: (x: string, y: string, z: string) => `vec3f(${x}, ${y}, ${z})`,
+};
+
+function leafExpr(node: LeafNode): string {
+  const b = node.base;
+  const lp = `ds_xf(p, ${b}u)`;
+  const P = slot(b + 3);
+  let call: string;
+  if (node.layer.shapeType === "image") {
+    call = `ds_sdImage(${lp}, ${P}, ${slot(b + 6)})`;
+  } else {
+    const params = [`${P}.x`, `${P}.y`, `${P}.z`, `${P}.w`] as const;
+    // Prefer a swizzle when a primitive takes the first three params as a vector.
+    call = primitiveCall(node.layer.shapeType, lp, params, {
+      ...CALL_SYNTAX,
+      vec3: (x, y, z) =>
+        x === params[0] && y === params[1] && z === params[2] ? `${P}.xyz` : CALL_SYNTAX.vec3(x, y, z),
+      vec2: (x, y) => (x === params[0] && y === params[1] ? `${P}.xy` : CALL_SYNTAX.vec2(x, y)),
+    });
+    call = `ds_${call}`;
+  }
+  return `${call} * ${slot(b + 4)}.x`;
+}
+
+function combine(op: OpType, a: string, b: string, k: string): string {
+  switch (op) {
+    case "union":
+      return `min(${a}, ${b})`;
+    case "subtract":
+      return `max(${a}, -${b})`;
+    case "intersect":
+      return `max(${a}, ${b})`;
+    case "sUnion":
+      return `ds_smin(${a}, ${b}, ${k})`;
+    case "sSubtract":
+      return `-ds_smin(-${a}, ${b}, ${k})`;
+    case "sIntersect":
+      return `-ds_smin(-${a}, -${b}, ${k})`;
+  }
+}
+
+class Emitter {
+  lines: string[] = [];
+  private n = 0;
+
+  constructor(private info: boolean) {}
+
+  fresh(prefix: string) {
+    return `${prefix}${this.n++}`;
+  }
+
+  push(depth: number, line: string) {
+    this.lines.push("  ".repeat(depth) + line);
+  }
+
+  /**
+   * Emits the CSG fold of `nodes`; returns the accumulator variable.
+   *
+   * Union-like children are gated by their bounding sphere against the
+   * running result: union = min(acc, b) equals acc whenever b ≥ acc, and
+   * b ≥ (distance to b's sphere), so a child whose sphere is farther than
+   * acc cannot change the result (sUnion: farther than acc + k). Returning
+   * acc there is still a lower bound of the true distance, and near the
+   * child's surface its sphere distance is small, so the zero set is exact.
+   * This turns a flat list of N shapes into N cheap sphere tests plus the
+   * few shapes actually near the ray. The info pass widens the gate by the
+   * glow band so highlights and picking still see every nearby node.
+   */
+  nodes(nodes: IrNode[], depth: number): string {
+    const acc = this.fresh("a");
+    const head = nodes[0];
+    if (head.kind === "chunk") throw new Error("chunk cannot head a list");
+    this.push(depth, `var ${acc} = ${this.node(head, depth, head.cull)};`);
+    for (let i = 1; i < nodes.length; i++) this.combineInto(acc, nodes[i], depth);
+    return acc;
+  }
+
+  combineInto(acc: string, node: IrNode, depth: number) {
+    const op = nodeOp(node);
+    if (op !== "union" && op !== "sUnion") {
+      if (node.kind === "chunk") throw new Error("chunks are hard union");
+      const v = this.node(node, depth, false);
+      const k = `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
+      this.push(depth, `${acc} = ${combine(op, acc, v, k)};`);
+      return;
+    }
+    const k = node.kind === "chunk" ? "" : `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
+    let gate = acc;
+    if (op === "sUnion") gate += ` + ${k}`;
+    if (this.info) gate += ` + ${f(GLOW_BAND_HI)}`;
+    this.push(depth, `if (ds_bound(p, ${boundSlotOf(node)}u) < ${gate}) {`);
+    if (node.kind === "chunk") {
+      for (const m of node.members) this.combineInto(acc, m, depth + 1);
+    } else {
+      const v = this.node(node, depth + 1, false);
+      this.push(depth + 1, `${acc} = ${combine(op, acc, v, k)};`);
+    }
+    this.push(depth, `}`);
+  }
+
+  /**
+   * One node's value. `cull`: every op from here to the root is hard union,
+   * so beyond CULL_DIST the sphere distance itself may stand in (used for
+   * the first child of a list, which has no running result to gate on).
+   */
+  node(node: LeafNode | GroupNode, depth: number, cull: boolean): string {
+    const v = this.fresh("v");
+    const boundSlot = boundSlotOf(node);
+    if (cull) {
+      this.push(depth, `var ${v} = ds_bound(p, ${boundSlot}u);`);
+      this.push(depth, `if (${v} <= ${f(CULL_DIST)}) {`);
+      this.push(depth + 1, `${v} = ${this.value(node, depth + 1)};`);
+      this.push(depth, `}`);
+    } else {
+      this.push(depth, `let ${v} = ${this.value(node, depth)};`);
+    }
+    if (this.info) {
+      const markSlot = node.kind === "leaf" ? node.base + 4 : node.base;
+      if (node.kind === "leaf") {
+        this.push(depth, `ds_markLeaf(&info, ${v}, ${slot(markSlot)}.z, ${f(node.pickId)});`);
+      } else {
+        this.push(depth, `ds_mark(&info, ${v}, ${slot(markSlot)}.z);`);
+      }
+    }
+    return v;
+  }
+
+  /** Full value expression; groups emit their children first. */
+  value(node: LeafNode | GroupNode, depth: number): string {
+    if (node.kind === "leaf") return leafExpr(node);
+    return this.nodes(node.children, depth);
+  }
+}
+
+const RUNTIME_WGSL = `fn ds_xf(p: vec3f, i: u32) -> vec3f {
+  let a = ${D}[i];
+  let b = ${D}[i + 1u];
+  let c = ${D}[i + 2u];
+  return vec3f(dot(a.xyz, p) + a.w, dot(b.xyz, p) + b.w, dot(c.xyz, p) + c.w);
+}
+
+fn ds_bound(p: vec3f, i: u32) -> f32 {
+  let s = ${D}[i];
+  return length(p - s.xyz) - s.w;
+}
+
+fn ds_smin(a: f32, b: f32, kIn: f32) -> f32 {
+  let k = max(kIn, 1e-6);
+  let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// info.x = glow, info.y = pick id, info.z = |d| of the picked leaf.
+fn ds_mark(info: ptr<function, vec4f>, d: f32, strength: f32) {
+  let glow = strength * (1.0 - smoothstep(${f(GLOW_BAND_LO)}, ${f(GLOW_BAND_HI)}, abs(d)));
+  (*info).x = max((*info).x, glow);
+}
+
+fn ds_markLeaf(info: ptr<function, vec4f>, d: f32, strength: f32, id: f32) {
+  ds_mark(info, d, strength);
+  if (abs(d) < (*info).z) {
+    (*info).z = abs(d);
+    (*info).y = id;
+  }
+}
+
+// Baked image SDF (src/utils/imageSdf.ts): r16float texel t = d_px / RES.
+// P = (half size, half thickness, bold, _), X = (round, invert, layer, has image).
+fn ds_sdImage(q: vec3f, P: vec4f, X: vec4f) -> f32 {
+  if (X.w < 0.5) { return 1e10; }
+  // Viewport camera sits at -Z with screen-up = world -Y, so image row 0
+  // (top) maps to -Y and the logo reads upright from the default view.
+  let uv = q.xy * (0.5 / P.x) + vec2f(0.5);
+  let t = textureSampleLevel(${IMAGE_TEX_IDENT}, ${IMAGE_SAMPLER_IDENT}, uv, i32(X.z), 0.0).x;
+  return ds_sdImageField(q, t, P.x, P.y, P.z, X.x, X.y);
+}`;
+
+/** Every helper is emitted: unused WGSL functions cost nothing at runtime. */
+const HELPERS_WGSL = [
+  ...ALL_SHAPE_TYPES.map((t) => prefixHelpers(WGSL_HELPERS[t])),
+  RUNTIME_WGSL,
+].join("\n\n");
+
+export function compileScene(root: SceneRoot, opts: CompileOptions): CompiledScene {
+  const builder = new Builder(opts);
+  const ir = builder.items(root.items, identityCtx(), [], true);
+
+  const sdf = new Emitter(false);
+  const sdfAcc = ir.length > 0 ? sdf.nodes(ir, 1) : "";
+  const info = new Emitter(true);
+  if (ir.length > 0) info.nodes(ir, 1);
+
+  const code = [
+    HELPERS_WGSL,
+    `fn ds_sdScene(p: vec3f) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc || "1e10"};\n}`,
+    `fn ds_sceneInfo(p: vec3f) -> vec4f {\n  var info = vec4f(0.0, 0.0, 1e9, 0.0);\n${info.lines.join("\n")}\n  return info;\n}`,
+  ].join("\n\n");
+
+  if (builder.slots > DATA_SLOTS) {
+    throw new Error(`scene needs ${builder.slots} data slots (max ${DATA_SLOTS})`);
+  }
+
+  return {
+    code,
+    values: new Float32Array(builder.values),
+    slotCount: builder.slots,
+    leafIds: builder.leafIds,
+    markIndex: builder.markIndex,
+    boundsRadius: sceneBoundRadius(root.items) + 0.05,
+  };
+}
+
+/** Slots a tree needs — the hard cap behind `validateRoot`. */
+export function countDataSlots(items: SceneItem[]): number {
+  const builder = new Builder({ imageLayer: () => 0 });
+  builder.items(items, identityCtx(), [], true);
+  return builder.slots;
+}
