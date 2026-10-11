@@ -83,6 +83,8 @@ Text layers are image layers (`shapeType: "image"`) whose `image.text` (`src/uti
 - Materials are values (leaf slots `MAT`, `MAT+1`), never code. They travel through the CSG only in the info pass: union/intersect take the winner, smooth ops blend with the smooth-min weight, subtract keeps the body's material. The export's `generateMaterialCode` must follow the same rules.
 - Render mode is a pipeline slot (`renderModeSlot`), not a uniform: each mode is its own cached program, so unused modes cost nothing. Programs are keyed by `mode + code`.
 - Fetch the scene info / material **after** march loops (shadow, AO, reflection). Holding it across a loop that inlines the scene SDF cost 2–4× frame time in crowded scenes.
+- **One scene-SDF call site per loop.** Every call inlines the whole generated scene; a second call inside a march loop (Volume's light probe) made crowded scenes ~8× slower. Alternate what one call evaluates instead (`renderVolume`'s `probing`), and fetch materials after the loop.
+- Modes: Looks `classic`, `chrome`, `studio`, `neon`, `volume` (all exportable: `renderTemplates.ts` mirrors them, emitting only the chosen style's code; `VOLUME_EDGE` / `VOLUME_STEP` and the volume noise are shared numbers) and Inspect `field` (distance isolines on the slice `SceneUniforms.sliceY`, was `_pad2`), `cost` (steps heatmap), `normals` — editor only; the embed falls back to Classic. Unknown stored modes fall back to Classic (`renderStore` merge). Picking always uses the surface march, whatever the mode.
 
 ### 2c. Modifiers
 

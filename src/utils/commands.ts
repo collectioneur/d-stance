@@ -9,6 +9,7 @@ import {
 } from "../store/sceneStore";
 import { duplicateSelection } from "../scene/clipboard";
 import { showToast } from "./toast";
+import type { RenderMode } from "../store/renderStore";
 import { isImageFile } from "./decodeImage";
 import { DEFAULT_TEXT, TEXT_PARAMS, bakeText, textLayerName } from "./textSdf";
 
@@ -66,10 +67,15 @@ export const GIZMO_ICONS = {
   rotate: shapeIcon("gizmoRotate"),
   scale: shapeIcon("gizmoScale"),
 };
-export const RENDER_MODE_ICONS = {
+export const RENDER_MODE_ICONS: Record<RenderMode, IconComponent> = {
   classic: shapeIcon("renderClassic"),
   chrome: shapeIcon("renderChrome"),
   studio: shapeIcon("renderStudio"),
+  neon: shapeIcon("renderNeon"),
+  volume: shapeIcon("renderVolume"),
+  field: shapeIcon("renderField"),
+  cost: shapeIcon("renderCost"),
+  normals: shapeIcon("renderNormals"),
 };
 
 function shapeEntry(type: ShapeType) {

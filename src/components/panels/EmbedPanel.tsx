@@ -18,6 +18,8 @@ const LOOKS: Choice<ExportLook>[] = [
   { value: "classic", label: "Classic" },
   { value: "chrome", label: "Chrome" },
   { value: "studio", label: "Studio" },
+  { value: "neon", label: "Neon" },
+  { value: "volume", label: "Volume" },
 ];
 const BACKGROUNDS: Choice<ExportBackground>[] = [
   { value: "studio", label: "Studio" },
