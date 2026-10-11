@@ -54,7 +54,7 @@ A shape is not registered until **all** of these know it, with the same key:
 - `e2e/scenes.ts` `SHAPES` (render tests) and `src/test/fixtures.ts` `kitchenSink` (codegen snapshot + compile test).
 - `RightPanel.tsx` `SIZE_FIELDS` (inspector fields per param).
 
-Two shapes are special: `image` (texture sampling, per-language wrappers) and `formula` (no static source — `src/sdf/formula.ts` parses the user's `formula` string and emits one function per distinct source in every language). Both are excluded from `primitiveCall`. Terrain samples `terrainHeight` from the shared noise sources (`NOISE_*` in primitives.ts, emitted before shapes because GLSL needs declaration order).
+Three shapes are special: `image` (texture sampling, per-language wrappers), `formula` (no static source — `src/sdf/formula.ts` parses the user's `formula` string and emits one function per distinct source in every language) and `stroke` (sculpted polylines, see 2h). All are excluded from `primitiveCall`. Terrain samples `terrainHeight` from the shared noise sources (`NOISE_*` in primitives.ts, emitted before shapes because GLSL needs declaration order).
 
 ### 2. Compiled scene
 
@@ -76,6 +76,13 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 ### 2g. Text
 
 Text layers are image layers (`shapeType: "image"`) whose `image.text` (`src/utils/textSdf.ts`) records what they were baked from: words, font, weight, italic, spacing, align. `bakeTextSdf` lays the lines out by their ink inside the padded square at `MASK_SDF_SIZE` and goes through `encodeMaskSdf` (the same EDT + PNG as image import), so GPU, export, Shadertoy dropping and the `MAX_IMAGES` cap treat text exactly like an image. The baked `image.sdf` stays the source of truth (persisted; other machines may lack a font); `image.text` is only for re-editing. Fonts: Inter / JetBrains Mono ship with the app; custom families are whitelisted by `customFamily`.
+
+### 2h. Sculpt strokes
+
+- `stroke` layers hold `stroke.points` (x, y, z, radius per point, layer-local; radius ≤ 0 is a break, placed on the next line's start). The SDF is a union of tapered capsules, evaluated per `STROKE_CHUNK` segments behind chunk bounding spheres (`src/sdf/stroke.ts`: `packStroke` = chunk spheres then points). CPU reference: `strokeDistance`; next to a break a segment is a sphere on its live end — every implementation (CPU, `ds_strokeSeg`, `STROKE_HELPERS`) must agree.
+- Editor: the compiler appends each stroke's packed data to `CompiledScene.strokes` (read-only storage `dsStroke`, `MAX_STROKE_DATA` vec4s, checked by `validateRoot`) and writes `(chunk base, chunks, point base, points)` into the leaf's extra slot. Offsets are **data**: painting never recompiles. Strokes get a `limit` (union: acc + k, subtract: k − acc) and stop searching past it — exact for those ops, ~3× faster on heavy sculpts. Exports pass the same bound (`combineLimit`) and embed the points as constant arrays.
+- Sculpt tool (`src/scene/sculpt.ts`, `useBrushStore`): a stroke on a shape wraps it into an object (group) with the shape's position/rotation; strokes append to the last stroke layer while the brush mode and mirror match. The in-progress line is a preview layer (`PREVIEW_STROKE_ID`) that the depth pick skips (`SceneUniforms.skipLeaf`, compared per stroke leaf) so a stroke never stacks on itself; the end merges it (`finishLine`: RDP, taper, rounding) as one undo step. Depth comes from `PICK_PASS_DEPTH` (24 bit, `PICK_DEPTH_RANGE`) plus the CPU camera ray (`computeCameraRayFromClient`).
+- Strokes run one after another (`strokeChain`); sculpt store updates are "quiet" for the spawn animation, and the spawn animation never animates a restructure (a new group holding existing items, or the reverse).
 
 ### 2a. Materials and render modes
 
@@ -141,7 +148,7 @@ Scale below `MIN_SCALE` (0.01) is illegal — divide-by-zero in the bake.
 
 ### 4. Persistence
 
-`SCHEMA_VERSION = 12` (v4–v11 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`, v11 optional `interaction` reactions, v12 optional `image.text`). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
+`SCHEMA_VERSION = 13` (v4–v12 still accepted: strict subsets; v6 added optional `image.round`, v7 optional `material`, v8 optional `modifiers`, v9 terrain / gyroid / formula shapes and the noise modifier, v10 optional `animation` tracks and noise `speed`, v11 optional `interaction` reactions, v12 optional `image.text`, v13 the `stroke` shape). Stored in `location.hash` (base64 JSON) and `localStorage` key `d-stance_scene`. Image layers embed their SDF PNG (`image.sdf`, ~15–40 KB each) in the hash; `normalizePersisted` drops image layers whose `sdf` fails `isImageSdfDataUrl`.
 
 - Hash/LS is a **trust boundary**. Users and old links can send missing/hostile fields.
 - New persisted field → bump `SCHEMA_VERSION` **and** teach `normalizePersisted` a default. Old blobs with the wrong `v` are dropped (`null`), not partially applied.
@@ -160,6 +167,7 @@ Losing a scene is data loss. Treat persist mistakes like a security bug.
 | `MAX_IMAGES` | 8 | Distinct image SDFs per scene (texture array layers) |
 | `MAX_TRACKS` / `MAX_REACTIONS` | 8 / 8 | Animation tracks / interaction reactions per item |
 | `MAX_INTERACTIVE` | 64 | Items with hover / click states per embed (pick id is one byte) |
+| `MAX_STROKE_POINTS` / `MAX_STROKE_DATA` | 1024 / 16384 | Points per stroke layer / vec4s of all strokes (points + chunk spheres) |
 
 UI toasts exist for cap / cycle / depth. Do not raise a cap in one file and leave the others.
 

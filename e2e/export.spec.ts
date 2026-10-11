@@ -10,12 +10,12 @@ test("exported WGSL and GLSL compile for every shape and op", async ({ page }) =
   const result = await page.evaluate(async () => {
     const { generateSdfCode } = await import("/src/utils/generateSdfCode.ts");
     const { kitchenSink } = await import("/src/test/fixtures.ts");
-    const { modifiersScene, infiniteScene, animationScene } = await import("/e2e/scenes.ts");
+    const { modifiersScene, infiniteScene, animationScene, sculptScene } = await import("/e2e/scenes.ts");
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter!.requestDevice();
     const wgslErrors: string[] = [];
     const glslErrors: string[] = [];
-    for (const root of [kitchenSink(), modifiersScene(), infiniteScene(), animationScene()]) {
+    for (const root of [kitchenSink(), modifiersScene(), infiniteScene(), animationScene(), sculptScene()]) {
     const out = generateSdfCode(root as never, null);
     const fn = out.fnName;
     const t = out.animated ? ", 1.25" : "";

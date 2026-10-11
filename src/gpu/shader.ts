@@ -2,9 +2,11 @@ import { tgpu, d, std } from "typegpu";
 import { fullScreenTriangle } from "typegpu/common";
 import { MAX_IMAGES } from "../store/sceneStore";
 import { IMAGE_SDF_RES } from "../utils/imageSdf";
+import { MAX_STROKE_DATA } from "../sdf/stroke";
 import {
   DATA_IDENT,
   DATA_SLOTS,
+  STROKE_IDENT,
   SCENE_IDENT,
   IMAGE_SAMPLER_IDENT,
   IMAGE_TEX_IDENT,
@@ -25,7 +27,7 @@ const CameraUniforms = d.struct({
 
 const SceneUniforms = d.struct({
   boundsRadius: d.f32, // conservative world-space bounding sphere of scene
-  _pad0: d.u32,
+  skipLeaf: d.u32, // pick id of a stroke leaf to leave out (sculpt depth pick), 0 = none
   selectAll: d.u32, // 1 = scene root selected: every surface glows
   time: d.f32, // animation clock (seconds): formulas `t`, noise flow
   boundsCenter: d.vec3f,
@@ -78,6 +80,13 @@ const REST_HIT_EPS = 0.01;
 export const PICK_PASS_SCENE = 1;
 /** Pick pass: ray-march translate gizmo, output axis id 1/2/3 in R. */
 export const PICK_PASS_GIZMO = 2;
+/**
+ * Pick pass: distance along the ray to the scene surface, 24 bit over
+ * [0, PICK_DEPTH_RANGE): low byte in R and B, high in G, middle in A (so
+ * BGRA and RGBA read the same). 0 = nothing hit. Sculpting reads it.
+ */
+export const PICK_PASS_DEPTH = 3;
+export const PICK_DEPTH_RANGE = 64;
 
 /** Cheap lit shading (no reflection bounce, iteration-based AO). */
 export const RENDER_MODE_CLASSIC = 0;
@@ -129,7 +138,7 @@ export function createShader(root: TgpuRoot) {
   });
   const sceneUniforms = root.createUniform(SceneUniforms, {
     boundsRadius: 0,
-    _pad0: 0,
+    skipLeaf: 0,
     selectAll: 0,
     time: 0,
     boundsCenter: d.vec3f(0, 0, 0),
@@ -160,6 +169,8 @@ export function createShader(root: TgpuRoot) {
 
   /** Every number of the compiled scene (see sceneCompiler.ts). */
   const sceneData = root.createUniform(d.arrayOf(d.vec4f, DATA_SLOTS));
+  /** Sculpt strokes of the compiled scene (CompiledScene.strokes), read-only storage. */
+  const strokeData = root.createReadonly(d.arrayOf(d.vec4f, MAX_STROKE_DATA));
 
   // Baked 2D SDFs of imported images, one array layer per distinct image.
   // r16float texel t (= d_px / RES) ⇒ distance = t · (2 · halfSize).
@@ -920,6 +931,7 @@ export function createShader(root: TgpuRoot) {
     const pickPass = pickUniforms.$.pickPass;
     const isScenePickPass = pickPass === d.u32(PICK_PASS_SCENE);
     const isGizmoPickPass = pickPass === d.u32(PICK_PASS_GIZMO);
+    const isDepthPickPass = pickPass === d.u32(PICK_PASS_DEPTH);
     const sampleUv = d.vec2f(uv.x, uv.y);
     const uvn = sampleUv * 2.0 - d.vec2f(1.0, 1.0);
     const uvCorrected = d.vec2f(uvn.x * cameraUniforms.$.aspect, uvn.y);
@@ -976,12 +988,13 @@ export function createShader(root: TgpuRoot) {
     let sceneResult = d.vec2f(RAY_MISS_T + 10.0, 0.0);
     if (
       isScenePickPass ||
+      isDepthPickPass ||
       (renderModeSlot.$ !== RENDER_MODE_VOLUME && renderModeSlot.$ !== RENDER_MODE_NEON)
     ) {
       sceneResult = rayMarch(ro, rd);
     }
     let neon = d.vec4f(RAY_MISS_T + 10.0, 0.0, 0.0, 0.0);
-    if (!isScenePickPass && renderModeSlot.$ === RENDER_MODE_NEON) {
+    if (!isScenePickPass && !isDepthPickPass && renderModeSlot.$ === RENDER_MODE_NEON) {
       neon = rayMarchNeon(ro, rd);
       sceneResult = d.vec2f(neon.x, neon.w);
     }
@@ -998,6 +1011,18 @@ export function createShader(root: TgpuRoot) {
       const hi = std.floor(id / 256.0);
       const lo = (id - hi * 256.0) / 255.0;
       return d.vec4f(lo, hi / 255.0, lo, 1.0);
+    }
+
+    if (isDepthPickPass) {
+      if (tScene > RAY_MISS_T) {
+        return d.vec4f(0.0, 0.0, 0.0, 0.0);
+      }
+      // 1 + t scaled to 24 bits (0 stays "nothing hit").
+      const v = d.u32(std.clamp(tScene / PICK_DEPTH_RANGE, 0.0, 1.0) * 16777214.0) + d.u32(1);
+      const lo = d.f32(v & d.u32(255)) / 255.0;
+      const mid = d.f32((v >> d.u32(8)) & d.u32(255)) / 255.0;
+      const hi = d.f32(v >> d.u32(16)) / 255.0;
+      return d.vec4f(lo, hi, lo, mid);
     }
 
     const sceneHit = tScene <= RAY_MISS_T;
@@ -1198,6 +1223,7 @@ export function createShader(root: TgpuRoot) {
   function createScenePipeline(code: string, renderMode: number) {
     const decl = tgpu["~unstable"].declare(code).$uses({
       [DATA_IDENT]: sceneData,
+      [STROKE_IDENT]: strokeData,
       [SCENE_IDENT]: sceneUniforms,
       [IMAGE_TEX_IDENT]: imageSdfView,
       [IMAGE_SAMPLER_IDENT]: imageSdfSampler,
@@ -1231,6 +1257,7 @@ export function createShader(root: TgpuRoot) {
     pickUniforms,
     qualityUniforms,
     sceneData,
+    strokeData,
     imageSdfTexture,
   };
 }

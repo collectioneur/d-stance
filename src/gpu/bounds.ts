@@ -1,4 +1,5 @@
 import type { ObjectGroup, SceneItem, ShapeLayer } from "../store/sceneStore";
+import { strokeBoundRadius } from "../sdf/stroke";
 
 /** Conservative shape bound radius in its own local space (rotation-invariant). */
 export function shapeBoundRadius(layer: ShapeLayer): number {
@@ -27,6 +28,10 @@ export function shapeBoundRadius(layer: ShapeLayer): number {
     case "gyroid":
     case "formula":
       r = a * Math.sqrt(3);
+      break;
+    case "stroke":
+      // Points sit around the layer origin; thickness scales every radius.
+      r = strokeBoundRadius(layer.stroke) * Math.max(1, a);
       break;
     case "image":
       // 2D field is clamped to the [-a, a]² square, so bold can't escape it.

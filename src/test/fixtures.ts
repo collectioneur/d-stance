@@ -29,6 +29,7 @@ export function shape(
     ...(opts.formula ? { formula: opts.formula } : {}),
     ...(opts.animation ? { animation: opts.animation } : {}),
     ...(opts.interaction ? { interaction: opts.interaction } : {}),
+    ...(opts.stroke ? { stroke: opts.stroke } : {}),
   };
 }
 
@@ -121,5 +122,6 @@ export function kitchenSink(): SceneRoot {
     shape("gyroid", { id: "gy", modifiers: [{ kind: "noise", amplitude: 0.02, scale: 8, octaves: 3, seed: 2 }] }),
     shape("formula", { id: "fo", formula: "smin(length(x, y, z) - 0.3, y + 0.1, 0.1) + 0.02*fbm(x*4, y*4, z*4) - atan2(x, z)*0" }),
     shape("image", { id: "im", image: { sdf: FAKE_IMAGE_SDF, round: 0.02 } }),
+    shape("stroke", { id: "st", op: "sUnion", smoothK: 0.03, stroke: { points: [0, 0, 0, 0.05, 0.1, 0.05, 0, 0.06, 0.2, 0.05, 0.05, 0.04, 0.2, 0.05, 0.05, 0, 0.3, 0, 0, 0.05] } }),
   ]);
 }

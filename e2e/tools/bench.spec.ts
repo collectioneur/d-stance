@@ -4,7 +4,7 @@
  */
 import { test } from "@playwright/test";
 import { openEditor, waitForFrames } from "../helpers";
-import { animationScene, crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene, noiseScene } from "../scenes";
+import { animationScene, sculptScene, crowdScene, allShapesScene, csgScene, infiniteScene, modifiersScene, noiseScene } from "../scenes";
 
 /** Every shape of a crowd floating out of step: per-frame CPU evaluation + uniform upload. */
 function animatedCrowd(count: number) {
@@ -24,7 +24,27 @@ const scenes: [string, () => unknown][] = [
   ["noise", noiseScene],
   ["anim", animationScene],
   ["animCrowd120", () => animatedCrowd(120)],
+  ["sculpt", sculptScene],
+  ["sculptHeavy", heavySculpt],
 ];
+
+/** A ball under six 600-point clay spirals (3600 stroke points). */
+function heavySculpt() {
+  const root = sculptScene() as { items: { items?: Record<string, unknown>[] }[] };
+  const obj = root.items[0].items!;
+  for (let k = 0; k < 6; k++) {
+    const pts: number[] = [];
+    for (let i = 0; i < 600; i++) {
+      const t = i / 599;
+      const a = t * Math.PI * 10 + k;
+      const y = -0.4 + t * 0.8;
+      const rr = Math.sqrt(Math.max(0.0001, 0.16 - y * y)) + 0.01;
+      pts.push(Math.cos(a) * rr, y, Math.sin(a) * rr, 0.02);
+    }
+    obj.push({ ...obj[1], id: `heavy${k}`, stroke: { points: pts } });
+  }
+  return root;
+}
 const MODES = process.env.BENCH_MODES?.split(",") ?? ["classic", "chrome", "studio"];
 for (const mode of MODES) {
   for (const [name, make] of scenes) {

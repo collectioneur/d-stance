@@ -32,7 +32,8 @@ export type ShapeType =
   | "terrain"
   | "gyroid"
   | "formula"
-  | "image";
+  | "image"
+  | "stroke";
 export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract" | "sIntersect";
 
 import type { Material } from "./material";
@@ -40,6 +41,7 @@ import type { Modifier } from "./modifiers";
 import type { Track } from "./animation";
 import type { Reaction } from "./interaction";
 import type { TextSpec } from "../utils/textSdf";
+import { MAX_STROKE_DATA, strokeChunkCount, strokeCount, type Stroke } from "../sdf/stroke";
 export type { Material } from "./material";
 export type { Track } from "./animation";
 export type { Reaction } from "./interaction";
@@ -71,6 +73,8 @@ export type ShapeLayer = {
   animation?: Track[];
   /** Reactions to hover / click / pointer (src/store/interaction.ts). */
   interaction?: Reaction[];
+  /** Only for shapeType "stroke": sculpted polylines (src/sdf/stroke.ts). */
+  stroke?: Stroke;
 };
 
 export type ObjectGroup = {
@@ -144,6 +148,7 @@ const DEFAULT_PARAMS: Record<ShapeType, [number, number, number, number]> = {
   gyroid: [0.4, 0.25, 0.02, 0], // half size, cell size, wall thickness
   formula: [0.5, 0.5, 0, 0], // half size of the clip cube, safety (field → distance factor)
   image: [0.5, 0.1, 0, 0], // half size, half thickness, bold, invert (0/1)
+  stroke: [1, 0, 0, 0], // thickness (scales every point's radius)
 };
 
 const TYPE_LABEL: Record<ShapeType, string> = {
@@ -173,6 +178,7 @@ const TYPE_LABEL: Record<ShapeType, string> = {
   gyroid: "Gyroid",
   formula: "Formula",
   image: "Image",
+  stroke: "Stroke",
 };
 
 export const ALL_SHAPE_TYPES = Object.keys(TYPE_LABEL) as ShapeType[];
@@ -232,6 +238,19 @@ export function collectImageSdfs(items: SceneItem[], out = new Set<string>()): S
   return out;
 }
 
+/** vec4 slots every stroke needs in the GPU stroke buffer (points + chunk spheres). */
+export function strokeDataSize(items: SceneItem[]): number {
+  let n = 0;
+  for (const item of items) {
+    if (item.kind === "group") n += strokeDataSize(item.items);
+    else if (item.shapeType === "stroke") {
+      const count = strokeCount(item.stroke);
+      n += count + strokeChunkCount(count);
+    }
+  }
+  return n;
+}
+
 export function wouldExceedImages(root: SceneRoot, sdf: string): boolean {
   const used = collectImageSdfs(root.items);
   return !used.has(sdf) && used.size >= MAX_IMAGES;
@@ -246,6 +265,7 @@ export function validateRoot(root: SceneRoot): InsertRejectReason | null {
   if (countInstructions(root.items) > MAX_INSTRUCTIONS) return "cap";
   if (maxGroupDepth(root.items) > MAX_TRANSFORM_DEPTH) return "depth";
   if (collectImageSdfs(root.items).size > MAX_IMAGES) return "images";
+  if (strokeDataSize(root.items) > MAX_STROKE_DATA) return "cap";
   return null;
 }
 
@@ -517,7 +537,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula" | "animation" | "interaction"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers" | "formula" | "animation" | "interaction" | "stroke"
       >
     >,
   ) => void;

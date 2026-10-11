@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bakeTestImage, box, canvasShot, imageDiff, openEditor, openHtml, sphere, waitForProgram } from "./helpers";
-import { csgScene, modifiersScene } from "./scenes";
+import { csgScene, modifiersScene, sculptScene } from "./scenes";
 
 type Opts = { style: "classic" | "chrome" | "studio" | "neon" | "volume"; background: "studio" | "transparent"; motion: "still"; quality: "fast" | "balanced" | "best" };
 const VIEW = { rotX: 0.3, rotY: 0.4, distance: 2.5 };
@@ -76,6 +76,7 @@ test.describe("embed export", () => {
       ["studio", lift(modifiersScene().items)],
       ["neon", lift(csgScene().items)],
       ["volume", lift(csgScene().items)],
+      ["studio", lift(sculptScene().items)],
     ] as const) {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);
       await openEditor(page, lifted as never);

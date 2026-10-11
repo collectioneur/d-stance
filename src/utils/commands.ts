@@ -10,6 +10,7 @@ import {
 import { duplicateSelection } from "../scene/clipboard";
 import { showToast } from "./toast";
 import type { RenderMode } from "../store/renderStore";
+import { useBrushStore } from "../scene/sculpt";
 import { isImageFile } from "./decodeImage";
 import { DEFAULT_TEXT, TEXT_PARAMS, bakeText, textLayerName } from "./textSdf";
 
@@ -54,11 +55,13 @@ export const SHAPE_ICONS: Record<ShapeType, IconComponent> = {
   gyroid: shapeIcon("gyroid"),
   formula: shapeIcon("formula"),
   image: shapeIcon("image"),
+  stroke: shapeIcon("stroke"),
 };
 
 export const GROUP_ICON = shapeIcon("group");
 export const IMAGE_ADD_ICON = shapeIcon("imageAdd");
 export const TEXT_ICON = shapeIcon("text");
+export const SCULPT_ICON = shapeIcon("sculpt");
 export const DUPLICATE_ICON = shapeIcon("duplicate");
 export const COPY_LINK_ICON = shapeIcon("copyLink");
 export const COPIED_ICON = shapeIcon("copied");
@@ -190,6 +193,14 @@ export const COMMANDS: Command[] = [
     keywords: ["shape", "primitive"],
     run: () => addShape(type),
   })),
+  {
+    id: "sculpt",
+    label: "Sculpt (clay & carve brush)",
+    icon: SCULPT_ICON,
+    hotkey: "B",
+    keywords: ["sculpt", "brush", "clay", "carve", "paint", "draw", "stroke", "freeform"],
+    run: () => useBrushStore.getState().setActive(true),
+  },
   {
     id: "add-group",
     label: "Add Object (group)",

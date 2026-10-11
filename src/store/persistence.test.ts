@@ -176,3 +176,21 @@ describe("persistence v12 text", () => {
     expect(decodeHash(blob(11, scene([shape("sphere")])))?.root.items).toHaveLength(1);
   });
 });
+
+describe("persistence v13 strokes", () => {
+  test("strokes keep sanitized points; broken strokes drop; stray stroke fields go", () => {
+    const ok = shape("stroke", { id: "ok", stroke: { points: [0, 0, 0, 0.05, 0.1, 0, 0, 9] } });
+    const bad = { ...shape("stroke", { id: "bad" }), stroke: { points: [0, "x", 0, 1] } };
+    const none = shape("stroke", { id: "none" });
+    const stray = { ...shape("box", { id: "stray" }), stroke: { points: [0, 0, 0, 1] } };
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad as never, none, stray as never])));
+    const items = decoded!.root.items as { id: string; stroke?: { points: number[] } }[];
+    expect(items.map((i) => i.id)).toEqual(["ok", "stray"]);
+    expect(items[0].stroke!.points).toEqual([0, 0, 0, 0.05, 0.1, 0, 0, 5]);
+    expect("stroke" in items[1]).toBe(false);
+  });
+
+  test("v12 blobs still load", () => {
+    expect(decodeHash(blob(12, scene([shape("sphere")])))?.root.items).toHaveLength(1);
+  });
+});

@@ -2,6 +2,8 @@ import { useEffect, type RefObject } from "react";
 import { tgpu, d } from "typegpu";
 import {
   createShader,
+  PICK_DEPTH_RANGE,
+  PICK_PASS_DEPTH,
   PICK_PASS_GIZMO,
   PICK_PASS_SCENE,
   RENDER_MODE_CHROME,
@@ -19,6 +21,7 @@ import {
   findItem,
   topLevelSelection,
   pauseHistory,
+  validateRoot,
   resumeHistory,
   MAX_IMAGES,
   type ObjectGroup,
@@ -29,7 +32,7 @@ import { useGizmoStore } from "../store/gizmoStore";
 import { useRenderStore, type RenderMode } from "../store/renderStore";
 import { DEFAULT_VIEW, useViewStore } from "../store/viewStore";
 import { QUALITY_PRESETS, dprForPreset } from "../utils/quality";
-import { clientToPickPixel, getCanvasAspect } from "./camera";
+import { clientToPickPixel, computeCameraRayFromClient, getCanvasAspect, type Vec3 } from "./camera";
 import {
   applyScaleFactorToItem,
   applyWorldRotationToItem,
@@ -66,6 +69,20 @@ import { compileScene, sceneUsesTime as compileUsesTime, type CompiledScene } fr
 import { evaluateAnimations, hasAnimation } from "../store/animation";
 import { useTimelineStore } from "../store/timelineStore";
 import { useTryStore } from "../store/tryStore";
+import {
+  PREVIEW_STROKE_ID,
+  finishLine,
+  planStroke,
+  useBrushCursor,
+  useBrushStore,
+  withPreviewLine,
+  withStrokeLine,
+  type BrushMode,
+  type StrokePlan,
+} from "../scene/sculpt";
+import { MAX_STROKE_POINTS } from "../sdf/stroke";
+import { sceneFrameSphere } from "../sdf/itemBounds";
+import { showToast } from "../utils/toast";
 import {
   easeToward,
   hasInteraction,
@@ -180,9 +197,13 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         pickUniforms,
         qualityUniforms,
         sceneData,
+        strokeData,
         imageSdfTexture,
       } = shader;
       const sceneDataGpu = root.unwrap(sceneData.buffer);
+      const strokeDataGpu = root.unwrap(strokeData.buffer);
+      /** Last stroke data uploaded (skip the upload when a scene has the same). */
+      let writtenStrokes: Float32Array | null = null;
 
       // ── Compiled scene programs ──
       // Structure → WGSL (sceneCompiler.ts). Each distinct code string gets
@@ -292,11 +313,15 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         if (dataDirty) {
           writeMarks(scene);
           root.device.queue.writeBuffer(sceneDataGpu, 0, scene.values);
+          if (scene.strokes !== writtenStrokes && scene.strokes.length > 0) {
+            root.device.queue.writeBuffer(strokeDataGpu, 0, scene.strokes);
+          }
+          writtenStrokes = scene.strokes;
         }
         const { rootSelected } = useSceneStore.getState();
         sceneUniforms.write({
           boundsRadius: scene.boundsRadius,
-          _pad0: 0,
+          skipLeaf: 0,
           selectAll: rootSelected && scene.leafIds.length > 0 && !useTryStore.getState().trying ? 1 : 0,
           time,
           boundsCenter: d.vec3f(0, 0, 0),
@@ -417,7 +442,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       } | null = null;
 
       function isGizmoVisibleMode(): boolean {
-        if (useTryStore.getState().trying) return false;
+        if (useTryStore.getState().trying || useBrushStore.getState().active) return false;
         const mode = useGizmoStore.getState().mode;
         return mode === "translate" || mode === "rotate" || mode === "scale";
       }
@@ -523,6 +548,16 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         clientX: number,
         clientY: number,
       ): Promise<number | null> {
+        const bytes = await readPickBytes(pickPass, clientX, clientY);
+        return bytes ? readPickIdFromBytes(bytes) : null;
+      }
+
+      /** One pixel of a pick pass, raw RGBA / BGRA bytes. */
+      async function readPickBytes(
+        pickPass: number,
+        clientX: number,
+        clientY: number,
+      ): Promise<Uint8Array | null> {
         const px = clientToPickPixel(clientX, clientY, canvas!);
         const pipeline = active?.program.pipeline;
         if (!px || !pipeline) return null;
@@ -547,9 +582,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         await root.device.queue.onSubmittedWorkDone();
 
         await pickReadbackBuffer.mapAsync(GPUMapMode.READ);
-        const id = readPickIdFromBytes(new Uint8Array(pickReadbackBuffer.getMappedRange()));
+        const bytes = new Uint8Array(pickReadbackBuffer.getMappedRange(0, 4)).slice();
         pickReadbackBuffer.unmap();
-        return id;
+        return bytes;
       }
 
       async function pickGizmoAxisGpu(
@@ -1005,7 +1040,205 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         }
       }
 
+      // ── Sculpt: paint strokes onto surfaces (or into the air) ──
+      type SculptStroke = {
+        /** Set once the first pick lands (input before that waits in `pending`). */
+        plan: StrokePlan | null;
+        rootBefore: SceneRoot | null;
+        /** Local points (x, y, z, r) of this stroke. */
+        line: number[];
+        last: Vec3 | null;
+        /** Ray distance of the last point: the stroke continues at it off the surface. */
+        depth: number;
+        radius: number;
+        /** Cursor samples waiting for their surface pick, oldest first. */
+        pending: { x: number; y: number; pressure: number }[];
+        busy: boolean;
+        /** The button came up (possibly before the stroke got going). */
+        ended: boolean;
+      };
+      /** The stroke under the pointer (input goes here); earlier ones may still be finishing. */
+      let sculpt: SculptStroke | null = null;
+      /** Strokes run one after another: each plans on the scene the previous one left. */
+      let strokeChain: Promise<void> = Promise.resolve();
+      /** The next store change is a live edit: no appear / vanish animation. */
+      let quietRootChange = false;
+      /** Ray distance under the cursor (brush ring size), null off the scene. */
+      let sculptHoverDepth: number | null = null;
+
+      const sculptActive = () => useBrushStore.getState().active && !useTryStore.getState().trying;
+
+      /** Waits for the pick pipeline and runs `fn` with it. */
+      async function withPick<T>(fn: () => Promise<T>): Promise<T | null> {
+        while (pickInProgress) {
+          await new Promise<void>((r) => requestAnimationFrame(() => r()));
+          if (cancelled) return null;
+        }
+        pickInProgress = true;
+        try {
+          return await fn();
+        } finally {
+          pickUniforms.write({ pickPass: 0 });
+          pickInProgress = false;
+        }
+      }
+
+      /** Ray distance to the surface under (x, y); the stroke being painted does not count. */
+      async function depthAt(x: number, y: number): Promise<number | null> {
+        const skip = sculpt ? pickItemIds.indexOf(PREVIEW_STROKE_ID) + 1 : 0;
+        if (skip) sceneUniforms.patch({ skipLeaf: skip });
+        const b = await readPickBytes(PICK_PASS_DEPTH, x, y);
+        if (skip) sceneUniforms.patch({ skipLeaf: 0 });
+        if (!b) return null;
+        // Low byte in R and B, high in G, middle in A (see PICK_PASS_DEPTH).
+        const v = b[0] + b[3] * 256 + b[1] * 65536;
+        return v === 0 ? null : ((v - 1) / 16777214) * PICK_DEPTH_RANGE;
+      }
+
+      function rayAt(x: number, y: number) {
+        const [rx, ry] = getCameraRot();
+        return computeCameraRayFromClient(x, y, canvas!, rx, ry, distance);
+      }
+
+      /** Pen pressure scales the brush; mouse and touch paint at full size. */
+      const pressureScale = (e: PointerEvent) => (e.pointerType === "pen" ? 0.3 + 1.4 * Math.min(1, Math.max(0, e.pressure)) : 1);
+
+      function sculptAddPoint(s: SculptStroke, world: Vec3, radius: number) {
+        const plan = s.plan!;
+        const spacing = radius * 0.3;
+        const from = s.last;
+        const steps = from ? Math.min(32, Math.floor(Math.hypot(world[0] - from[0], world[1] - from[1], world[2] - from[2]) / spacing)) : 1;
+        if (from && steps < 1) return;
+        for (let i = 1; i <= steps; i++) {
+          const k = from ? i / steps : 1;
+          const p: Vec3 = from
+            ? [from[0] + (world[0] - from[0]) * k, from[1] + (world[1] - from[1]) * k, from[2] + (world[2] - from[2]) * k]
+            : world;
+          const local = plan.toLocal(p);
+          s.line.push(local[0], local[1], local[2], radius * plan.localScale);
+        }
+        s.last = world;
+        // Past the layer's room the preview stops growing; the end simplifies the line.
+        if (s.line.length / 4 > MAX_STROKE_POINTS) return;
+        const next = withPreviewLine(plan, s.line);
+        if (!validateRoot(next)) {
+          quietRootChange = true;
+          useSceneStore.setState({ root: next });
+        }
+      }
+
+      async function startSculpt(s: SculptStroke, e: PointerEvent) {
+        const brush = useBrushStore.getState();
+        const mode: BrushMode = e.altKey ? (brush.mode === "clay" ? "carve" : "clay") : brush.mode;
+        const x = e.clientX;
+        const y = e.clientY;
+        const picked = await withPick(async () => ({
+          id: await readPickPixel(PICK_PASS_SCENE, x, y),
+          t: await depthAt(x, y),
+          ids: pickItemIds,
+        }));
+        const ray = rayAt(x, y);
+        if (!picked || !ray) {
+          if (sculpt === s) sculpt = null;
+          return;
+        }
+        const state = useSceneStore.getState();
+        const hitId = picked.t !== null && picked.id ? (picked.ids[picked.id - 1] ?? null) : null;
+        const plan = planStroke(state.root, hitId, { ...brush, mode }, state.selectedContainerId, () => crypto.randomUUID());
+        if (!plan) {
+          if (sculpt === s) sculpt = null;
+          if (mode === "carve" && !hitId) showToast("Carve on a surface");
+          return;
+        }
+        // Off the scene: paint on the plane through the scene center that faces the camera.
+        let t = picked.t;
+        if (t === null) {
+          const sphere = sceneFrameSphere(state.root.items);
+          const c = sphere?.c ?? [0, 0, 0];
+          t = Math.max(0.2, (c[0] - ray.origin[0]) * ray.direction[0] + (c[1] - ray.origin[1]) * ray.direction[1] + (c[2] - ray.origin[2]) * ray.direction[2]);
+        }
+        pauseHistory();
+        s.plan = plan;
+        s.rootBefore = state.root;
+        s.depth = t;
+        const first = s.pending.shift();
+        s.radius = brush.radius * (first?.pressure ?? 1);
+        sculptAddPoint(s, [ray.origin[0] + ray.direction[0] * t, ray.origin[1] + ray.direction[1] * t, ray.origin[2] + ray.direction[2] * t], s.radius);
+        await drainSculpt(s);
+        if (s.ended) await endSculpt(s);
+      }
+
+      async function drainSculpt(s: SculptStroke) {
+        if (!s.plan || s.busy) return;
+        s.busy = true;
+        try {
+          while (s.pending.length > 0) {
+            const { x, y, pressure } = s.pending.shift()!;
+            const t = await withPick(() => depthAt(x, y));
+            const ray = rayAt(x, y);
+            if (!ray) break;
+            // Off the surface the line goes on at the depth it had.
+            const k = t ?? s.depth;
+            if (t !== null) s.depth = t;
+            const r = useBrushStore.getState().radius * pressure;
+            sculptAddPoint(s, [ray.origin[0] + ray.direction[0] * k, ray.origin[1] + ray.direction[1] * k, ray.origin[2] + ray.direction[2] * k], r);
+          }
+        } finally {
+          s.busy = false;
+        }
+      }
+
+      async function endSculpt(s: SculptStroke) {
+        s.ended = true;
+        if (!s.plan) return; // startSculpt finishes it
+        while (s.busy || s.pending.length > 0) {
+          if (!s.busy) await drainSculpt(s);
+          else await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        }
+        if (sculpt === s) sculpt = null;
+        const line = finishLine(s.line, s.radius * s.plan.localScale);
+        const done = line.length >= 4 ? withStrokeLine(s.plan.root, s.plan, line) : null;
+        quietRootChange = true;
+        useSceneStore.setState({ root: done && !validateRoot(done) ? done : s.rootBefore! });
+        resumeHistory();
+      }
+
+      async function updateSculptHover(x: number, y: number) {
+        if (sculpt || pickInProgress) return;
+        sculptHoverDepth = await withPick(() => depthAt(x, y));
+      }
+
+      /** Screen radius (CSS px) of the brush at the cursor, for the ring overlay. */
+      function brushRingPx(): number {
+        const rect = canvas!.getBoundingClientRect();
+        const depth = sculpt?.depth ?? sculptHoverDepth ?? distance;
+        return (useBrushStore.getState().radius / Math.max(depth, 0.05)) * (rect.height / 2);
+      }
+
       const onPointerDown = (e: PointerEvent) => {
+        if (sculptActive()) {
+          // Sculpt: left paints, right / ⌘ / Ctrl + left orbits.
+          const orbit = e.button === 2 || (e.button === 0 && (e.metaKey || e.ctrlKey));
+          if (e.button === 0 && !orbit) {
+            if (sculpt && !sculpt.ended) return;
+            canvas!.setPointerCapture(e.pointerId);
+            const s: SculptStroke = {
+              plan: null, rootBefore: null, line: [], last: null, depth: distance, radius: 0,
+              pending: [{ x: e.clientX, y: e.clientY, pressure: pressureScale(e) }], busy: false, ended: false,
+            };
+            sculpt = s;
+            strokeChain = strokeChain.then(() => startSculpt(s, e)).catch((err) => console.error(err));
+            return;
+          }
+          if (!orbit) return;
+          pointerDown = true;
+          dragged = false;
+          orbitPreviewMouse = null;
+          orbitPreviewRot = null;
+          dragStartX = e.clientX;
+          dragStartY = e.clientY;
+          return;
+        }
         if (e.button !== 0) return;
         void tryStartGizmoDrag(e.clientX, e.clientY).then((started) => {
           if (started) return;
@@ -1197,6 +1430,18 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       }
 
       const onPointerMove = (e: PointerEvent) => {
+        if (sculptActive()) {
+          useBrushCursor.getState().move(e.clientX, e.clientY, brushRingPx(), e.target === canvas || !!sculpt);
+          if (sculpt && !sculpt.ended) {
+            // Every sample gets its own surface pick, so fast strokes follow the
+            // surface instead of cutting chords through it. Far behind: keep the newest.
+            sculpt.pending.push({ x: e.clientX, y: e.clientY, pressure: pressureScale(e) });
+            if (sculpt.pending.length > 96) sculpt.pending.splice(1, sculpt.pending.length - 96);
+            void drainSculpt(sculpt);
+            return;
+          }
+          if (!pointerDown && e.target === canvas) void updateSculptHover(e.clientX, e.clientY);
+        }
         if (gizmoDragging) {
           clearObjectHover();
           updateGizmoDrag(e.clientX, e.clientY);
@@ -1240,8 +1485,14 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           return;
         }
 
-        if (!pointerDown || e.button !== 0) return;
+        if (sculpt && !sculpt.ended && e.button === 0) {
+          void endSculpt(sculpt);
+          return;
+        }
+        const sculptOrbit = sculptActive() && (e.button === 2 || e.button === 0);
+        if (!pointerDown || (e.button !== 0 && !sculptOrbit)) return;
         pointerDown = false;
+        if (sculptOrbit && !dragged) return; // a click in sculpt mode never selects
 
         if (dragged) {
           rotX += ((e.clientX - dragStartX) / window.innerWidth) * Math.PI * 2;
@@ -1272,6 +1523,11 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       });
 
       canvas.addEventListener("pointerdown", onPointerDown);
+      // Right-drag orbits while sculpting: no context menu there.
+      const onContextMenu = (e: MouseEvent) => {
+        if (sculptActive()) e.preventDefault();
+      };
+      canvas.addEventListener("contextmenu", onContextMenu);
       canvas.addEventListener("pointerleave", clearObjectHover);
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointermove", onTryPointer);
@@ -1352,7 +1608,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           applyQualityPreset(quality);
           lastQuality = quality;
         }
-        if (lastRoot && sceneRoot !== lastRoot) spawnAnim.rootChanged(lastRoot, sceneRoot, now);
+        if (lastRoot && sceneRoot !== lastRoot) spawnAnim.rootChanged(lastRoot, sceneRoot, now, quietRootChange);
+        quietRootChange = false;
         const spawned = spawnAnim.frame(sceneRoot, now);
         // Procedural animation: the clock runs only while something moves; a
         // dragged item holds its rest pose so the gizmo moves what you see.
@@ -1399,7 +1656,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         const [rx, ry] = getCameraRot();
         const view = [
           rx, ry, distance, canvas!.width, canvas!.height,
-          useGizmoStore.getState().mode, activeGizmoAxis, imagesVersion, trying,
+          useGizmoStore.getState().mode, activeGizmoAxis, imagesVersion, trying, useBrushStore.getState().active,
           active?.program.code.length, quality,
         ].join("|");
         if (active && (dataChanged || view !== lastView || drawn.root !== lastDrawnRoot || active !== lastActive)) {
@@ -1443,6 +1700,15 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
               return { total: performance.now() - t0, codeKb: latest.code.length / 1024 };
             },
             stats: () => ({ ...stats }),
+            /** Raw depth-pick bytes and decoded ray distance at a client point. */
+            async depthProbe(x: number, y: number, skip = 0) {
+              return withPick(async () => {
+                sceneUniforms.patch({ skipLeaf: skip });
+                const bytes = [...((await readPickBytes(PICK_PASS_DEPTH, x, y)) ?? [])];
+                sceneUniforms.patch({ skipLeaf: 0 });
+                return { bytes, t: bytes.length ? ((bytes[0] + bytes[3] * 256 + bytes[1] * 65536 - 1) / 16777214) * PICK_DEPTH_RANGE : null };
+              });
+            },
             /** True once the program for the current store root is on screen. */
             synced: () =>
               !!active &&
@@ -1458,6 +1724,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         observer.disconnect();
         cancelAnimationFrame(animFrameId);
         canvas.removeEventListener("pointerdown", onPointerDown);
+        canvas.removeEventListener("contextmenu", onContextMenu);
         canvas.removeEventListener("pointerleave", clearObjectHover);
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerUp);

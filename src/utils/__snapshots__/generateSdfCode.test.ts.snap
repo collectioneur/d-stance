@@ -310,6 +310,8 @@ float sdImageField(vec3 p, float t, float s, float h, float bold, float rnd, flo
   return min(max(w.x, w.y), 0.0) + length(max(w, vec2(0.0))) - r;
 }
 
+
+
 // Image 0: 256×256 baked signed-distance PNG, 16-bit split over .r (coarse) + .g (residual); linear filtering, clamp to edge.
 // data:image/png;base64,iVBORw0KGgo=
 uniform sampler2D imageTex0;
@@ -401,6 +403,41 @@ float formula0(vec3 p, float size, float safety, float t) {
   return max((((smin((length(vec3(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(vec3((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (atan(x, z) * 0.0))) * safety, length(max(b, vec3(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
 }
 
+// Tapered capsule a → b (xyz, radius in w); radius ≤ 0 is a break: next to
+// one the segment is a sphere on its live end.
+float strokeSeg(vec3 p, vec4 a0, vec4 b0, float thickness) {
+  if (a0.w <= 0.0 && b0.w <= 0.0) return 1e10;
+  vec4 a = a0.w <= 0.0 ? b0 : a0;
+  vec4 b = b0.w <= 0.0 ? a : b0;
+  vec3 pa = p - a.xyz;
+  vec3 ba = b.xyz - a.xyz;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+  return length(pa - ba * h) - mix(a.w, b.w, h) * thickness;
+}
+
+// Stroke: 5 points (x, y, z, radius), 1 chunk spheres first.
+const vec4 STROKE0_DATA[6] = vec4[6](
+  vec4(0.16, 0.03, 0.02, 0.21401),
+  vec4(0.0, 0.0, 0.0, 0.05),
+  vec4(0.1, 0.05, 0.0, 0.06),
+  vec4(0.2, 0.05, 0.05, 0.04),
+  vec4(0.2, 0.05, 0.05, 0.0),
+  vec4(0.3, 0.0, 0.0, 0.05)
+);
+
+float stroke0(vec3 p, float thickness, float limit) {
+  float best = max(limit, 1e-4);
+  for (int c = 0; c < 1; c++) {
+    vec4 s = STROKE0_DATA[c];
+    if (length(p - s.xyz) - s.w * max(thickness, 1.0) > best) continue;
+    int end = min(c * 16 + 16, 4);
+    for (int i = c * 16; i < end; i++) {
+      best = min(best, strokeSeg(p, STROKE0_DATA[1 + i], STROKE0_DATA[1 + min(i + 1, 4)], thickness));
+    }
+  }
+  return best;
+}
+
 float sdScene(vec3 p) {
   float d0 = sdSphere(p - vec3(0.2, -0.1, 0.3), 0.5);
   d0 = smin(d0, sdBox(applyInvRotXYZ(p, vec3(0.174533, 0.349066, 0.523599)), vec3(0.4, 0.4, 0.4)), 0.2);
@@ -434,6 +471,7 @@ float sdScene(vec3 p) {
   d0 = min(d0, d3);
   d0 = min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
+  d0 = smin(d0, stroke0(p, 1.0, d0 + 0.03), 0.03);
   return d0;
 }"
 `;
@@ -780,6 +818,8 @@ const sdImageField = (p: d.v3f, t: number, s: number, h: number, bold: number, r
   return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0))) - r;
 };
 
+
+
 const imageSampler = root.createSampler({
   magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
 });
@@ -876,6 +916,47 @@ const formula0 = (p: d.v3f, size: number, safety: number, t: number): number => 
   return std.max((((smin((std.length(d.vec3f(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(d.vec3f((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (std.atan2(x, z) * 0.0))) * safety, std.length(std.max(b, d.vec3f(0.0))) + std.min(std.max(b.x, std.max(b.y, b.z)), 0.0));
 };
 
+// Tapered capsule a → b (xyz, radius in w); radius ≤ 0 is a break: next to
+// one the segment is a sphere on its live end.
+const strokeSeg = (p: d.v3f, a0: d.v4f, b0: d.v4f, thickness: number): number => {
+  "use gpu";
+  if (a0.w <= 0.0 && b0.w <= 0.0) {
+    return 1e10;
+  }
+  const a = std.select(a0, b0, a0.w <= 0.0);
+  const b = std.select(b0, a, b0.w <= 0.0);
+  const pa = p - a.xyz;
+  const ba = b.xyz - a.xyz;
+  const h = std.clamp(std.dot(pa, ba) / std.max(std.dot(ba, ba), 1e-8), 0.0, 1.0);
+  return std.length(pa - ba * h) - std.mix(a.w, b.w, h) * thickness;
+};
+
+// Stroke: 5 points (x, y, z, radius), 1 chunk spheres first.
+const STROKE0_DATA = tgpu.const(d.arrayOf(d.vec4f, 6), [
+  d.vec4f(0.16, 0.03, 0.02, 0.21401),
+  d.vec4f(0.0, 0.0, 0.0, 0.05),
+  d.vec4f(0.1, 0.05, 0.0, 0.06),
+  d.vec4f(0.2, 0.05, 0.05, 0.04),
+  d.vec4f(0.2, 0.05, 0.05, 0.0),
+  d.vec4f(0.3, 0.0, 0.0, 0.05),
+]);
+
+const stroke0 = (p: d.v3f, thickness: number, limit: number): number => {
+  "use gpu";
+  let best = std.max(limit, 1e-4);
+  for (let c = d.u32(0); c < 1; c++) {
+    const s = STROKE0_DATA.$[c];
+    if (std.length(p - s.xyz) - s.w * std.max(thickness, 1.0) > best) {
+      continue;
+    }
+    const end = std.min(c * 16 + 16, d.u32(4));
+    for (let i = c * 16; i < end; i++) {
+      best = std.min(best, strokeSeg(p, STROKE0_DATA.$[1 + i], STROKE0_DATA.$[1 + std.min(i + 1, d.u32(4))], thickness));
+    }
+  }
+  return best;
+};
+
 const sdScene = (p: d.v3f): number => {
   "use gpu";
   let d0 = sdSphere(p - d.vec3f(0.2, -0.1, 0.3), 0.5);
@@ -910,6 +991,7 @@ const sdScene = (p: d.v3f): number => {
   d0 = std.min(d0, d3);
   d0 = std.min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = std.min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
+  d0 = smin(d0, stroke0(p, 1.0, d0 + 0.03), 0.03);
   return d0;
 };"
 `;
@@ -1225,6 +1307,8 @@ fn sdImageField(p: vec3f, t: f32, s: f32, h: f32, bold: f32, rnd: f32, invert: f
   return min(max(w.x, w.y), 0.0) + length(max(w, vec2f(0.0))) - r;
 }
 
+
+
 // Linear, clamp-to-edge.
 @group(0) @binding(0) var imageSampler: sampler;
 
@@ -1320,6 +1404,41 @@ fn formula0(p: vec3f, size: f32, safety: f32, t: f32) -> f32 {
   return max((((smin((length(vec3f(x, y, z)) - 0.3), (y + 0.1), 0.1) + (0.02 * fbm3(vec3f((x * 4.0), (y * 4.0), (z * 4.0)), 4.0))) - (atan2(x, z) * 0.0))) * safety, length(max(b, vec3f(0.0))) + min(max(b.x, max(b.y, b.z)), 0.0));
 }
 
+// Tapered capsule a → b (xyz, radius in w); radius ≤ 0 is a break: next to
+// one the segment is a sphere on its live end.
+fn strokeSeg(p: vec3f, a0: vec4f, b0: vec4f, thickness: f32) -> f32 {
+  if (a0.w <= 0.0 && b0.w <= 0.0) { return 1e10; }
+  let a = select(a0, b0, a0.w <= 0.0);
+  let b = select(b0, a, b0.w <= 0.0);
+  let pa = p - a.xyz;
+  let ba = b.xyz - a.xyz;
+  let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+  return length(pa - ba * h) - mix(a.w, b.w, h) * thickness;
+}
+
+// Stroke: 5 points (x, y, z, radius), 1 chunk spheres first.
+var<private> STROKE0_DATA: array<vec4f, 6> = array<vec4f, 6>(
+  vec4f(0.16, 0.03, 0.02, 0.21401),
+  vec4f(0.0, 0.0, 0.0, 0.05),
+  vec4f(0.1, 0.05, 0.0, 0.06),
+  vec4f(0.2, 0.05, 0.05, 0.04),
+  vec4f(0.2, 0.05, 0.05, 0.0),
+  vec4f(0.3, 0.0, 0.0, 0.05)
+);
+
+fn stroke0(p: vec3f, thickness: f32, limit: f32) -> f32 {
+  var best = max(limit, 1e-4);
+  for (var c = 0u; c < 1u; c++) {
+    let s = STROKE0_DATA[c];
+    if (length(p - s.xyz) - s.w * max(thickness, 1.0) > best) { continue; }
+    let end = min(c * 16u + 16u, 4u);
+    for (var i = c * 16u; i < end; i++) {
+      best = min(best, strokeSeg(p, STROKE0_DATA[1u + i], STROKE0_DATA[1u + min(i + 1u, 4u)], thickness));
+    }
+  }
+  return best;
+}
+
 fn sdScene(p: vec3f) -> f32 {
   var d0 = sdSphere(p - vec3f(0.2, -0.1, 0.3), 0.5);
   d0 = smin(d0, sdBox(applyInvRotXYZ(p, vec3f(0.174533, 0.349066, 0.523599)), vec3f(0.4, 0.4, 0.4)), 0.2);
@@ -1353,6 +1472,7 @@ fn sdScene(p: vec3f) -> f32 {
   d0 = min(d0, d3);
   d0 = min(d0, formula0(p, 0.5, 0.5, 0.0));
   d0 = min(d0, sdImageTex0(p, 0.5, 0.1, 0.0, 0.02, 0.0));
+  d0 = smin(d0, stroke0(p, 1.0, d0 + 0.03), 0.03);
   return d0;
 }"
 `;
