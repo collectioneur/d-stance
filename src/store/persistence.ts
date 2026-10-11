@@ -8,6 +8,7 @@ import {
 } from "./sceneStore";
 import { temporalStore } from "./sceneStore";
 import { isImageSdfDataUrl } from "../utils/imageSdf";
+import { sanitizeTextSpec } from "../utils/textSdf";
 import { sanitizeMaterial } from "./material";
 import { sanitizeModifiers } from "./modifiers";
 import { sanitizeFormula } from "../sdf/formula";
@@ -22,10 +23,11 @@ import { sanitizeReactions } from "./interaction";
  * v9: shape types "terrain", "gyroid", "formula" (+ `formula` source), noise modifier.
  * v10: optional `animation` tracks on layers and groups; noise `speed`.
  * v11: optional `interaction` reactions on layers and groups.
+ * v12: optional `image.text` (what a text layer was baked from).
  */
-export const SCHEMA_VERSION = 11;
-/** v4–v10 are strict subsets of v11 (each only lacks optional fields / kinds), so they load as-is. */
-const ACCEPTED_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION]);
+export const SCHEMA_VERSION = 12;
+/** v4–v11 are strict subsets of v12 (each only lacks optional fields / kinds), so they load as-is. */
+const ACCEPTED_VERSIONS = new Set([4, 5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -69,10 +71,15 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
       if (item.kind === "layer" && item.shapeType !== "image") delete item.image;
       if (item.kind === "layer" && item.shapeType === "image") {
         // `round` is optional; anything that is not a finite non-negative number → 0.
-        const img = item.image as { sdf: string; round?: unknown };
+        const img = item.image as { sdf: string; round?: unknown; text?: unknown };
         const r = img.round;
         if (r !== undefined && !(typeof r === "number" && Number.isFinite(r) && r >= 0)) {
           delete img.round;
+        }
+        if ("text" in img) {
+          const text = sanitizeTextSpec(img.text);
+          if (text) img.text = text;
+          else delete img.text;
         }
       }
       const valid =

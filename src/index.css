@@ -2508,3 +2508,12 @@ canvas {
   font-family: var(--font-mono);
   font-size: 10px;
 }
+
+/* Text layer: the words, in the UI font */
+.text-input {
+  min-height: 34px;
+  field-sizing: content;
+  margin-bottom: 4px;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}

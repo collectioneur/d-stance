@@ -386,6 +386,18 @@ export function bakeImageSdf(
   return rgbaToPng(downsampleEncode(sdf, S));
 }
 
+/**
+ * A binary mask rasterized at SUPERSAMPLE × RES on each side (content
+ * already padded and centered) → baked PNG data URL. Text uses this.
+ */
+export const MASK_SDF_SIZE = IMAGE_SDF_RES * SUPERSAMPLE;
+/** Padding the bake expects around the content, as a fraction of the side (room for `bold`). */
+export const MASK_SDF_PAD = PAD;
+
+export function encodeMaskSdf(mask: Uint8Array): string {
+  return rgbaToPng(downsampleEncode(sdfFromMask(mask, MASK_SDF_SIZE, MASK_SDF_SIZE), MASK_SDF_SIZE));
+}
+
 /** Trust-boundary check for persisted values. */
 export function isImageSdfDataUrl(v: unknown): v is string {
   return (

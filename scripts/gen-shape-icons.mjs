@@ -1,6 +1,6 @@
 // Shape icons. Run: node scripts/gen-shape-icons.mjs
 //
-// Writes src/assets/shape-icons/<ShapeType>.svg (+ group, imageAdd) and the
+// Writes src/assets/shape-icons/<ShapeType>.svg (+ group, imageAdd, text) and the
 // shaded src/assets/op-icons/*.svg. Model space is 2D screen space (y down); 3D solids go
 // through an orthographic projection first. Every icon is fit into a 24×24 box
 // and used as a CSS mask (MaskIcon), so white + element opacity = tone.
@@ -345,6 +345,18 @@ function imagePlate(dx = 0, dy = 0, s = 1) {
   ];
 }
 icons.image = () => ({ layers: imagePlate() });
+
+/** Text layer: a solid "T" extruded towards the lower right, like the image plate. */
+icons.text = () => {
+  const front = [[-1.05, -0.95], [0.95, -0.95], [0.95, -0.5], [0.2, -0.5], [0.2, 0.95], [-0.3, 0.95], [-0.3, -0.5], [-1.05, -0.5]];
+  const steps = [0.04, 0.08, 0.12, 0.17].map((k) => move(front, k, k));
+  return {
+    layers: [
+      { rings: steps, tone: M, cut: [front] },
+      { rings: [front], tone: S },
+    ],
+  };
+};
 
 /** "Add image" action: the plate plus a round plus badge, split by a gap. */
 icons.imageAdd = () => {

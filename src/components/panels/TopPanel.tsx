@@ -7,6 +7,9 @@ import {
   COPY_LINK_ICON,
   IMAGE_ADD_ICON,
   IMAGE_HOTKEY,
+  TEXT_HOTKEY,
+  TEXT_ICON,
+  addText,
   SHAPES,
   addShape,
   pickImageFile,
@@ -81,6 +84,14 @@ export default function TopPanel() {
         >
           <IMAGE_ADD_ICON size={15} />
           <span className="shape-btn-key">{IMAGE_HOTKEY}</span>
+        </button>
+        <button
+          className="shape-btn shape-btn--icon"
+          onClick={() => void addText()}
+          title={`Add text (${TEXT_HOTKEY})`}
+        >
+          <TEXT_ICON size={15} />
+          <span className="shape-btn-key">{TEXT_HOTKEY}</span>
         </button>
         <button
           className="shape-btn shape-btn--icon"

@@ -22,7 +22,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { GROUP_ICON, SHAPE_ICONS } from "../../utils/commands";
+import { GROUP_ICON, SHAPE_ICONS, TEXT_ICON } from "../../utils/commands";
 import { OpIcon } from "../OpIcon";
 import { useElementSize } from "../../hooks/useElementSize";
 import {
@@ -117,7 +117,7 @@ function SceneNode({
       {!isRoot && (
         <span className="scene-item-icon">
           {(() => {
-            const Icon = isGroup ? GROUP_ICON : SHAPE_ICONS[data.shapeType ?? "sphere"];
+            const Icon = isGroup ? GROUP_ICON : data.text ? TEXT_ICON : SHAPE_ICONS[data.shapeType ?? "sphere"];
             return <Icon size={14} />;
           })()}
         </span>
