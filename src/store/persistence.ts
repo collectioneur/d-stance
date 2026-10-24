@@ -13,7 +13,7 @@ import { isImageSdfDataUrl } from "../utils/imageSdf";
  * v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image".
  * v6: `image.round` (edge rounding radius, optional, default 0).
  */
-const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 6;
 /** v4/v5 are strict subsets of v6 (no image layers / no `image.round`), so they load as-is. */
 const ACCEPTED_VERSIONS = new Set([4, 5, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
@@ -91,7 +91,7 @@ export function encodeHash(s: PersistedScene): string {
   return btoa(binary);
 }
 
-function decodeHash(raw: string): PersistedScene | null {
+export function decodeHash(raw: string): PersistedScene | null {
   try {
     const binary = atob(raw);
     const bytes = new Uint8Array(binary.length);
