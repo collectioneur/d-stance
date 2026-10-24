@@ -181,35 +181,39 @@ describe("scene compiler modifiers", () => {
     const code = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([3, 1, 1])] })])).code;
     const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
     expect(sdf).toMatch(/let q\d+ = ds_xf\(p, \d+u\);/);
-    expect(sdf).toMatch(/let q\d+ = ds_opRepeat\(q\d+, /);
+    expect(sdf).toMatch(/let q\d+ = ds_opRepeatNear\(q\d+, /);
     expect(sdf).toMatch(/ds_sdSphere\(ds_xf\(q\d+, \d+u\)/);
   });
 
-  test("copies that overlap their cell loop over neighbor cells", () => {
-    const tight = compile(scene([group([shape("sphere", { params: [0.48, 0, 0, 0] })], { modifiers: [rep([3, 1, 3])] })])).code;
-    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"));
-    expect(body(tight)).toContain("< 4u; n");
-    expect(body(tight)).toContain("ds_opRepeatCell(");
-    const loose = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([3, 1, 3])] })])).code;
-    expect(body(loose)).not.toContain("ds_opRepeatCell(");
+  test("a repeat checks a neighbor copy only when its bound can beat the nearest", () => {
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    const out = compile(scene([shape("cone", { modifiers: [rep([3, 3, 3], 1.8)] })]));
+    const code = body(out.code);
+    expect(code).toMatch(/let (t\d+) = ds_opRepeatOthers\(.*\n.*\n\s+for \(var (n\d+) = 0u; \2 < 8u; \2\+\+\) \{\n\s+if \(\2 > 0u\) \{\n\s+if \((r\d+) <= \1\) \{ break; \}\n\s+if \(ds_opRepeatNearBound\(.* >= \3\) \{ continue; \}/);
+    expect(code).toContain("ds_opRepeatFar(");
+    // Spacing, counts and the gap are values: a drag never recompiles.
+    expect(compile(scene([shape("cone", { modifiers: [rep([5, 1, 0], 3)] })])).code).toBe(out.code);
+    // The gap: half the spacing minus the cone's bound radius, per axis.
+    const gapAt = out.values.findIndex((v, i) => i % 4 === 0 && Math.abs(v - 0.9 + Math.hypot(0.4, 0.6)) < 0.02);
+    expect(gapAt).toBeGreaterThan(0);
   });
 
-  test("polar copies that reach past their sector loop over the copies they can be nearest to", () => {
-    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"));
+  test("a polar repeat checks its three nearest copies, or every copy around the axis", () => {
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
     const polar = (count: number) => ({ kind: "polar" as const, count, axis: 1 as const });
-    // On the axis: every copy, counted from the value slot (the count stays a value).
-    const all3 = compile(scene([shape("cone", { modifiers: [polar(3)] })]));
-    const all5 = compile(scene([shape("cone", { modifiers: [polar(5)] })]));
-    expect(body(all3.code)).toMatch(/for \(var n\d+ = 0u; n\d+ < u32\(dsData\[\d+\]\.x\); n\d+\+\+\)/);
-    expect(body(all3.code)).toContain("ds_opPolarCopy(");
-    expect(all5.code).toBe(all3.code);
-    // Spokes: their own sector, or the next one on each side too.
-    const spokes = (count: number, r: number) =>
+    const spokes = (count: number, r = 0.2) =>
       body(compile(scene([group([shape("sphere", { position: [1, 0, 0], params: [r, 0, 0, 0] })], { modifiers: [polar(count)] })])).code);
-    expect(spokes(6, 0.2)).not.toContain("ds_opPolarCopy(");
-    expect(spokes(6, 0.2)).toContain("ds_opPolar(");
-    expect(spokes(16, 0.2)).toContain("< 3u; n");
-    expect(spokes(16, 0.2)).toContain("ds_opPolarCopy(");
+    expect(spokes(6)).toMatch(/< min\(3u, u32\(dsData\[\d+\]\.x\)\); n/);
+    expect(spokes(6)).toContain("ds_opPolarOthers(");
+    expect(spokes(6)).toContain("ds_opPolarNearBound(");
+    expect(spokes(6)).toContain("ds_opPolarFar(");
+    expect(spokes(16)).toBe(spokes(6));
+    // A shape on its own axis: the nearest three are all of three copies; more need every copy.
+    expect(body(compile(scene([shape("cone", { modifiers: [polar(3)] })])).code)).toContain("ds_opPolarNear(");
+    const all5 = compile(scene([shape("cone", { modifiers: [polar(5)] })])).code;
+    expect(body(all5)).toMatch(/for \(var n\d+ = 0u; n\d+ < u32\(dsData\[\d+\]\.x\); n\d+\+\+\)/);
+    expect(body(all5)).toContain("ds_opPolarCopy(");
+    expect(compile(scene([shape("cone", { modifiers: [polar(9)] })])).code).toBe(all5);
   });
 
   test("twist and bend scale the result by 1 / Lipschitz", () => {

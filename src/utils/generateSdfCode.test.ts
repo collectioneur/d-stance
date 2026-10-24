@@ -105,13 +105,14 @@ describe("generateSdfCode modifiers", () => {
     ]);
     const out = generateSdfCode(root, null);
     for (const code of [out.wgsl, out.glsl, out.typegpu]) {
-      expect(code).toContain("opRepeatCell(");
+      expect(code).toContain("opRepeatNear(");
+      expect(code).toContain("opRepeatFar(");
       expect(code).toContain("opTwist(");
       expect(code).toMatch(/- 0\.05\)/);
     }
-    expect(out.wgsl).toContain("fn opRepeat(");
-    expect(out.glsl).toContain("vec3 opRepeat(");
-    expect(out.typegpu).toContain("const opRepeat = tgpu.fn(");
+    expect(out.wgsl).toContain("fn opRepeatNearBound(");
+    expect(out.glsl).toContain("float opRepeatNearBound(");
+    expect(out.typegpu).toContain("const opRepeatNearBound = tgpu.fn(");
     expect(out.wgsl).toMatch(/d0 = d0 \* 0\.\d+;/);
   });
 

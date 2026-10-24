@@ -30,7 +30,7 @@ import {
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
-import { UNBOUNDED, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
+import { UNBOUNDED, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
@@ -77,7 +77,7 @@ export interface CompileOptions {
 
 /** A point-modifier step as emitted (structure only; numbers live in slots). */
 type PointStep =
-  | { kind: "repeat"; slot: number; neighbors: [boolean, boolean, boolean] }
+  | { kind: "repeat"; slot: number }
   | { kind: "mirror"; axes: [boolean, boolean, boolean] }
   | { kind: "polar"; slot: number; axis: Axis; reach: PolarReach }
   | { kind: "twist" | "bend"; slot: number; axis: Axis }
@@ -215,16 +215,24 @@ class Builder {
     const steps = point.map((m, i): PointStep => {
       switch (m.kind) {
         case "repeat": {
-          const slot = this.alloc(2);
+          const slot = this.alloc(4);
+          const copy = plan.copy[i]!;
           this.set(slot, ...m.spacing, 0);
           this.set(slot + 1, ...m.count, 0);
-          return { kind: "repeat", slot, neighbors: plan.neighbors[i]! };
+          this.set(slot + 2, ...(plan.gap[i] as Vec3), 0);
+          this.set(slot + 3, ...copy.c, copy.r);
+          return { kind: "repeat", slot };
         }
         case "mirror":
           return { kind: "mirror", axes: [...m.axes] };
         case "polar": {
-          const slot = this.alloc(1);
-          this.set(slot, m.count, (2 * Math.PI) / m.count, 0, 0);
+          const slot = this.alloc(4);
+          const copy = plan.copy[i]!;
+          const turned = polarTurned(m, copy.c);
+          this.set(slot, m.count, (2 * Math.PI) / m.count, ...(plan.gap[i] as [number, number]));
+          this.set(slot + 1, ...copy.c, copy.r);
+          this.set(slot + 2, turned[0], turned[1], turned[2], turned[3]);
+          this.set(slot + 3, turned[4], turned[5], turned[6], turned[7]);
           return { kind: "polar", slot, axis: m.axis, reach: plan.polar[i]! };
         }
         case "twist":
@@ -504,16 +512,13 @@ function leafCall(node: LeafNode, lp: string): string {
   return `ds_${call}`;
 }
 
-function stepExpr(s: PointStep, q: string): string {
+/** Point steps that map one point to one point (repeats and polars loop over copies instead). */
+function stepExpr(s: Exclude<PointStep, { kind: "repeat" | "polar" }>, q: string): string {
   switch (s.kind) {
-    case "repeat":
-      return `ds_opRepeat(${q}, ${slot(s.slot)}.xyz, ${slot(s.slot + 1)}.xyz)`;
     case "mirror": {
       const c = ["x", "y", "z"].map((k, a) => (s.axes[a] ? `abs(${q}.${k})` : `${q}.${k}`));
       return `vec3f(${c.join(", ")})`;
     }
-    case "polar":
-      return `ds_opPolar(${q}, ${slot(s.slot)}.y, ${s.axis}u)`;
     case "twist":
       return `ds_opTwist(${q}, ${slot(s.slot)}.x, ${s.axis}u)`;
     case "bend":
@@ -688,7 +693,7 @@ class Emitter {
     }
     const q0 = this.fresh("q");
     this.push(depth, `let ${q0} = ${xf};`);
-    return this.withSteps(node.steps, q0, depth, (q) => {
+    return this.withSteps(node.steps, q0, factor, depth, (q) => {
       let e = leafCall(node, q);
       for (const s of node.post) e = postExpr(s, e);
       return { d: `${e} * ${factor}`, m: mat };
@@ -703,7 +708,7 @@ class Emitter {
       const q0 = this.fresh("q");
       this.push(depth, `let ${q0} = ds_xf(${frame.p}, ${node.frame.xf}u);`);
       const inner = `${slot(node.base)}.w`;
-      res = this.withSteps(node.frame.steps, q0, depth, (q, d) => this.nodes(node.children, d, { p: q, f: inner }));
+      res = this.withSteps(node.frame.steps, q0, inner, depth, (q, d) => this.nodes(node.children, d, { p: q, f: inner }));
     }
     if (!node.lipschitz && node.post.length === 0) return res;
     const g = this.fresh("g");
@@ -713,26 +718,42 @@ class Emitter {
   }
 
   /**
-   * Applies point steps to `q`, then `body`. A repeat or polar repeat whose
-   * copies reach past their cell / sector becomes a loop over the copies a
-   * point can be nearest to (the planner's decision), unioned, so
-   * overlapping copies stay exact.
+   * Applies point steps to `q`, then `body`. Repeats and polar repeats check
+   * the copies a point can be nearest to (see modifierMath.ts); geometry
+   * around a polar axis loops over every copy. Bounds are in step space,
+   * times `unit` into result units.
    */
-  withSteps(steps: PointStep[], q: string, depth: number, body: (q: string, depth: number) => Val): Val {
+  withSteps(steps: PointStep[], q: string, unit: string, depth: number, body: (q: string, depth: number) => Val): Val {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
-      if (s.kind === "repeat" && s.neighbors.some(Boolean)) {
-        const axes = [0, 1, 2].filter((a) => s.neighbors[a]).length;
-        const mask = [0, 1, 2].map((a) => (s.neighbors[a] ? "1.0" : "0.0")).join(", ");
-        return this.copyLoop(`${1 << axes}u`, steps.slice(i + 1), depth, body, (n) =>
-          `ds_opRepeatCell(${q}, ${slot(s.slot)}.xyz, ${slot(s.slot + 1)}.xyz, ds_cellStep(${n}, vec3f(${mask})))`,
+      const rest = steps.slice(i + 1);
+      if (s.kind === "repeat") {
+        const [sp, cnt, gap] = [0, 1, 2].map((k) => `${slot(s.slot + k)}.xyz`);
+        const sphere = slot(s.slot + 3);
+        const id = this.fresh("c");
+        this.push(depth, `let ${id} = ds_repeatCell(${q}, ${sp}, ${cnt});`);
+        return this.nearest(
+          { count: "8u", rest, unit, depth, body },
+          `ds_opRepeatOthers(${q}, ${sp}, ${cnt}, ${id}, ${sphere})`,
+          (n) => `ds_opRepeatNearBound(${q}, ${sp}, ${cnt}, ${id}, ${sphere}, ${n})`,
+          (n) => `ds_opRepeatNear(${q}, ${sp}, ${id}, ${n})`,
+          `ds_opRepeatFar(${q}, ${sp}, ${cnt}, ${id}, ${gap})`,
         );
       }
-      if (s.kind === "polar" && s.reach !== "sector") {
-        // Neighbors: copies −1, 0, +1 around the nearest; all: every copy from it on.
-        const [count, first] = s.reach === "neighbors" ? ["3u", "-1.0"] : [`u32(${slot(s.slot)}.x)`, "0.0"];
-        return this.copyLoop(count, steps.slice(i + 1), depth, body, (n) =>
-          `ds_opPolarCopy(${q}, ${slot(s.slot)}.y, ${s.axis}u, ${n}, ${first})`,
+      if (s.kind === "polar") {
+        const v = slot(s.slot);
+        if (s.reach === "all") {
+          return this.copyLoop({ count: `u32(${v}.x)`, rest, unit, depth, body }, (n) => `ds_opPolarCopy(${q}, ${v}.y, ${s.axis}u, ${n})`);
+        }
+        const sphere = slot(s.slot + 1);
+        const own = this.fresh("q");
+        this.push(depth, `let ${own} = ds_opPolarNear(${q}, ${v}.y, ${s.axis}u, 0u);`);
+        return this.nearest(
+          { count: `min(3u, u32(${v}.x))`, rest, unit, depth, body },
+          `ds_opPolarOthers(${own}, ${s.axis}u, ${sphere}, ${slot(s.slot + 2)}, ${slot(s.slot + 3)})`,
+          (n) => `ds_opPolarNearBound(${q}, ${v}.y, ${s.axis}u, ${sphere}, ${n})`,
+          (n) => `ds_opPolarNear(${q}, ${v}.y, ${s.axis}u, ${n})`,
+          `ds_opPolarFar(${q}, ${v}.y, ${s.axis}u, ${v}.zw, ${v}.x)`,
         );
       }
       const qn = this.fresh("q");
@@ -742,23 +763,45 @@ class Emitter {
     return body(q, depth);
   }
 
-  /** Union over `count` copies: `copy(n)` is copy n's point, `rest` runs on it. */
-  copyLoop(
-    count: string,
-    rest: PointStep[],
-    depth: number,
-    body: (q: string, depth: number) => Val,
+  /**
+   * Union over candidate copies, nearest first (n = 0). Stops when no other
+   * copy can be nearer than the result (`others`), skips a candidate whose
+   * `bound(n)` cannot beat it, and caps the result by `far` (the copies no
+   * candidate covers) when that is not settled.
+   */
+  nearest(
+    loop: CopyLoop,
+    others: string,
+    bound: (n: string) => string,
     copy: (n: string) => string,
+    far: string,
   ): Val {
+    const { unit, depth } = loop;
+    const lo = this.fresh("t");
+    this.push(depth, `let ${lo} = ${others} * ${unit};`);
+    const acc = this.copyLoop(loop, copy, (n, r) => [
+      `if (${n} > 0u) {`,
+      `  if (${r} <= ${lo}) { break; }`,
+      `  if (${bound(n)} * ${unit} >= ${r}) { continue; }`,
+      `}`,
+    ]);
+    this.push(depth, `if (${acc.d} > ${lo}) { ${acc.d} = min(${acc.d}, ${far} * ${unit}); }`);
+    return acc;
+  }
+
+  /** Union over `count` copies: `copy(n)` is copy n's point, `rest` then `body` run on it after `guard`'s lines. */
+  copyLoop(loop: CopyLoop, copy: (n: string) => string, guard?: (n: string, acc: string) => string[]): Val {
+    const { count, rest, unit, depth, body } = loop;
     const id = this.n++;
     const acc = { d: `r${id}`, m: `rm${id}` };
     const n = `n${id}`;
     this.push(depth, `var ${acc.d} = 1e10;`);
     if (this.info) this.push(depth, `var ${acc.m} = ds_defaultMat();`);
     this.push(depth, `for (var ${n} = 0u; ${n} < ${count}; ${n}++) {`);
+    for (const line of guard?.(n, acc.d) ?? []) this.push(depth + 1, line);
     const qn = this.fresh("q");
     this.push(depth + 1, `let ${qn} = ${copy(n)};`);
-    const inner = this.withSteps(rest, qn, depth + 1, body);
+    const inner = this.withSteps(rest, qn, unit, depth + 1, body);
     const t = this.fresh("t");
     this.push(depth + 1, `let ${t} = ${inner.d};`);
     if (this.info) this.push(depth + 1, `if (${t} < ${acc.d}) { ${acc.m} = ${inner.m}; }`);
@@ -766,6 +809,15 @@ class Emitter {
     this.push(depth, `}`);
     return acc;
   }
+}
+
+/** What a copy loop runs: `count` copies, then the remaining steps and the body in `unit`s. */
+interface CopyLoop {
+  count: string;
+  rest: PointStep[];
+  unit: string;
+  depth: number;
+  body: (q: string, depth: number) => Val;
 }
 
 const RUNTIME_WGSL = `fn ds_xf(p: vec3f, i: u32) -> vec3f {

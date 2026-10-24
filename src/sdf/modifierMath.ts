@@ -60,43 +60,77 @@ export function deformLipschitz(m: Modifier, c: Vec3, r: number): number {
   return Math.sqrt(1 + (m.amount * reach) ** 2);
 }
 
-
 /**
- * Axes on which a repeat's copies reach past their cell (sphere c, r in the
- * repeat's output space): those need the neighbor cell evaluated too, or the
- * overlap is cut off.
+ * Repeats and polar repeats fold a point onto the nearest copy. That copy is
+ * not always the nearest one: a shape that is not symmetric in its cell (a
+ * cone: base on one side, tip on the other), or one wider than its cell /
+ * sector, can be nearer to a neighbor's copy. A distance that ignores it
+ * lets the march step through it (notches, spikes). So the shaders look
+ * at the nearest copy and stop there when no other copy can be nearer (a
+ * lower bound from the gap: how far copies stay inside their cell / sector,
+ * negative when they reach past it). Otherwise each neighbor across the
+ * faces toward the point runs when the distance to its bounding sphere beats
+ * the result so far, and a lower bound of everything farther caps it. The
+ * result is a true distance wherever it matters, so soft shadows see no
+ * phantom occluders, and usually one copy is evaluated.
  */
-export function repeatNeighbors(m: Extract<Modifier, { kind: "repeat" }>, c: Vec3, r: number): [boolean, boolean, boolean] {
-  return m.count.map((n, a) => n !== 1 && Math.abs(c[a]) + r > m.spacing[a] * 0.45) as [boolean, boolean, boolean];
+
+/** Per axis, how far a repeat's copies stay inside their cell (sphere c, r in its output space). */
+export function repeatGap(m: Extract<Modifier, { kind: "repeat" }>, c: Vec3, r: number): Vec3 {
+  return m.spacing.map((s, a) => s / 2 - Math.abs(c[a]) - r) as Vec3;
 }
 
 /**
- * Copies of a polar repeat a point has to look at: its own sector's, also
- * the next one on each side, or all of them. A copy that reaches past its
- * sector is cut off otherwise, and the cut leaves spikes (the ray trusts a
- * distance that ignores the neighbor copy and steps through it).
+ * Copies of a polar repeat a point has to look at: the nearest three
+ * (branch and bound as above), or all of them when the geometry reaches
+ * farther around the axis than one sector (e.g. a shape on its own polar
+ * axis covers every angle).
  */
-export type PolarReach = "sector" | "neighbors" | "all";
+export type PolarReach = "near" | "all";
+
+/** Angular half-width of sphere (c, r) seen from the polar axis, and its center's angle. */
+function polarSpan(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number): { angle: number; half: number } {
+  const [u, v] = planeAxes("polar", m.axis);
+  const d = Math.hypot(c[u], c[v]);
+  return { angle: Math.abs(Math.atan2(c[v], c[u])), half: r >= d ? Math.PI : Math.asin(r / d) };
+}
 
 /** Geometry sphere (c, r) in the polar repeat's output space. */
 export function polarReach(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number): PolarReach {
-  if (m.count <= 1) return "sector";
+  if (m.count <= 3) return "near"; // the nearest three are all of them
+  const { angle, half } = polarSpan(m, c, r);
+  return (angle + half) / ((2 * Math.PI) / m.count) <= 1.45 ? "near" : "all";
+}
+
+/** Radians a polar repeat's copies stay inside their sector, and how far they stay from the axis. */
+export function polarGap(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number): [number, number] {
+  const { angle, half } = polarSpan(m, c, r);
   const [u, v] = planeAxes("polar", m.axis);
-  const d = Math.hypot(c[u], c[v]);
-  // Angular half-width of the sphere seen from the axis; one around the axis covers every angle.
-  const half = r >= d ? Math.PI : Math.asin(r / d);
-  const spread = (Math.abs(Math.atan2(c[v], c[u])) + half) / ((2 * Math.PI) / m.count);
-  if (spread <= 0.45) return "sector";
-  if (spread <= 1.45 && m.count > 3) return "neighbors";
-  return "all";
+  return [Math.max(-Math.PI, Math.PI / m.count - angle - half), Math.hypot(c[u], c[v]) - r];
+}
+
+/**
+ * A polar copy's sphere center `c` in its plane (the polar's axes, in order),
+ * turned by +1, −1, +2 and −2 sectors: the other copies' centers seen from a
+ * copy's frame (opPolarOthers).
+ */
+export function polarTurned(m: Extract<Modifier, { kind: "polar" }>, c: Readonly<Vec3>): [number, number, number, number, number, number, number, number] {
+  const [u, v] = planeAxes("polar", m.axis);
+  const sector = (2 * Math.PI) / m.count;
+  return [1, -1, 2, -2].flatMap((k) => {
+    const a = k * sector;
+    return [Math.cos(a) * c[u] - Math.sin(a) * c[v], Math.sin(a) * c[u] + Math.cos(a) * c[v]];
+  }) as [number, number, number, number, number, number, number, number];
 }
 
 /** What a point-modifier list does to a sphere of geometry, and what it needs. */
 export interface ModifierPlan {
-  /** Per modifier (same order): repeat neighbor axes, else null. */
-  neighbors: ([boolean, boolean, boolean] | null)[];
   /** Per modifier (same order): polar copies to look at, else null. */
   polar: (PolarReach | null)[];
+  /** Per modifier (same order): repeatGap / polarGap, else null. */
+  gap: (Vec3 | [number, number] | null)[];
+  /** Per modifier (same order): a repeat's / polar's copy's bounding sphere in its output space, else null. */
+  copy: ({ c: Vec3; r: number } | null)[];
   /** Combined 1 / Lipschitz of the deformations (twist, bend). */
   invL: number;
   /** The geometry sphere in the list's input space. */
@@ -109,15 +143,20 @@ export interface ModifierPlan {
  * modifier first — growing the sphere into each modifier's input space.
  */
 export function planPointModifiers(point: Modifier[], c: Vec3, r: number): ModifierPlan {
-  const neighbors: ModifierPlan["neighbors"] = point.map(() => null);
   const polar: ModifierPlan["polar"] = point.map(() => null);
+  const gap: ModifierPlan["gap"] = point.map(() => null);
+  const copy: ModifierPlan["copy"] = point.map(() => null);
   let invL = 1;
   for (let i = point.length - 1; i >= 0; i--) {
     const m = point[i];
-    if (m.kind === "repeat") neighbors[i] = repeatNeighbors(m, c, r);
-    if (m.kind === "polar") polar[i] = polarReach(m, c, r);
+    if (m.kind === "repeat" || m.kind === "polar") copy[i] = { c: [...c] as Vec3, r };
+    if (m.kind === "repeat") gap[i] = repeatGap(m, c, r);
+    if (m.kind === "polar") {
+      polar[i] = polarReach(m, c, r);
+      gap[i] = polarGap(m, c, r);
+    }
     invL /= deformLipschitz(m, c, r);
     ({ c, r } = expandThrough(m, c, r));
   }
-  return { neighbors, polar, invL, c, r };
+  return { polar, gap, copy, invL, c, r };
 }

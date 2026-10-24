@@ -1,8 +1,25 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { canvasShot, canvasStats, imageDiff, openEditor, sceneRoot, sphere, waitForFrames, waitForProgram } from "./helpers";
 import { infiniteScene, modifiersScene } from "./scenes";
 
 type Mods = { modifiers?: { kind: string; off?: boolean }[] };
+
+/** The canvas once `items` are drawn at full size (shapes grow in once drawn). */
+async function shot(page: Page, items: { id: string }[]) {
+  const errors = await openEditor(page, { id: "r", name: "S", items });
+  await waitForProgram(page);
+  await expect
+    .poll(() =>
+      page.evaluate((ids) => {
+        const g = (window as unknown as { __dstance: { gpu: { appearProgress(id: string): number | null } } }).__dstance.gpu;
+        return ids.every((id) => (g.appearProgress(id) ?? 1) >= 1);
+      }, items.map((i) => i.id)),
+    )
+    .toBe(true);
+  await waitForFrames(page, 2);
+  expect(errors).toEqual([]);
+  return canvasShot(page);
+}
 
 test.describe("modifiers", () => {
   test("add a repeat from the inspector, switch it off, remove it, undo, reload", async ({ page }) => {
@@ -67,25 +84,22 @@ test.describe("modifiers", () => {
     // were looped over, each kept only its own wedge and the cuts grew spikes.
     const cone = (extra: Record<string, unknown>) =>
       sphere({ shapeType: "cone", name: "Cone", position: [0, -0.7, 0], params: [0.39, 0.6, 0, 0], ...extra });
-    const shot = async (items: { id: string }[]) => {
-      const errors = await openEditor(page, { id: "r", name: "S", items });
-      await waitForProgram(page);
-      // Shapes grow in once drawn: shoot them at full size.
-      await expect
-        .poll(() =>
-          page.evaluate((ids) => {
-            const g = (window as unknown as { __dstance: { gpu: { appearProgress(id: string): number | null } } }).__dstance.gpu;
-            return ids.every((id) => (g.appearProgress(id) ?? 1) >= 1);
-          }, items.map((i) => i.id)),
-        )
-        .toBe(true);
-      await waitForFrames(page, 2);
-      expect(errors).toEqual([]);
-      return canvasShot(page);
-    };
-    const polar = await shot([cone({ id: "c", modifiers: [{ kind: "polar", count: 3, axis: 2 }] })]);
-    const byHand = await shot([0, 120, 240].map((z, i) => cone({ id: `c${i}`, rotation: [0, 0, z] })));
+    const polar = await shot(page, [cone({ id: "c", modifiers: [{ kind: "polar", count: 3, axis: 2 }] })]);
+    const byHand = await shot(page, [0, 120, 240].map((z, i) => cone({ id: `c${i}`, rotation: [0, 0, z] })));
     expect((await imageDiff(page, polar, byHand)).over16).toBeLessThan(0.002);
+  });
+
+  test("repeated copies that are not symmetric in their cell match the copies placed by hand", async ({ page }) => {
+    // A cone's tip and base sit on opposite sides of its cell: near a cell
+    // face the neighbor's base can be nearer than the cell's own tip. When
+    // only the nearest cell's copy was measured, rays stepped through the
+    // neighbor and cut notches into the base rims.
+    const cone = (extra: Record<string, unknown>) => sphere({ shapeType: "cone", name: "Cone", params: [0.4, 0.6, 0, 0], ...extra });
+    const repeated = await shot(page, [cone({ id: "c", position: [0, -1, 0], modifiers: [{ kind: "repeat", spacing: [1.8, 1.8, 1.8], count: [3, 3, 3] }] })]);
+    const cells = [-1, 0, 1].flatMap((x) => [-1, 0, 1].flatMap((y) => [-1, 0, 1].map((z) => [x, y, z])));
+    const byHand = await shot(page, cells.map(([x, y, z], i) => cone({ id: `c${i}`, position: [1.8 * x, -1 + 1.8 * y, 1.8 * z] })));
+    // Notched rims: ~0.09% of pixels differ; exact: ~0.01%.
+    expect((await imageDiff(page, repeated, byHand)).over16).toBeLessThan(0.0003);
   });
 
   test("an infinite grid renders to the horizon", async ({ page }) => {
