@@ -31,7 +31,13 @@ export type Modifier = (
        */
       offset: Vec3;
     }
-  | { kind: "polar"; count: number; axis: Axis }
+  | {
+      kind: "polar";
+      count: number;
+      axis: Axis;
+      /** How far each copy sits from the axis through the item's origin (≥ 0); 0 turns the item about it. */
+      radius: number;
+    }
   | { kind: "twist"; /** radians per unit along the axis */ amount: number; axis: Axis }
   | { kind: "bend"; /** radians per unit along the bent direction */ amount: number; axis: Axis }
   | { kind: "elongate"; size: Vec3 }
@@ -73,7 +79,7 @@ export const MODIFIER_LABEL: Record<ModifierKind, string> = {
 export const MODIFIER_HINT: Record<ModifierKind, string> = {
   repeat: "Copies along each axis. Count 0 repeats forever.",
   mirror: "A copy reflected across the item's center; both this far from it.",
-  polar: "Copies around an axis, like spokes.",
+  polar: "Copies in a ring around the item's center, like spokes.",
   twist: "Rotates slices more the farther they are along the axis.",
   bend: "Curls the shape around an axis.",
   elongate: "Stretches the middle without scaling the ends.",
@@ -96,7 +102,8 @@ export function createModifier(kind: ModifierKind, extent = 0.5): Modifier {
       return { kind, axes: [true, false, false], offset: [d, d, d] };
     }
     case "polar":
-      return { kind, count: 6, axis: 1 };
+      // Six copies just apart: neighbors are 2·radius·sin(π/6) = radius apart.
+      return { kind, count: 6, axis: 1, radius: Math.max(0, Math.round(extent * 2 * 20) / 20) };
     case "twist":
       return { kind, amount: 2, axis: 1 };
     case "bend":
@@ -144,7 +151,13 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
       };
     }
     case "polar":
-      return { kind: "polar", count: int(raw.count, 6, 1, MAX_POLAR_COUNT), axis: axis(raw.axis, 1), ...off };
+      return {
+        kind: "polar",
+        count: int(raw.count, 6, 1, MAX_POLAR_COUNT),
+        axis: axis(raw.axis, 1),
+        radius: num(raw.radius, 0, 0, 100),
+        ...off,
+      };
     case "twist":
       return { kind: "twist", amount: num(raw.amount, 2, -MAX_DEFORM, MAX_DEFORM), axis: axis(raw.axis, 1), ...off };
     case "bend":

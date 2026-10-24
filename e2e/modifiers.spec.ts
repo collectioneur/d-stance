@@ -84,7 +84,7 @@ test.describe("modifiers", () => {
     // were looped over, each kept only its own wedge and the cuts grew spikes.
     const cone = (extra: Record<string, unknown>) =>
       sphere({ shapeType: "cone", name: "Cone", position: [0, -0.7, 0], params: [0.39, 0.6, 0, 0], ...extra });
-    const polar = await shot(page, [cone({ id: "c", modifiers: [{ kind: "polar", count: 3, axis: 2 }] })]);
+    const polar = await shot(page, [cone({ id: "c", modifiers: [{ kind: "polar", count: 3, axis: 2, radius: 0 }] })]);
     const byHand = await shot(page, [0, 120, 240].map((z, i) => cone({ id: `c${i}`, rotation: [0, 0, z] })));
     expect((await imageDiff(page, polar, byHand)).over16).toBeLessThan(0.002);
   });
@@ -117,6 +117,20 @@ test.describe("modifiers", () => {
       cone({ id: "c1", position: [at[0] - 0.8 * Math.cos(a), at[1] - 0.8 * Math.sin(a), at[2]] }),
     ]);
     expect((await imageDiff(page, mirrored, byHand)).over16).toBeLessThan(0.002);
+  });
+
+  test("a polar repeat with a radius matches a ring of copies placed by hand", async ({ page }) => {
+    const cone = (extra: Record<string, unknown>) => sphere({ shapeType: "cone", name: "Cone", params: [0.3, 0.5, 0, 0], ...extra });
+    const at = [0, -0.6, 0];
+    const ring = await shot(page, [cone({ id: "c", position: at, modifiers: [{ kind: "polar", count: 6, axis: 1, radius: 1 }] })]);
+    const byHand = await shot(
+      page,
+      [0, 1, 2, 3, 4, 5].map((k) => {
+        const a = (k * Math.PI) / 3;
+        return cone({ id: `c${k}`, position: [at[0] + Math.cos(a), at[1], at[2] + Math.sin(a)] });
+      }),
+    );
+    expect((await imageDiff(page, ring, byHand)).over16).toBeLessThan(0.002);
   });
 
   test("an infinite grid renders to the horizon", async ({ page }) => {

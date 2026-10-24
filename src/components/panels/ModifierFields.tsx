@@ -100,6 +100,7 @@ function AxisPicker({ value, onChange, label = "Axis" }: { value: Axis; onChange
 
 function ScalarRow({
   label,
+  ariaLabel = label,
   value,
   min,
   max,
@@ -108,6 +109,8 @@ function ScalarRow({
   onChange,
 }: {
   label: string;
+  /** When `label` alone is ambiguous in the inspector (a shape's own Radius field). */
+  ariaLabel?: string;
   value: number;
   min: number;
   max: number;
@@ -119,7 +122,7 @@ function ScalarRow({
     <div className="prop-row">
       <label className="prop-label">{label}</label>
       <NumberField
-        ariaLabel={label}
+        ariaLabel={ariaLabel}
         value={value}
         min={min}
         max={max}
@@ -171,6 +174,7 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
       return (
         <>
           <ScalarRow label="Count" value={m.count} min={1} max={MAX_POLAR_COUNT} step={1} integer onChange={(count) => onChange({ ...m, count })} />
+          <ScalarRow label="Radius" ariaLabel="Polar radius" value={m.radius} min={0} max={100} step={0.05} onChange={(radius) => onChange({ ...m, radius })} />
           <AxisPicker value={m.axis} onChange={(axis) => onChange({ ...m, axis })} />
         </>
       );

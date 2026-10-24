@@ -20,7 +20,7 @@ import {
 } from "../sdf/primitives";
 import { POINT_MODIFIERS, activeModifiers, type Modifier } from "../store/modifiers";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
-import { polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
+import { polarShift, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 
 export type CodeLang = "typegpu" | "wgsl" | "glsl";
 
@@ -596,9 +596,11 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         } else {
           const sector = fmt((2 * Math.PI) / c.mod.count);
           const axis = syn.uint(c.mod.axis);
+          // Turned into the copy's sector, then out by the radius.
+          const out = c.mod.radius === 0 ? "" : ` - ${syn.vec3(polarShift(c.mod))}`;
           if (c.reach === "all") {
             count = c.mod.count;
-            copy = `opPolarCopy(${stmt.from}, ${sector}, ${axis}, ${n})`;
+            copy = `opPolarCopy(${stmt.from}, ${sector}, ${axis}, ${n})${out}`;
           } else {
             const gap = syn.vec2(c.gap[0], c.gap[1]);
             const sphere = syn.vec4(c.copy.c, c.copy.r);
@@ -606,7 +608,7 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
             const own = `own${k}`;
             push(syn.pointStmt(own, `opPolarNear(${stmt.from}, ${sector}, ${axis}, ${syn.uint(0)})`));
             count = Math.min(3, c.mod.count);
-            copy = `opPolarNear(${stmt.from}, ${sector}, ${axis}, ${n})`;
+            copy = `opPolarNear(${stmt.from}, ${sector}, ${axis}, ${n})${out}`;
             near = {
               others: `opPolarOthers(${own}, ${axis}, ${sphere}, ${syn.vec4([t[0], t[1], t[2]], t[3])}, ${syn.vec4([t[4], t[5], t[6]], t[7])})`,
               bound: `opPolarNearBound(${stmt.from}, ${sector}, ${axis}, ${sphere}, ${n})`,

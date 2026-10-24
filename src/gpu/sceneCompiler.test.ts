@@ -203,7 +203,7 @@ describe("scene compiler modifiers", () => {
 
   test("a polar repeat checks its three nearest copies, or every copy around the axis", () => {
     const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
-    const polar = (count: number) => ({ kind: "polar" as const, count, axis: 1 as const });
+    const polar = (count: number) => ({ kind: "polar" as const, count, axis: 1 as const, radius: 0 });
     const spokes = (count: number, r = 0.2) =>
       body(compile(scene([group([shape("sphere", { position: [1, 0, 0], params: [r, 0, 0, 0] })], { modifiers: [polar(count)] })])).code);
     expect(spokes(6)).toMatch(/< min\(3u, u32\(dsData\[\d+\]\.x\)\); n/);
@@ -224,6 +224,13 @@ describe("scene compiler modifiers", () => {
     const near = mirror(0);
     expect(mirror(0.7).code).toBe(near.code);
     expect(near.code).toMatch(/vec3f\(abs\(q\d+\.x\) - dsData\[\d+\]\.x, q\d+\.y, abs\(q\d+\.z\) - dsData\[\d+\]\.z\)/);
+  });
+
+  test("a polar repeat's radius is a value", () => {
+    const ring = (radius: number) =>
+      compile(scene([shape("cone", { modifiers: [{ kind: "polar", count: 6, axis: 1, radius }] })])).code;
+    expect(ring(1.5)).toBe(ring(2));
+    expect(ring(1.5)).toMatch(/ds_opPolarNear\(.*, n\d+\) - dsData\[\d+\]\.xyz/);
   });
 
   test("twist and bend scale the result by 1 / Lipschitz", () => {

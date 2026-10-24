@@ -163,7 +163,7 @@ export function modifiersScene() {
       layer("box", [0.12, 0.3, 0.12, 0], { position: at(0, -0.6), modifiers: [{ kind: "twist", amount: 4, axis: 1 }] }),
       group([layer("capsule", [0.04, 0.12, 0, 0], { position: [0.25, 0, 0] as V3, rotation: [0, 0, 90] as V3 })], {
         position: at(1, -0.6),
-        modifiers: [{ kind: "polar", count: 8, axis: 1 }],
+        modifiers: [{ kind: "polar", count: 8, axis: 1, radius: 0 }],
       }),
       group([layer("sphere", [0.12, 0, 0, 0], { position: [0.15, 0, 0] as V3 }), layer("box", [0.05, 0.2, 0.05, 0], { position: [0.15, 0, 0] as V3 })], {
         position: at(-1, 0.6),

@@ -126,9 +126,16 @@ describe("generateSdfCode modifiers", () => {
     expect(far.typegpu).toMatch(/std\.abs\(q\d+\.x\) - 0\.75/);
   });
 
+  test("a polar repeat's radius moves each copy out along its sector", () => {
+    const out = generateSdfCode(scene([shape("cone", { modifiers: [{ kind: "polar", count: 6, axis: 1, radius: 1.5 }] })]), null);
+    expect(out.wgsl).toMatch(/opPolarNear\(.*\) - vec3f\(1\.5, 0\.0, 0\.0\)/);
+    expect(out.glsl).toMatch(/opPolarNear\(.*\) - vec3\(1\.5, 0\.0, 0\.0\)/);
+    expect(out.typegpu).toMatch(/opPolarNear\(.*\) - d\.vec3f\(1\.5, 0\.0, 0\.0\)/);
+  });
+
   test("modifier output is stable", () => {
     const root = scene([
-      group([shape("capsule")], { modifiers: [{ kind: "polar", count: 6, axis: 1 }, { kind: "elongate", size: [0.1, 0, 0] }] }),
+      group([shape("capsule")], { modifiers: [{ kind: "polar", count: 6, axis: 1, radius: 0 }, { kind: "elongate", size: [0.1, 0, 0] }] }),
       shape("torus", { op: "subtract", modifiers: [{ kind: "onion", thickness: 0.02 }, { kind: "bend", amount: 1, axis: 2 }] }),
     ]);
     const out = generateSdfCode(root, null);

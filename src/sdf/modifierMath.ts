@@ -8,6 +8,16 @@ import type { Axis, Modifier, Vec3 } from "../store/modifiers";
 /** Bound radius standing in for "unbounded" (infinite repetition). */
 export const UNBOUNDED = 1e5;
 
+/**
+ * A polar repeat turns a point into its sector's frame, then moves it by
+ * this (radius along the plane's first axis) so the copy sits that far out.
+ */
+export function polarShift(m: Extract<Modifier, { kind: "polar" }>): Vec3 {
+  const out: Vec3 = [0, 0, 0];
+  out[planeAxes("polar", m.axis)[0]] = m.radius;
+  return out;
+}
+
 /** Axes of the plane a polar / twist (rotation axis `a`) or bend acts in. */
 export function planeAxes(kind: "polar" | "twist" | "bend", a: Axis): [Axis, Axis] {
   if (kind === "bend") return [((a + 1) % 3) as Axis, ((a + 2) % 3) as Axis];
@@ -36,6 +46,7 @@ export function expandThrough(m: Modifier, c: Vec3, r: number): { c: Vec3; r: nu
     case "twist":
     case "bend": {
       const [u, v] = planeAxes(m.kind, m.axis);
+      if (m.kind === "polar") c = polarSector(m, c);
       const out = [...c] as Vec3;
       out[u] = 0;
       out[v] = 0;
@@ -96,7 +107,13 @@ function polarSpan(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number):
   return { angle: Math.abs(Math.atan2(c[v], c[u])), half: r >= d ? Math.PI : Math.asin(r / d) };
 }
 
-/** Geometry sphere (c, r) in the polar repeat's output space. */
+/** A sphere center in a polar's output space (after its shift), seen in its sector's frame (before it). */
+export function polarSector(m: Extract<Modifier, { kind: "polar" }>, c: Readonly<Vec3>): Vec3 {
+  const s = polarShift(m);
+  return [c[0] + s[0], c[1] + s[1], c[2] + s[2]];
+}
+
+/** Geometry sphere (c, r) in the polar repeat's sector frame (polarSector). */
 export function polarReach(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number): PolarReach {
   if (m.count <= 3) return "near"; // the nearest three are all of them
   const { angle, half } = polarSpan(m, c, r);
@@ -150,11 +167,16 @@ export function planPointModifiers(point: Modifier[], c: Vec3, r: number): Modif
   let invL = 1;
   for (let i = point.length - 1; i >= 0; i--) {
     const m = point[i];
-    if (m.kind === "repeat" || m.kind === "polar") copy[i] = { c: [...c] as Vec3, r };
-    if (m.kind === "repeat") gap[i] = repeatGap(m, c, r);
+    if (m.kind === "repeat") {
+      copy[i] = { c: [...c] as Vec3, r };
+      gap[i] = repeatGap(m, c, r);
+    }
     if (m.kind === "polar") {
-      polar[i] = polarReach(m, c, r);
-      gap[i] = polarGap(m, c, r);
+      // Polar bounds work in the sector's frame, before the radius shift.
+      const sc = polarSector(m, c);
+      copy[i] = { c: sc, r };
+      polar[i] = polarReach(m, sc, r);
+      gap[i] = polarGap(m, sc, r);
     }
     invL /= deformLipschitz(m, c, r);
     ({ c, r } = expandThrough(m, c, r));

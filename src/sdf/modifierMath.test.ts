@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { expandThrough, planPointModifiers, polarGap, polarReach, repeatGap } from "./modifierMath";
 
-const polar = (count: number, axis: 0 | 1 | 2 = 1) => ({ kind: "polar" as const, count, axis });
+const polar = (count: number, axis: 0 | 1 | 2 = 1, radius = 0) => ({ kind: "polar" as const, count, axis, radius });
 
 describe("polar repeat reach", () => {
   test("spokes within a sector and a half of their own need only the nearest three copies", () => {
@@ -35,6 +35,20 @@ describe("mirror bounds", () => {
     const out = expandThrough({ kind: "mirror", axes: [true, false, false], offset: [1, 5, 5] }, [0.2, 0.3, 0], 0.5);
     expect(out.c).toEqual([0, 0.3, 0]);
     expect(out.r).toBeCloseTo(1.7);
+  });
+});
+
+describe("polar radius", () => {
+  test("the ring of copies around the axis bounds the item", () => {
+    // A sphere of radius 0.5 at the origin, 1 out from a y axis: a ring of radius 1.5.
+    const out = expandThrough(polar(6, 1, 1), [0, 0.2, 0], 0.5);
+    expect(out.c).toEqual([0, 0.2, 0]);
+    expect(out.r).toBeCloseTo(1.5);
+  });
+
+  test("copies moved off the axis need only the nearest three", () => {
+    expect(planPointModifiers([polar(6)], [0, 0, 0], 0.5).polar).toEqual(["all"]);
+    expect(planPointModifiers([polar(6, 1, 2)], [0, 0, 0], 0.5).polar).toEqual(["near"]);
   });
 });
 

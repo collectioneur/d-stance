@@ -20,7 +20,7 @@ describe("modifiers", () => {
       spacing: [0.01, 0.01, 1],
       count: [64, 0, 3],
     });
-    expect(sanitizeModifier({ kind: "polar", count: 0, axis: 7 })).toEqual({ kind: "polar", count: 1, axis: 1 });
+    expect(sanitizeModifier({ kind: "polar", count: 0, axis: 7, radius: -3 })).toEqual({ kind: "polar", count: 1, axis: 1, radius: 0 });
     expect(sanitizeModifier({ kind: "twist", amount: Infinity, axis: 2 })).toEqual({ kind: "twist", amount: 2, axis: 2 });
     expect(sanitizeModifier({ kind: "onion", thickness: 0 })).toEqual({ kind: "onion", thickness: 0.001 });
     expect(sanitizeModifier({ kind: "evil" })).toBeUndefined();
@@ -30,6 +30,15 @@ describe("modifiers", () => {
       axes: [false, true, false],
       offset: [100, 0, 0],
     });
+  });
+
+  test("polar repeats saved before the radius existed turn the item about its axis", () => {
+    expect(sanitizeModifier({ kind: "polar", count: 6, axis: 1 })).toEqual({ kind: "polar", count: 6, axis: 1, radius: 0 });
+  });
+
+  test("a new polar repeat puts six copies just apart", () => {
+    const m = createModifier("polar", 0.4);
+    expect(m.kind === "polar" && m.radius).toBe(0.8);
   });
 
   test("mirrors saved before the distance existed reflect across the origin", () => {

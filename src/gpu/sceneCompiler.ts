@@ -31,7 +31,7 @@ import {
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
-import { UNBOUNDED, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
+import { UNBOUNDED, polarShift, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
@@ -230,9 +230,10 @@ class Builder {
           return { kind: "mirror", slot, axes: [...m.axes] };
         }
         case "polar": {
-          const slot = this.alloc(4);
+          const slot = this.alloc(5);
           const copy = plan.copy[i]!;
           const turned = polarTurned(m, copy.c);
+          this.set(slot + 4, ...polarShift(m), 0);
           this.set(slot, m.count, (2 * Math.PI) / m.count, ...(plan.gap[i] as [number, number]));
           this.set(slot + 1, ...copy.c, copy.r);
           this.set(slot + 2, turned[0], turned[1], turned[2], turned[3]);
@@ -749,8 +750,10 @@ class Emitter {
       }
       if (s.kind === "polar") {
         const v = slot(s.slot);
+        // Turned into the copy's sector, then out by the radius.
+        const shift = `${slot(s.slot + 4)}.xyz`;
         if (s.reach === "all") {
-          return this.copyLoop({ count: `u32(${v}.x)`, rest, unit, depth, body }, (n) => `ds_opPolarCopy(${q}, ${v}.y, ${s.axis}u, ${n})`);
+          return this.copyLoop({ count: `u32(${v}.x)`, rest, unit, depth, body }, (n) => `ds_opPolarCopy(${q}, ${v}.y, ${s.axis}u, ${n}) - ${shift}`);
         }
         const sphere = slot(s.slot + 1);
         const own = this.fresh("q");
@@ -759,7 +762,7 @@ class Emitter {
           { count: `min(3u, u32(${v}.x))`, rest, unit, depth, body },
           `ds_opPolarOthers(${own}, ${s.axis}u, ${sphere}, ${slot(s.slot + 2)}, ${slot(s.slot + 3)})`,
           (n) => `ds_opPolarNearBound(${q}, ${v}.y, ${s.axis}u, ${sphere}, ${n})`,
-          (n) => `ds_opPolarNear(${q}, ${v}.y, ${s.axis}u, ${n})`,
+          (n) => `ds_opPolarNear(${q}, ${v}.y, ${s.axis}u, ${n}) - ${shift}`,
           `ds_opPolarFar(${q}, ${v}.y, ${s.axis}u, ${v}.zw, ${v}.x)`,
         );
       }
