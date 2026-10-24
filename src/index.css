@@ -288,7 +288,7 @@ canvas {
 /* Standalone floating pill (no .panel wrapper) */
 .floating-pill {
   position: fixed;
-  z-index: 10;
+  z-index: 11; /* its dropdowns must cover the side panels and the gizmo bar */
   display: flex;
   align-items: center;
   gap: 8px;
@@ -315,7 +315,6 @@ canvas {
   bottom: var(--space-3);
   left: 50%;
   translate: -50%;
-  z-index: 11; /* its upward dropdown must cover the gizmo bar above */
 }
 
 /* Popovers open upwards when the pill sits at the bottom. */
@@ -323,7 +322,7 @@ canvas {
   top: auto;
   bottom: calc(100% + 6px);
   --motion-dy: 4px;
-  transform-origin: bottom right;
+  transform-origin: bottom center;
 }
 .floating-pill--bottom .render-mode-chevron {
   transform: rotate(180deg);
@@ -801,6 +800,22 @@ canvas {
   gap: 6px;
 }
 
+.render-mode-label {
+  display: grid;
+}
+
+.render-mode-label > span {
+  grid-area: 1 / 1;
+}
+
+.render-mode-sizer {
+  visibility: hidden;
+}
+
+.render-mode-sizer::before {
+  content: attr(data-label);
+}
+
 .render-mode-chevron {
   opacity: 0.55;
   transition: transform var(--transition-fast);
@@ -811,10 +826,13 @@ canvas {
 }
 
 .render-mode-list {
+  /* Border + padding + option padding: options line up under the trigger's
+     icon, label and chevron. */
+  --inset: calc(1px + var(--space-1) + 10px);
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
-  min-width: 136px;
+  left: calc(-1 * var(--inset));
+  right: calc(-1 * var(--inset));
   background: var(--bg-panel);
   backdrop-filter: var(--blur-panel);
   -webkit-backdrop-filter: var(--blur-panel);
@@ -826,7 +844,7 @@ canvas {
   gap: 2px;
   z-index: 20;
   --motion-dy: -4px;
-  transform-origin: top right;
+  transform-origin: top center;
 }
 
 .render-mode-option {
