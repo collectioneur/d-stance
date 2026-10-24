@@ -1199,7 +1199,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           lastQuality = quality;
         }
         if (lastRoot && sceneRoot !== lastRoot) spawnAnim.rootChanged(lastRoot, sceneRoot, now);
-        const drawn = spawnAnim.frame(sceneRoot, now);
+        // A new item grows in once the program on screen draws it (it may still be compiling).
+        const drawn = spawnAnim.frame(sceneRoot, now, (id) => !!active?.scene.markIndex.has(id));
         if (
           selectedIds !== lastSelectedIds ||
           rootSelected !== lastRootSelected ||
@@ -1267,6 +1268,10 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
               return { total: performance.now() - t0, codeKb: latest.code.length / 1024 };
             },
             stats: () => ({ ...stats }),
+            /** Items the program on screen draws (shapes and groups). */
+            drawnIds: () => [...(active?.scene.markIndex.keys() ?? [])],
+            /** How far an item's grow-in has run, 0..1; null when it is not growing in. */
+            appearProgress: (id: string) => spawnAnim.progress(id, performance.now()),
             /** True once the program for the current store root is on screen. */
             synced: () => !!active && active.program.code === latest?.code && !dataDirty,
           },
