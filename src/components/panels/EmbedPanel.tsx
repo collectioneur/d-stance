@@ -1,8 +1,11 @@
-import { useEffect, useState } from "react";
-import { Download, ExternalLink } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Download, ExternalLink, RotateCcw } from "lucide-react";
 import type { EmbedExport } from "../../export/embed";
+import type { EmbedView } from "../../export/runtime";
 import {
+  startView,
   useExportStore,
+  type CustomView,
   type ExportBackground,
   type ExportFormat,
   type ExportFraming,
@@ -10,6 +13,7 @@ import {
   type ExportMotion,
   type ExportQuality,
 } from "../../store/exportStore";
+import { useViewStore } from "../../store/viewStore";
 
 type Choice<T extends string> = { value: T; label: string };
 
@@ -41,20 +45,23 @@ const FRAMINGS: Choice<ExportFraming>[] = [
   { value: "fit", label: "Fit scene" },
   { value: "editor", label: "Editor view" },
 ];
+const CUSTOM: Choice<ExportFraming> = { value: "custom", label: "Custom" };
 
 function Select<T extends string>({
   label,
   value,
   options,
   onChange,
+  children,
 }: {
   label: string;
   value: T;
   options: Choice<T>[];
   onChange: (v: T) => void;
+  children?: ReactNode;
 }) {
   return (
-    <div className="prop-row">
+    <div className={children ? "prop-row embed-row--action" : "prop-row"}>
       <label className="prop-label">{label}</label>
       <select
         className="prop-input prop-select"
@@ -68,31 +75,73 @@ function Select<T extends string>({
           </option>
         ))}
       </select>
+      {children}
     </div>
   );
-}
-
-/** Settles a fast-changing value (gizmo drags) before heavy work uses it. */
-function useSettled<T>(value: T, ms: number): T {
-  const [settled, setSettled] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setSettled(value), ms);
-    return () => clearTimeout(id);
-  }, [value, ms]);
-  return settled;
 }
 
 function blobUrl(text: string, type: string): string {
   return URL.createObjectURL(new Blob([text], { type }));
 }
 
+const round = (n: number) => Math.round(n * 1e4) / 1e4;
+
 /**
  * Embed settings, live preview and file actions. The preview is the exported
  * document itself in a sandboxed frame — what you see is what you paste.
+ * Orbiting or zooming it sets the export's start view.
  */
-export function EmbedPanel({ exp, fileName }: { exp: EmbedExport; fileName: string }) {
+export function EmbedPanel({ exp, sceneId, fileName }: { exp: EmbedExport; sceneId: string; fileName: string }) {
   const s = useExportStore();
-  const previewDoc = useSettled(exp.document, 400);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const hasCustom = s.custom?.scene === sceneId;
+  const custom = s.framing === "custom" && hasCustom;
+
+  // Reloads settle (gizmo drags) before the frame restarts. A view the
+  // preview itself reported only catches the export up: the frame already
+  // shows it and keeps running.
+  const [previewDoc, setPreviewDoc] = useState(exp.preview);
+  const adopted = useRef<CustomView | null>(null);
+  const pending = useRef(false);
+  useEffect(() => {
+    if (adopted.current && adopted.current === useExportStore.getState().custom && !pending.current) {
+      adopted.current = null;
+      return;
+    }
+    pending.current = true;
+    const id = setTimeout(() => {
+      pending.current = false;
+      setPreviewDoc(exp.preview);
+    }, 400);
+    return () => clearTimeout(id);
+  }, [exp.preview]);
+  useEffect(() => {
+    adopted.current = null;
+  }, [s.custom]);
+
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.source !== frameRef.current?.contentWindow) return;
+      const v = (e.data as { dstanceView?: Partial<EmbedView> } | null)?.dstanceView;
+      if (!v) return;
+      const { rotX, rotY, distance, zoom } = v;
+      if (![rotX, rotY, distance, zoom].every((n) => typeof n === "number" && Number.isFinite(n))) return;
+      const state = useExportStore.getState();
+      const shown = startView(state, sceneId, useViewStore.getState());
+      const next: CustomView = {
+        scene: sceneId,
+        base: shown.framing,
+        rotX: round(rotX!),
+        rotY: round(rotY!),
+        zoom: round(zoom!),
+        distance: round(distance!),
+      };
+      adopted.current = next;
+      state.set({ framing: "custom", custom: next });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [sceneId]);
 
   const download = () => {
     const isModule = s.format === "module";
@@ -114,6 +163,7 @@ export function EmbedPanel({ exp, fileName }: { exp: EmbedExport; fileName: stri
     <div className="embed-panel">
       <div className="embed-preview">
         <iframe
+          ref={frameRef}
           title="Embed preview"
           className="embed-preview-frame"
           sandbox="allow-scripts"
@@ -123,8 +173,26 @@ export function EmbedPanel({ exp, fileName }: { exp: EmbedExport; fileName: stri
           <ExternalLink size={12} />
         </button>
       </div>
+      <p className="embed-preview-hint">Drag or scroll the preview to set where the camera starts.</p>
       <Select label="Look" value={s.look} options={LOOKS} onChange={(look) => s.set({ look })} />
-      <Select label="Framing" value={s.framing} options={FRAMINGS} onChange={(framing) => s.set({ framing })} />
+      <Select
+        label="Framing"
+        value={custom ? "custom" : s.framing === "editor" ? "editor" : "fit"}
+        options={hasCustom ? [...FRAMINGS, CUSTOM] : FRAMINGS}
+        onChange={(framing) => s.set({ framing })}
+      >
+        {custom && (
+          <button
+            type="button"
+            className="embed-reset"
+            title="Reset the start view"
+            aria-label="Reset the start view"
+            onClick={() => s.set({ framing: s.custom!.base, custom: null })}
+          >
+            <RotateCcw size={11} />
+          </button>
+        )}
+      </Select>
       <Select
         label="Background"
         value={s.background}

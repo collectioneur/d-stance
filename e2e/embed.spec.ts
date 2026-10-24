@@ -217,23 +217,24 @@ test.describe("embed behaviour", () => {
     expect(s.corner[1]).toBeLessThan(60);
   });
 
-  test("drag orbits, ctrl+wheel zooms, plain wheel scrolls the page", async ({ page }) => {
+  test("drag orbits, ctrl+wheel zooms; a plain wheel scrolls the page until the scene is clicked", async ({ page }) => {
     await openEditor(page);
     const out = await makeEmbed(page, SCENE, { framing: "fit" } as never);
     await openHtml(page, `<!doctype html><body style="margin:0;height:3000px;background:#000">${out.html}</body>`);
     await waitDrawn(page);
     const c = page.locator("canvas");
     const bb = (await c.boundingBox())!;
+    const mid = { x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 };
     const before = await c.screenshot();
-    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+    await page.mouse.move(mid.x, mid.y);
     await page.mouse.down();
-    await page.mouse.move(bb.x + bb.width / 2 + 150, bb.y + bb.height / 2, { steps: 5 });
+    await page.mouse.move(mid.x + 150, mid.y, { steps: 5 });
     await page.mouse.up();
     await page.waitForTimeout(200);
     const rotated = await c.screenshot();
     expect((await imageDiff(page, before, rotated)).over16).toBeGreaterThan(0.01);
 
-    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+    await page.mouse.move(mid.x, mid.y);
     await page.keyboard.down("Control");
     await page.mouse.wheel(0, -300);
     await page.keyboard.up("Control");
@@ -242,9 +243,78 @@ test.describe("embed behaviour", () => {
     const zoomed = await c.screenshot();
     expect((await imageDiff(page, rotated, zoomed)).over16).toBeGreaterThan(0.01);
 
+    // The drag above activated the scene: a plain wheel zooms while the
+    // pointer stays on it.
+    await page.mouse.wheel(0, 300);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => scrollY)).toBe(0);
+    expect((await imageDiff(page, zoomed, await c.screenshot())).over16).toBeGreaterThan(0.01);
+
+    // Leaving deactivates it: back on the scene, a plain wheel scrolls and a
+    // hint says how to zoom.
+    await page.mouse.move(mid.x, bb.y + bb.height + 100);
+    await page.mouse.move(mid.x, mid.y);
     await page.mouse.wheel(0, 400);
     await page.waitForTimeout(300);
     expect(await page.evaluate(() => scrollY)).toBeGreaterThan(0);
+    const hint = page.getByText(/or click the scene to zoom/);
+    await expect(hint).toHaveCSS("opacity", "1");
+    await expect(hint).toHaveCSS("opacity", "0", { timeout: 3000 });
+  });
+
+  test("on a page that cannot scroll, a plain wheel zooms", async ({ page }) => {
+    await openEditor(page);
+    const out = await makeEmbed(page, SCENE, { framing: "fit" } as never);
+    await openHtml(page, out.document);
+    await waitDrawn(page);
+    const c = page.locator("canvas");
+    const bb = (await c.boundingBox())!;
+    const before = await c.screenshot();
+    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+    await page.mouse.wheel(0, -300);
+    await page.waitForTimeout(300);
+    expect((await imageDiff(page, before, await c.screenshot())).over16).toBeGreaterThan(0.01);
+    await expect(page.getByText(/or click the scene to zoom/)).toHaveCount(0);
+  });
+
+  test("touch pinch and Safari trackpad gestures zoom", async ({ page }) => {
+    await openEditor(page);
+    const out = await makeEmbed(page, SCENE, { framing: "fit" } as never);
+    await openHtml(page, `<!doctype html><body style="margin:0;height:3000px"><canvas id="c" style="display:block;width:600px;height:400px"></canvas></body>`, "/__pinch.html");
+    await page.evaluate(async (scene) => {
+      const { mount } = await import("/src/export/runtime.js");
+      const w = window as unknown as { views: { zoom: number }[] };
+      w.views = [];
+      mount(document.getElementById("c") as HTMLCanvasElement, scene as never, { onView: (v) => w.views.push(v) });
+    }, out.scene);
+    await waitDrawn(page, "#c");
+    const lastZoom = () => page.evaluate(() => (window as unknown as { views: { zoom: number }[] }).views.at(-1)?.zoom);
+
+    // Two fingers spreading apart: closer.
+    const cdp = await page.context().newCDPSession(page);
+    const points = (d: number) => [
+      { x: 300 - d, y: 200, id: 1 },
+      { x: 300 + d, y: 200, id: 2 },
+    ];
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: points(40) });
+    for (let d = 50; d <= 120; d += 10) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: points(d) });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect.poll(lastZoom).toBeCloseTo(40 / 120, 1);
+    expect(await page.evaluate(() => scrollY)).toBe(0);
+
+    // Safari: pinching the trackpad in to half doubles the distance.
+    const prevented = await page.evaluate(() => {
+      const c = document.getElementById("c")!;
+      const fire = (type: string, scale: number) => {
+        const e = new Event(type, { cancelable: true });
+        Object.defineProperty(e, "scale", { value: scale });
+        c.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      return [fire("gesturestart", 1), fire("gesturechange", 0.75), fire("gesturechange", 0.5), fire("gestureend", 0.5)];
+    });
+    expect(prevented).toEqual([true, true, true, true]);
+    await expect.poll(lastZoom).toBeCloseTo((40 / 120) * 2, 2);
   });
 
   test("JS module export mounts from an import", async ({ page }) => {
@@ -272,5 +342,47 @@ test.describe("embed behaviour", () => {
     const dl2 = page.waitForEvent("download");
     await page.getByRole("button", { name: /Download embed-test\.js/ }).click();
     expect((await dl2).suggestedFilename()).toBe("embed-test.js");
+  });
+
+  test("orbiting and zooming the preview sets the start view without restarting it", async ({ page }) => {
+    await openEditor(page, SCENE);
+    await page.getByRole("button", { name: "Code" }).click();
+    await page.getByRole("button", { name: "Embed", exact: true }).click();
+    const frame = page.frameLocator(".embed-preview-frame");
+    await expect(frame.locator("canvas")).toHaveAttribute("data-backend", /webgpu|webgl2/);
+    await page.waitForTimeout(500);
+    const iframe = page.locator(".embed-preview-frame");
+    const doc = await iframe.getAttribute("srcdoc");
+    const exportState = () =>
+      page.evaluate(async () => {
+        const { useExportStore } = await import("/src/store/exportStore.ts");
+        const { framing, custom } = useExportStore.getState();
+        return { framing, custom };
+      });
+
+    const bb = (await iframe.boundingBox())!;
+    const mid = { x: bb.x + bb.width / 2, y: bb.y + bb.height / 2 };
+    await page.mouse.move(mid.x, mid.y);
+    await page.mouse.down();
+    await page.mouse.move(mid.x + 60, mid.y + 20, { steps: 5 });
+    await page.mouse.up();
+    await expect.poll(async () => (await exportState()).framing).toBe("custom");
+    await page.mouse.wheel(0, -200);
+    await expect.poll(async () => (await exportState()).custom?.zoom ?? 1).toBeLessThan(1);
+
+    const { custom } = await exportState();
+    expect(custom!.base).toBe("fit");
+    expect(custom!.rotX).not.toBeCloseTo(0.3, 2);
+    await expect(page.getByLabel("Framing")).toHaveValue("custom");
+    await expect(page.locator(".code-pre")).toContainText(`"rotX": ${custom!.rotX}`);
+    await expect(page.locator(".code-pre")).toContainText(`"zoom": ${custom!.zoom}`);
+    // The preview already shows that view: it keeps running instead of reloading.
+    await page.waitForTimeout(600);
+    expect(await iframe.getAttribute("srcdoc")).toBe(doc);
+
+    await page.getByRole("button", { name: "Reset the start view" }).click();
+    await expect(page.getByLabel("Framing")).toHaveValue("fit");
+    expect((await exportState()).custom).toBeNull();
+    await expect.poll(() => iframe.getAttribute("srcdoc")).toBe(doc);
   });
 });

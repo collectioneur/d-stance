@@ -5,13 +5,15 @@
 //   stop(); // detach listeners, free the GPU
 //
 // scene = { wgsl, glsl, images: [pngDataUrl],
-//           view: { rotX, rotY, distance, target: [x, y, z], fit?: radius } }
+//           view: { rotX, rotY, distance, target: [x, y, z], fit?: radius, zoom? } }
 // With `fit`, the distance adapts to the canvas so a sphere of that radius
-// around `target` stays in frame (until the user zooms).
-// options: orbit (drag to rotate), zoom (ctrl/⌘ + wheel or pinch, so page
-// scrolling is never hijacked), autoRotate (rad/s), maxDpr, backend
-// ("auto" | "webgpu" | "webgl2"). Draws only when something changed and
-// never while the canvas is off screen.
+// around `target` stays in frame; `zoom` (and the user's zoom) multiplies it.
+// options: orbit (drag to rotate), zoom (pinch, ctrl/⌘ + wheel), wheel
+// ("auto": a plain wheel zooms only where it would not scroll anything, or
+// after a click on the scene; "always"; "modifier"), autoRotate (rad/s),
+// maxDpr, backend ("auto" | "webgpu" | "webgl2"), onView (called with
+// { rotX, rotY, distance, zoom } when the user leaves the camera somewhere).
+// Draws only when something changed and never while the canvas is off screen.
 
 const GL_VERTEX = `#version 300 es
 void main() {
@@ -160,7 +162,7 @@ async function createWebGl(canvas, scene) {
 }
 
 export function mount(canvas, scene, options = {}) {
-  const opts = { orbit: true, zoom: true, autoRotate: 0, maxDpr: 2, backend: "auto", ...options };
+  const opts = { orbit: true, zoom: true, wheel: "auto", autoRotate: 0, maxDpr: 2, backend: "auto", ...options };
   if (matchMedia("(prefers-reduced-motion: reduce)").matches) opts.autoRotate = 0;
   const view = {
     rotX: scene.view.rotX,
@@ -169,7 +171,9 @@ export function mount(canvas, scene, options = {}) {
     target: scene.view.target ?? [0, 0, 0],
     time: 0,
   };
-  let fit = scene.view.fit ?? 0;
+  const fit = scene.view.fit ?? 0;
+  // With `fit` the zoom is relative to the fitted distance, so it survives resizes.
+  let zoom = scene.view.zoom ?? 1;
   let renderer = null;
   let dirty = true;
   let visible = true;
@@ -190,7 +194,7 @@ export function mount(canvas, scene, options = {}) {
     if (fit) {
       // Vertical half-FOV is 45°; narrow canvases are limited by width.
       const halfFov = Math.atan(Math.min(1, w / h));
-      view.distance = (fit * 1.1) / Math.sin(halfFov);
+      view.distance = ((fit * 1.1) / Math.sin(halfFov)) * zoom;
     }
   };
 
@@ -220,37 +224,153 @@ export function mount(canvas, scene, options = {}) {
   };
 
   // ── Interaction ──
+  const report = () => opts.onView?.({ rotX: view.rotX, rotY: view.rotY, distance: view.distance, zoom });
+  let reportTimer = 0;
+  const reportSoon = () => {
+    clearTimeout(reportTimer);
+    reportTimer = setTimeout(report, 250);
+  };
+  const zoomBy = (factor) => {
+    if (fit) zoom = Math.min(5, Math.max(0.2, zoom * factor));
+    else view.distance = Math.min(20, Math.max(0.5, view.distance * factor));
+    invalidate();
+    reportSoon();
+  };
+
   let dragging = null;
+  const touches = new Map(); // pointerId → { x, y }
+  let pinch = 0; // finger spread at the last pinch step
+  // Clicked into: a plain wheel zooms until the mouse leaves the canvas.
+  let active = false;
+  const spread = () => {
+    const [a, b] = [...touches.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
   const onDown = (e) => {
-    if (!opts.orbit || e.button !== 0) return;
-    dragging = { x: e.clientX, y: e.clientY, rotX: view.rotX, rotY: view.rotY };
-    canvas.setPointerCapture(e.pointerId);
+    if (e.button !== 0) return;
+    active = true;
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2 && opts.zoom) {
+        dragging = null;
+        pinch = spread();
+      }
+      if (touches.size > 1) return;
+    }
+    if (!opts.orbit) return;
+    dragging = { x: e.clientX, y: e.clientY, rotX: view.rotX, rotY: view.rotY, moved: false };
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      // Synthetic pointers cannot be captured.
+    }
     canvas.style.cursor = "grabbing";
   };
   const onMove = (e) => {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touches.size === 2) {
+      const d = spread();
+      if (d > 0) zoomBy(pinch / d);
+      pinch = d;
+      return;
+    }
     if (!dragging) return;
     view.rotX = dragging.rotX + ((e.clientX - dragging.x) / canvas.clientWidth) * Math.PI * 2;
     view.rotY = dragging.rotY + ((e.clientY - dragging.y) / canvas.clientHeight) * Math.PI * 2;
+    dragging.moved = true;
     invalidate();
   };
-  const onUp = () => {
+  const onUp = (e) => {
+    touches.delete(e.pointerId);
+    if (touches.size < 2) pinch = 0;
+    if (dragging?.moved) report();
     dragging = null;
     canvas.style.cursor = opts.orbit ? "grab" : "";
   };
-  // Plain wheel scrolls the page; ctrl/⌘ + wheel (and trackpad pinch) zooms.
+  const onLeave = (e) => {
+    if (e.pointerType === "mouse") active = false;
+  };
+
+  // Would a plain wheel over the canvas scroll the page or a container?
+  const scrollsAround = () => {
+    for (let el = canvas.parentElement; el; el = el.parentElement) {
+      if (el.scrollHeight <= el.clientHeight + 1) continue;
+      if (el === document.scrollingElement || /auto|scroll/.test(getComputedStyle(el).overflowY)) return true;
+    }
+    return false;
+  };
+  let hint = null;
+  let hintTimer = 0;
+  const showHint = () => {
+    if (!hint) {
+      hint = document.createElement("div");
+      hint.setAttribute("aria-hidden", "true");
+      // Escaped: the host page may not be UTF-8.
+      hint.textContent = `Hold ${/Mac|iPhone|iPad/.test(navigator.platform) ? "\u2318" : "Ctrl"} or click the scene to zoom`;
+      Object.assign(hint.style, {
+        position: "fixed",
+        zIndex: "2147483647",
+        transform: "translate(-50%, -50%)",
+        padding: "7px 12px",
+        borderRadius: "8px",
+        background: "rgba(0, 0, 0, 0.75)",
+        color: "#fff",
+        font: "500 13px/1.3 system-ui, sans-serif",
+        whiteSpace: "nowrap",
+        pointerEvents: "none",
+        opacity: "0",
+        transition: "opacity 0.2s",
+      });
+      document.body.appendChild(hint);
+    }
+    const r = canvas.getBoundingClientRect();
+    hint.style.left = `${r.left + r.width / 2}px`;
+    hint.style.top = `${r.top + r.height / 2}px`;
+    hint.style.opacity = "1";
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => (hint.style.opacity = "0"), 1200);
+  };
+  // ctrl/⌘ + wheel (and trackpad pinch, which arrives as ctrl + wheel) zooms.
+  // A plain wheel zooms per `opts.wheel`; when it scrolls instead, a hint
+  // says how to zoom.
   const onWheel = (e) => {
-    if (!opts.zoom || !(e.ctrlKey || e.metaKey)) return;
+    if (!opts.zoom) return;
+    const plain = !(e.ctrlKey || e.metaKey);
+    if (plain && (opts.wheel === "modifier" || (opts.wheel !== "always" && !active && scrollsAround()))) {
+      showHint();
+      return;
+    }
     e.preventDefault();
-    fit = 0; // the user framed it now
     const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
-    view.distance = Math.min(20, Math.max(0.5, view.distance * Math.exp(px * 0.002)));
-    invalidate();
+    zoomBy(Math.exp(px * 0.002));
+  };
+  // Safari reports trackpad pinches as gesture events instead (and touch
+  // pinches as both: those zoom through the pointers).
+  let gesture = 0;
+  const onGestureStart = (e) => {
+    if (!opts.zoom || touches.size > 1) return;
+    e.preventDefault();
+    gesture = 1;
+  };
+  const onGestureChange = (e) => {
+    if (!gesture) return;
+    e.preventDefault();
+    zoomBy(gesture / e.scale);
+    gesture = e.scale;
+  };
+  const onGestureEnd = (e) => {
+    if (gesture) e.preventDefault();
+    gesture = 0;
   };
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointermove", onMove);
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
+  canvas.addEventListener("pointerleave", onLeave);
   canvas.addEventListener("wheel", onWheel, { passive: false });
+  canvas.addEventListener("gesturestart", onGestureStart);
+  canvas.addEventListener("gesturechange", onGestureChange);
+  canvas.addEventListener("gestureend", onGestureEnd);
   if (opts.orbit) {
     canvas.style.cursor = "grab";
     canvas.style.touchAction = "pan-y"; // vertical swipes still scroll the page
@@ -295,7 +415,14 @@ export function mount(canvas, scene, options = {}) {
     canvas.removeEventListener("pointermove", onMove);
     canvas.removeEventListener("pointerup", onUp);
     canvas.removeEventListener("pointercancel", onUp);
+    canvas.removeEventListener("pointerleave", onLeave);
     canvas.removeEventListener("wheel", onWheel);
+    canvas.removeEventListener("gesturestart", onGestureStart);
+    canvas.removeEventListener("gesturechange", onGestureChange);
+    canvas.removeEventListener("gestureend", onGestureEnd);
+    clearTimeout(reportTimer);
+    clearTimeout(hintTimer);
+    hint?.remove();
     renderer?.destroy();
   };
 }

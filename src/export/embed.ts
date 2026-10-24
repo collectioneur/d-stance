@@ -38,16 +38,20 @@ export interface EmbedOptions {
   motion: ExportMotion;
   quality: ExportQuality;
   /** "fit": orbit the scene's own center at a distance that frames it. */
-  framing: ExportFraming;
+  framing: Exclude<ExportFraming, "custom">;
   view: ViewState;
+  /** "fit" only: multiplies the framing distance (a zoom set in the preview). */
+  zoom?: number;
 }
 
-type ExportView = ViewState & { target: [number, number, number]; fit?: number };
+type ExportView = ViewState & { target: [number, number, number]; fit?: number; zoom?: number };
 
 export interface EmbedExport {
   html: string;
   module: string;
   document: string;
+  /** `document` that reports the camera to the parent frame (editor preview). */
+  preview: string;
   shadertoy: string;
   /** Shapes Shadertoy cannot show (image layers need textures). */
   shadertoyDropped: number;
@@ -122,14 +126,16 @@ export function generateEmbed(root: SceneRoot, opts: EmbedOptions): EmbedExport 
   // Stable per scene, distinct between scenes sharing a page.
   const id = `dstance-${slug(root.name)}-${hash(scene.wgsl + images.join("")).toString(36)}`;
 
-  const html = `<!-- ${root.name} — made with d-stance. Drag to orbit, ctrl/⌘ + scroll to zoom. -->
+  const sceneJson = scriptJson(scene);
+  const snippet = (options: string) => `<!-- ${root.name} — made with d-stance. Drag to orbit, pinch or ctrl/⌘ + scroll to zoom. -->
 <canvas id="${id}" style="display:block;width:100%;height:420px"></canvas>
 <script type="module">
 ${runtimeInline}
-const scene = ${scriptJson(scene)};
-mount(document.getElementById(${JSON.stringify(id)}), scene, ${JSON.stringify(mountOptions)});
+const scene = ${sceneJson};
+mount(document.getElementById(${JSON.stringify(id)}), scene, ${options});
 </script>
 `;
+  const html = snippet(JSON.stringify(mountOptions));
 
   const module = `// ${root.name} — made with d-stance.
 // import mountScene from "./${slug(root.name)}.js";
@@ -143,7 +149,7 @@ export default function mountScene(canvas, options = {}) {
 }
 `;
 
-  const document = `<!doctype html>
+  const page = (body: string) => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -155,9 +161,13 @@ export default function mountScene(canvas, options = {}) {
 </style>
 </head>
 <body>
-${html.replace(' style="display:block;width:100%;height:420px"', "")}</body>
+${body.replace(' style="display:block;width:100%;height:420px"', "")}</body>
 </html>
 `;
+  const document = page(html);
+  const preview = page(
+    snippet(`{ ...${JSON.stringify(mountOptions)}, onView: (v) => parent.postMessage({ dstanceView: v }, "*") }`),
+  );
 
   const dropped = countImages(root.items);
   const toyFns = dropped > 0 ? sceneFns({ ...root, items: withoutImages(root.items) }) : fns;
@@ -167,6 +177,7 @@ ${html.replace(' style="display:block;width:100%;height:420px"', "")}</body>
     html,
     module,
     document,
+    preview,
     shadertoy:
       dropped > 0
         ? `// ${dropped} image layer${dropped > 1 ? "s were" : " was"} left out: Shadertoy cannot load custom textures.\n${shadertoy}`
@@ -186,12 +197,14 @@ function exportView(root: SceneRoot, opts: EmbedOptions): ExportView {
   if (!sphere) return { rotX, rotY, distance, target: [0, 0, 0] };
   const round = (v: number) => Math.round(v * 1e5) / 1e5;
   const radius = round(Math.max(sphere.radius, 0.05));
+  const zoom = round(opts.zoom ?? 1);
   return {
     rotX,
     rotY,
-    distance: round((radius * 1.1) / Math.sin(HALF_FOV)),
+    distance: round(((radius * 1.1) / Math.sin(HALF_FOV)) * zoom),
     target: sphere.center.map(round) as [number, number, number],
     fit: radius,
+    ...(zoom !== 1 && { zoom }),
   };
 }
 
