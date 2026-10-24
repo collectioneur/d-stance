@@ -287,12 +287,16 @@ canvas {
 
 /* Standalone floating pill (no .panel wrapper) */
 .floating-pill {
+  /* Popovers (render mode list, quality tooltip) open this far from the
+     pill's inner edge. */
+  --pill-height: 34px;
+  --pill-popover-gap: 6px;
   position: fixed;
   z-index: 11; /* its dropdowns must cover the side panels and the gizmo bar */
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 34px;
+  height: var(--pill-height);
   padding: 0 18px;
   border: 1px solid var(--border-1);
   border-radius: 999px;
@@ -320,7 +324,7 @@ canvas {
 /* Popovers open upwards when the pill sits at the bottom. */
 .floating-pill--bottom .render-mode-list {
   top: auto;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + var(--pill-popover-gap));
   --motion-dy: 4px;
   transform-origin: bottom center;
 }
@@ -332,7 +336,7 @@ canvas {
 }
 .floating-pill--bottom .quality-tooltip {
   top: auto;
-  bottom: calc(100% + 8px);
+  bottom: calc(50% + var(--pill-track-to-edge) + var(--pill-popover-gap));
   transform: translateX(-50%) translateY(4px);
 }
 .floating-pill--bottom .quality-tooltip--visible {
@@ -763,8 +767,11 @@ canvas {
 }
 
 .quality-tooltip {
+  /* From the track's center (it sits centered in the pill) to the pill's
+     inner edge, then the shared gap: level with the render mode list. */
+  --pill-track-to-edge: calc((var(--pill-height, 34px) - 2px) / 2);
   position: absolute;
-  top: calc(100% + 8px);
+  top: calc(50% + var(--pill-track-to-edge) + var(--pill-popover-gap, 6px));
   transform: translateX(-50%) translateY(-4px);
   padding: 4px 8px;
   border-radius: var(--radius-sm);
@@ -830,7 +837,7 @@ canvas {
      icon, label and chevron. */
   --inset: calc(1px + var(--space-1) + 10px);
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--pill-popover-gap, 6px));
   left: calc(-1 * var(--inset));
   right: calc(-1 * var(--inset));
   background: var(--bg-panel);
