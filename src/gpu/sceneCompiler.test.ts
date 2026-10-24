@@ -194,6 +194,24 @@ describe("scene compiler modifiers", () => {
     expect(body(loose)).not.toContain("ds_opRepeatCell(");
   });
 
+  test("polar copies that reach past their sector loop over the copies they can be nearest to", () => {
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"));
+    const polar = (count: number) => ({ kind: "polar" as const, count, axis: 1 as const });
+    // On the axis: every copy, counted from the value slot (the count stays a value).
+    const all3 = compile(scene([shape("cone", { modifiers: [polar(3)] })]));
+    const all5 = compile(scene([shape("cone", { modifiers: [polar(5)] })]));
+    expect(body(all3.code)).toMatch(/for \(var n\d+ = 0u; n\d+ < u32\(dsData\[\d+\]\.x\); n\d+\+\+\)/);
+    expect(body(all3.code)).toContain("ds_opPolarCopy(");
+    expect(all5.code).toBe(all3.code);
+    // Spokes: their own sector, or the next one on each side too.
+    const spokes = (count: number, r: number) =>
+      body(compile(scene([group([shape("sphere", { position: [1, 0, 0], params: [r, 0, 0, 0] })], { modifiers: [polar(count)] })])).code);
+    expect(spokes(6, 0.2)).not.toContain("ds_opPolarCopy(");
+    expect(spokes(6, 0.2)).toContain("ds_opPolar(");
+    expect(spokes(16, 0.2)).toContain("< 3u; n");
+    expect(spokes(16, 0.2)).toContain("ds_opPolarCopy(");
+  });
+
   test("twist and bend scale the result by 1 / Lipschitz", () => {
     const out = compile(scene([shape("box", { modifiers: [{ kind: "twist", amount: 3, axis: 1 }] })]));
     const factor = out.values[16];

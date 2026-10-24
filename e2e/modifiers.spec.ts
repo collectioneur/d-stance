@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { canvasStats, openEditor, sceneRoot, sphere, waitForFrames, waitForProgram } from "./helpers";
+import { canvasShot, canvasStats, imageDiff, openEditor, sceneRoot, sphere, waitForFrames, waitForProgram } from "./helpers";
 import { infiniteScene, modifiersScene } from "./scenes";
 
 type Mods = { modifiers?: { kind: string; off?: boolean }[] };
@@ -60,6 +60,32 @@ test.describe("modifiers", () => {
     // The left copy (x = −0.6) sits left of center on screen.
     await page.mouse.click(bb.x + bb.width * 0.424, bb.y + bb.height * 0.437);
     await expect(page.locator(".scene-item--selected .scene-item-name")).toHaveText("Ball");
+  });
+
+  test("polar copies that overlap their sectors match the copies placed by hand", async ({ page }) => {
+    // A cone on its own polar axis overlaps every sector: before the copies
+    // were looped over, each kept only its own wedge and the cuts grew spikes.
+    const cone = (extra: Record<string, unknown>) =>
+      sphere({ shapeType: "cone", name: "Cone", position: [0, -0.7, 0], params: [0.39, 0.6, 0, 0], ...extra });
+    const shot = async (items: { id: string }[]) => {
+      const errors = await openEditor(page, { id: "r", name: "S", items });
+      await waitForProgram(page);
+      // Shapes grow in once drawn: shoot them at full size.
+      await expect
+        .poll(() =>
+          page.evaluate((ids) => {
+            const g = (window as unknown as { __dstance: { gpu: { appearProgress(id: string): number | null } } }).__dstance.gpu;
+            return ids.every((id) => (g.appearProgress(id) ?? 1) >= 1);
+          }, items.map((i) => i.id)),
+        )
+        .toBe(true);
+      await waitForFrames(page, 2);
+      expect(errors).toEqual([]);
+      return canvasShot(page);
+    };
+    const polar = await shot([cone({ id: "c", modifiers: [{ kind: "polar", count: 3, axis: 2 }] })]);
+    const byHand = await shot([0, 120, 240].map((z, i) => cone({ id: `c${i}`, rotation: [0, 0, z] })));
+    expect((await imageDiff(page, polar, byHand)).over16).toBeLessThan(0.002);
   });
 
   test("an infinite grid renders to the horizon", async ({ page }) => {

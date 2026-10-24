@@ -87,14 +87,19 @@ type Rhs = ShapeRhs | VarRhs;
 
 type PostMod = { kind: "round" | "onion"; amount: number };
 type RepeatMod = Extract<Modifier, { kind: "repeat" }>;
+type PolarMod = Extract<Modifier, { kind: "polar" }>;
+/** The copies an overlapping repeat / polar repeat loops over. */
+type Copies =
+  | { kind: "repeat"; mod: RepeatMod; mask: [boolean, boolean, boolean] }
+  | { kind: "polar"; mod: PolarMod; reach: "neighbors" | "all" };
 
 type Stmt =
   | { t: "point"; name: string; from: string; pos: V3 | null; rotRad: V3 | null; scale: V3 | null }
   /** A shape's own local point (its transform), ahead of its point modifiers. */
   | { t: "shapePoint"; name: string; rhs: ShapeRhs }
   | { t: "pmod"; name: string; from: string; mod: Modifier }
-  /** Repeat whose copies overlap: union over the cell and its neighbors. */
-  | { t: "loop"; acc: string; from: string; point: string; mod: RepeatMod; mask: [boolean, boolean, boolean]; body: Stmt[]; result: string }
+  /** Repeat / polar repeat whose copies overlap: union over the copies a point can be nearest to. */
+  | { t: "loop"; acc: string; from: string; point: string; copies: Copies; body: Stmt[]; result: string }
   | { t: "scale"; name: string; k: number }
   | { t: "post"; name: string; mod: PostMod }
   | { t: "def"; name: string; rhs: Rhs }
@@ -186,14 +191,22 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
 
   /**
    * Point modifiers from index `i` on, then `body` at the resulting point.
-   * Overlapping repeats become a loop over neighbor cells (same decision as
-   * the viewport: planPointModifiers).
+   * Overlapping repeats and polar repeats become a loop over the copies a
+   * point can be nearest to (same decision as the viewport:
+   * planPointModifiers).
    */
   function withMods(point: Modifier[], plan: ModifierPlan, i: number, q: string, body: (q: string) => string | null): string | null {
     if (i === point.length) return body(q);
     const m = point[i];
     const neighbors = plan.neighbors[i];
-    if (m.kind === "repeat" && neighbors?.some(Boolean)) {
+    const reach = plan.polar[i];
+    const copies: Copies | null =
+      m.kind === "repeat" && neighbors?.some(Boolean)
+        ? { kind: "repeat", mod: m, mask: neighbors }
+        : m.kind === "polar" && reach && reach !== "sector"
+          ? { kind: "polar", mod: m, reach }
+          : null;
+    if (copies) {
       const acc = `d${accN++}`;
       const inner = freshPoint();
       const outer = sink;
@@ -202,7 +215,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       const result = withMods(point, plan, i + 1, inner, body);
       sink = outer;
       if (!result) return null;
-      emit({ t: "loop", acc, from: q, point: inner, mod: m, mask: neighbors, body: loopBody, result });
+      emit({ t: "loop", acc, from: q, point: inner, copies, body: loopBody, result });
       return acc;
     }
     const next = freshPoint();
@@ -551,9 +564,21 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         const n = `n${stmt.acc.slice(1)}`;
         push(syn.defStmt(stmt.acc, fmt(1e10)));
         if (msyn) push(msyn.defMat(matName(stmt.acc), msyn.lit(DEFAULT_MATERIAL)));
-        push(`  ${syn.loopOpen(n, 1 << stmt.mask.filter(Boolean).length)}`);
-        const step = `cellStep(${n}, ${syn.vec3(stmt.mask.map((b) => (b ? 1 : 0)) as unknown as V3)})`;
-        out.push(pad + "  " + syn.pointStmt(stmt.point, `opRepeatCell(${stmt.from}, ${syn.vec3(stmt.mod.spacing)}, ${syn.vec3(stmt.mod.count)}, ${step})`));
+        const c = stmt.copies;
+        let count: number;
+        let copy: string;
+        if (c.kind === "repeat") {
+          count = 1 << c.mask.filter(Boolean).length;
+          const step = `cellStep(${n}, ${syn.vec3(c.mask.map((b) => (b ? 1 : 0)) as unknown as V3)})`;
+          copy = `opRepeatCell(${stmt.from}, ${syn.vec3(c.mod.spacing)}, ${syn.vec3(c.mod.count)}, ${step})`;
+        } else {
+          // Neighbors: copies −1, 0, +1 around the nearest; all: every copy from it on.
+          count = c.reach === "neighbors" ? 3 : c.mod.count;
+          const first = c.reach === "neighbors" ? -1 : 0;
+          copy = `opPolarCopy(${stmt.from}, ${fmt((2 * Math.PI) / c.mod.count)}, ${syn.uint(c.mod.axis)}, ${n}, ${fmt(first)})`;
+        }
+        push(`  ${syn.loopOpen(n, count)}`);
+        out.push(pad + "  " + syn.pointStmt(stmt.point, copy));
         emitStmts(stmt.body, syn, msyn, depth + 1, out);
         if (msyn) push(`    if (${stmt.result} < ${stmt.acc}) { ${matName(stmt.acc)} = ${matName(stmt.result)}; }`);
         out.push(pad + "  " + syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${stmt.result})`));
@@ -777,6 +802,7 @@ const RESERVED = new Set([
   "cellStep",
   "rot2",
   "opPolar",
+  "opPolarCopy",
   "opTwist",
   "opBend",
 ]);

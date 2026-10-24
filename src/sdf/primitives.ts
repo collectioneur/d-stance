@@ -743,6 +743,17 @@ fn opPolar(q: vec3f, sector: f32, axis: u32) -> vec3f {
   return vec3f(r.x, r.y, q.z);
 }
 
+// The copy first + n sectors from the one nearest to q (opPolar is copy 0).
+// Polar repeats whose copies reach past their sector loop over these.
+fn opPolarCopy(q: vec3f, sector: f32, axis: u32, n: u32, first: f32) -> vec3f {
+  var uv = q.yz;
+  if (axis == 1u) { uv = q.xz; } else if (axis == 2u) { uv = q.xy; }
+  let r = rot2(uv, -sector * (round(atan2(uv.y, uv.x) / sector) + first + f32(n)));
+  if (axis == 0u) { return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { return vec3f(r.x, q.y, r.y); }
+  return vec3f(r.x, r.y, q.z);
+}
+
 fn opTwist(q: vec3f, k: f32, axis: u32) -> vec3f {
   if (axis == 0u) { let r = rot2(q.yz, k * q.x); return vec3f(q.x, r.x, r.y); }
   if (axis == 1u) { let r = rot2(q.xz, k * q.y); return vec3f(r.x, q.y, r.y); }
@@ -802,6 +813,16 @@ vec3 opPolar(vec3 q, float sector, int axis) {
   return vec3(r.x, r.y, q.z);
 }
 
+// The copy first + n sectors from the one nearest to q (opPolar is copy 0).
+// Polar repeats whose copies reach past their sector loop over these.
+vec3 opPolarCopy(vec3 q, float sector, int axis, int n, float first) {
+  vec2 uv = axis == 0 ? q.yz : axis == 1 ? q.xz : q.xy;
+  vec2 r = rot2(uv, -sector * (round(atan(uv.y, uv.x) / sector) + first + float(n)));
+  if (axis == 0) return vec3(q.x, r.x, r.y);
+  if (axis == 1) return vec3(r.x, q.y, r.y);
+  return vec3(r.x, r.y, q.z);
+}
+
 vec3 opTwist(vec3 q, float k, int axis) {
   if (axis == 0) { vec2 r = rot2(q.yz, k * q.x); return vec3(q.x, r.x, r.y); }
   if (axis == 1) { vec2 r = rot2(q.xz, k * q.y); return vec3(r.x, q.y, r.y); }
@@ -825,6 +846,7 @@ export const MODIFIER_TG = (() => {
     ["cellStep", "[d.u32, d.vec3f], d.vec3f", "(n, mask)"],
     ["rot2", "[d.vec2f, d.f32], d.vec2f", "(v, a)"],
     ["opPolar", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, sector, axis)"],
+    ["opPolarCopy", "[d.vec3f, d.f32, d.u32, d.u32, d.f32], d.vec3f", "(q, sector, axis, n, first)"],
     ["opTwist", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)"],
     ["opBend", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)"],
   ];
@@ -834,7 +856,7 @@ export const MODIFIER_TG = (() => {
   };
   return fns
     .map(([name, sig, params]) => {
-      const uses = name === "opPolar" || name === "opTwist" || name === "opBend" ? ".$uses({ rot2 })" : "";
+      const uses = name === "opPolar" || name === "opPolarCopy" || name === "opTwist" || name === "opBend" ? ".$uses({ rot2 })" : "";
       return `const ${name} = tgpu.fn(${sig})\`${params} ${body(name)}\`${uses};`;
     })
     .join("\n\n");

@@ -30,7 +30,7 @@ import {
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
-import { UNBOUNDED, type ModifierPlan } from "../sdf/modifierMath";
+import { UNBOUNDED, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
@@ -79,7 +79,8 @@ export interface CompileOptions {
 type PointStep =
   | { kind: "repeat"; slot: number; neighbors: [boolean, boolean, boolean] }
   | { kind: "mirror"; axes: [boolean, boolean, boolean] }
-  | { kind: "polar" | "twist" | "bend"; slot: number; axis: Axis }
+  | { kind: "polar"; slot: number; axis: Axis; reach: PolarReach }
+  | { kind: "twist" | "bend"; slot: number; axis: Axis }
   | { kind: "elongate"; slot: number };
 
 /** A distance-modifier step: `.x` of the slot is the amount (already in result units). */
@@ -224,7 +225,7 @@ class Builder {
         case "polar": {
           const slot = this.alloc(1);
           this.set(slot, m.count, (2 * Math.PI) / m.count, 0, 0);
-          return { kind: "polar", slot, axis: m.axis };
+          return { kind: "polar", slot, axis: m.axis, reach: plan.polar[i]! };
         }
         case "twist":
         case "bend": {
@@ -712,40 +713,58 @@ class Emitter {
   }
 
   /**
-   * Applies point steps to `q`, then `body`. A repeat whose copies reach past
-   * their cell becomes a loop over the cell and its nearer neighbor on those
-   * axes (2^axes copies, unioned), so overlapping copies stay exact.
+   * Applies point steps to `q`, then `body`. A repeat or polar repeat whose
+   * copies reach past their cell / sector becomes a loop over the copies a
+   * point can be nearest to (the planner's decision), unioned, so
+   * overlapping copies stay exact.
    */
   withSteps(steps: PointStep[], q: string, depth: number, body: (q: string, depth: number) => Val): Val {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       if (s.kind === "repeat" && s.neighbors.some(Boolean)) {
-        const id = this.n++;
-        const acc = { d: `r${id}`, m: `rm${id}` };
-        const n = `n${id}`;
-        const axes = [0, 1, 2].filter((a) => s.neighbors[a]);
+        const axes = [0, 1, 2].filter((a) => s.neighbors[a]).length;
         const mask = [0, 1, 2].map((a) => (s.neighbors[a] ? "1.0" : "0.0")).join(", ");
-        this.push(depth, `var ${acc.d} = 1e10;`);
-        if (this.info) this.push(depth, `var ${acc.m} = ds_defaultMat();`);
-        this.push(depth, `for (var ${n} = 0u; ${n} < ${1 << axes.length}u; ${n}++) {`);
-        const qn = this.fresh("q");
-        this.push(
-          depth + 1,
-          `let ${qn} = ds_opRepeatCell(${q}, ${slot(s.slot)}.xyz, ${slot(s.slot + 1)}.xyz, ds_cellStep(${n}, vec3f(${mask})));`,
+        return this.copyLoop(`${1 << axes}u`, steps.slice(i + 1), depth, body, (n) =>
+          `ds_opRepeatCell(${q}, ${slot(s.slot)}.xyz, ${slot(s.slot + 1)}.xyz, ds_cellStep(${n}, vec3f(${mask})))`,
         );
-        const inner = this.withSteps(steps.slice(i + 1), qn, depth + 1, body);
-        const t = this.fresh("t");
-        this.push(depth + 1, `let ${t} = ${inner.d};`);
-        if (this.info) this.push(depth + 1, `if (${t} < ${acc.d}) { ${acc.m} = ${inner.m}; }`);
-        this.push(depth + 1, `${acc.d} = min(${acc.d}, ${t});`);
-        this.push(depth, `}`);
-        return acc;
+      }
+      if (s.kind === "polar" && s.reach !== "sector") {
+        // Neighbors: copies −1, 0, +1 around the nearest; all: every copy from it on.
+        const [count, first] = s.reach === "neighbors" ? ["3u", "-1.0"] : [`u32(${slot(s.slot)}.x)`, "0.0"];
+        return this.copyLoop(count, steps.slice(i + 1), depth, body, (n) =>
+          `ds_opPolarCopy(${q}, ${slot(s.slot)}.y, ${s.axis}u, ${n}, ${first})`,
+        );
       }
       const qn = this.fresh("q");
       this.push(depth, `let ${qn} = ${stepExpr(s, q)};`);
       q = qn;
     }
     return body(q, depth);
+  }
+
+  /** Union over `count` copies: `copy(n)` is copy n's point, `rest` runs on it. */
+  copyLoop(
+    count: string,
+    rest: PointStep[],
+    depth: number,
+    body: (q: string, depth: number) => Val,
+    copy: (n: string) => string,
+  ): Val {
+    const id = this.n++;
+    const acc = { d: `r${id}`, m: `rm${id}` };
+    const n = `n${id}`;
+    this.push(depth, `var ${acc.d} = 1e10;`);
+    if (this.info) this.push(depth, `var ${acc.m} = ds_defaultMat();`);
+    this.push(depth, `for (var ${n} = 0u; ${n} < ${count}; ${n}++) {`);
+    const qn = this.fresh("q");
+    this.push(depth + 1, `let ${qn} = ${copy(n)};`);
+    const inner = this.withSteps(rest, qn, depth + 1, body);
+    const t = this.fresh("t");
+    this.push(depth + 1, `let ${t} = ${inner.d};`);
+    if (this.info) this.push(depth + 1, `if (${t} < ${acc.d}) { ${acc.m} = ${inner.m}; }`);
+    this.push(depth + 1, `${acc.d} = min(${acc.d}, ${t});`);
+    this.push(depth, `}`);
+    return acc;
   }
 }
 

@@ -70,10 +70,33 @@ export function repeatNeighbors(m: Extract<Modifier, { kind: "repeat" }>, c: Vec
   return m.count.map((n, a) => n !== 1 && Math.abs(c[a]) + r > m.spacing[a] * 0.45) as [boolean, boolean, boolean];
 }
 
+/**
+ * Copies of a polar repeat a point has to look at: its own sector's, also
+ * the next one on each side, or all of them. A copy that reaches past its
+ * sector is cut off otherwise, and the cut leaves spikes (the ray trusts a
+ * distance that ignores the neighbor copy and steps through it).
+ */
+export type PolarReach = "sector" | "neighbors" | "all";
+
+/** Geometry sphere (c, r) in the polar repeat's output space. */
+export function polarReach(m: Extract<Modifier, { kind: "polar" }>, c: Vec3, r: number): PolarReach {
+  if (m.count <= 1) return "sector";
+  const [u, v] = planeAxes("polar", m.axis);
+  const d = Math.hypot(c[u], c[v]);
+  // Angular half-width of the sphere seen from the axis; one around the axis covers every angle.
+  const half = r >= d ? Math.PI : Math.asin(r / d);
+  const spread = (Math.abs(Math.atan2(c[v], c[u])) + half) / ((2 * Math.PI) / m.count);
+  if (spread <= 0.45) return "sector";
+  if (spread <= 1.45 && m.count > 3) return "neighbors";
+  return "all";
+}
+
 /** What a point-modifier list does to a sphere of geometry, and what it needs. */
 export interface ModifierPlan {
   /** Per modifier (same order): repeat neighbor axes, else null. */
   neighbors: ([boolean, boolean, boolean] | null)[];
+  /** Per modifier (same order): polar copies to look at, else null. */
+  polar: (PolarReach | null)[];
   /** Combined 1 / Lipschitz of the deformations (twist, bend). */
   invL: number;
   /** The geometry sphere in the list's input space. */
@@ -87,12 +110,14 @@ export interface ModifierPlan {
  */
 export function planPointModifiers(point: Modifier[], c: Vec3, r: number): ModifierPlan {
   const neighbors: ModifierPlan["neighbors"] = point.map(() => null);
+  const polar: ModifierPlan["polar"] = point.map(() => null);
   let invL = 1;
   for (let i = point.length - 1; i >= 0; i--) {
     const m = point[i];
     if (m.kind === "repeat") neighbors[i] = repeatNeighbors(m, c, r);
+    if (m.kind === "polar") polar[i] = polarReach(m, c, r);
     invL /= deformLipschitz(m, c, r);
     ({ c, r } = expandThrough(m, c, r));
   }
-  return { neighbors, invL, c, r };
+  return { neighbors, polar, invL, c, r };
 }
