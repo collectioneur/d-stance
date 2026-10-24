@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import Canvas from "./components/Canvas";
+import CompileIndicator from "./components/CompileIndicator";
 import TopPanel from "./components/panels/TopPanel";
 import LeftPanel from "./components/panels/LeftPanel";
 import RightPanel from "./components/panels/RightPanel";
@@ -206,6 +207,7 @@ function Editor() {
       <LeftPanel />
       <RightPanel />
       <GizmoPanel />
+      <CompileIndicator />
       <CommandPalette />
       <ImageImportDialog />
       <div className="toast motion-pop" data-open={toastOpen} role="status">

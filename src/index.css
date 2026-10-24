@@ -1963,3 +1963,59 @@ canvas {
 .toast.motion-pop[data-open="true"] {
   pointer-events: none;
 }
+
+/* Compile indicator: slow structural edits (see CompileIndicator.tsx) */
+.compile-indicator {
+  --motion-dy: -6px;
+  position: fixed;
+  z-index: 10;
+  top: 76px;
+  left: 50%;
+  translate: -50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px 0 10px;
+  border: 1px solid var(--border-1);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  backdrop-filter: var(--blur-panel);
+  -webkit-backdrop-filter: var(--blur-panel);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.38);
+}
+
+.compile-indicator.motion-pop,
+.compile-indicator.motion-pop[data-open="true"] {
+  pointer-events: none;
+}
+
+.compile-spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--accent-mid);
+  border-top-color: var(--accent-text);
+  border-radius: 50%;
+  animation: compile-spin 0.8s linear infinite;
+}
+
+.compile-time {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes compile-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compile-spinner {
+    animation-duration: 2.4s;
+  }
+}
