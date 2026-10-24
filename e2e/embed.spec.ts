@@ -51,7 +51,7 @@ test.describe("embed export", () => {
   });
 
   test("WebGPU and WebGL2 backends draw the same image", async ({ page }) => {
-    for (const style of ["classic", "chrome"] as const) {
+    for (const style of ["classic", "chrome", "studio"] as const) {
       await openEditor(page);
       const out = await makeEmbed(page, csgScene(), { style });
       await mountDirect(page, out.scene, "webgpu");
@@ -69,7 +69,7 @@ test.describe("embed export", () => {
     // Lifted above the grid plane: the editor draws grid lines over anything
     // behind the plane, the embed has no grid.
     const lifted = { id: "r", name: "Lifted", items: [{ kind: "group", id: "lift", name: "Lift", position: [0, -0.8, 0], rotation: [0, 0, 0], scale: [1, 1, 1], op: "union", smoothK: 0.1, items: csgScene().items }] };
-    for (const mode of ["classic", "chrome"] as const) {
+    for (const mode of ["classic", "chrome", "studio"] as const) {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);
       await openEditor(page, lifted as never);
       await waitForProgram(page);
@@ -123,7 +123,7 @@ test.describe("embed export", () => {
       };
       const out: string[] = [];
       for (const root of [kitchenSink(), { id: "e", name: "Empty", items: [] }]) {
-        for (const style of ["classic", "chrome"]) {
+        for (const style of ["classic", "chrome", "studio"]) {
           for (const background of ["studio", "transparent"]) {
             for (const quality of ["fast", "best"]) {
               const e = generateEmbed(root as never, { style, background, quality, motion: "still", framing: background === "studio" ? "fit" : "editor", view } as never);

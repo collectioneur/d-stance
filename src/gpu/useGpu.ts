@@ -6,6 +6,7 @@ import {
   PICK_PASS_SCENE,
   RENDER_MODE_CHROME,
   RENDER_MODE_CLASSIC,
+  RENDER_MODE_STUDIO,
 } from "./shader";
 import {
   useSceneStore,
@@ -183,21 +184,26 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       let latestRoot: SceneRoot | null = null;
       let dataDirty = true;
 
-      function programFor(code: string): Program {
-        const cached = programs.get(code);
+      const modeId = (mode: RenderMode) =>
+        mode === "classic" ? RENDER_MODE_CLASSIC : mode === "studio" ? RENDER_MODE_STUDIO : RENDER_MODE_CHROME;
+
+      /** Programs are per (render mode, scene code): see renderModeSlot in shader.ts. */
+      function programFor(code: string, mode: RenderMode): Program {
+        const key = `${mode}\n${code}`;
+        const cached = programs.get(key);
         if (cached) {
-          programs.delete(code);
-          programs.set(code, cached);
+          programs.delete(key);
+          programs.set(key, cached);
           return cached;
         }
         const prog: Program = {
-          code,
-          pipeline: shader.createScenePipeline(code),
+          code: key,
+          pipeline: shader.createScenePipeline(code, modeId(mode)),
           ready: false,
           failed: false,
         };
         stats.compiles++;
-        programs.set(code, prog);
+        programs.set(key, prog);
         prog.pipeline.initAsync().then(
           () => {
             prog.ready = true;
@@ -207,9 +213,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             console.error("scene shader failed to compile", err);
           },
         );
-        for (const key of programs.keys()) {
+        for (const k of programs.keys()) {
           if (programs.size <= PROGRAM_CACHE_SIZE) break;
-          if (key !== active?.program.code && key !== code) programs.delete(key);
+          if (k !== active?.program.code && k !== key) programs.delete(k);
         }
         return prog;
       }
@@ -242,8 +248,9 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           latestRoot = drawnRoot;
           dataDirty = true;
         }
-        if (latest && latest.code !== active?.program.code) {
-          const prog = programFor(latest.code);
+        const wantKey = latest ? `${renderMode}\n${latest.code}` : "";
+        if (latest && wantKey !== active?.program.code) {
+          const prog = programFor(latest.code, renderMode);
           if (prog.ready) {
             active = { program: prog, scene: latest };
             pickItemIds = latest.leafIds;
@@ -254,7 +261,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
           pickItemIds = latest.leafIds;
         }
         // The compile indicator: the screen lags while the scene's program compiles.
-        const pending = !!latest && latest.code !== active?.program.code && !programs.get(latest.code)?.failed;
+        const pending = !!latest && wantKey !== active?.program.code && !programs.get(wantKey)?.failed;
         if (pending !== compilePending) {
           compilePending = pending;
           useCompileStore.setState({ since: pending ? performance.now() : null });
@@ -266,7 +273,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         const { rootSelected } = useSceneStore.getState();
         sceneUniforms.write({
           boundsRadius: scene.boundsRadius,
-          renderMode: renderMode === "classic" ? RENDER_MODE_CLASSIC : RENDER_MODE_CHROME,
+          _pad0: 0,
           selectAll: rootSelected && scene.leafIds.length > 0 ? 1 : 0,
           _pad1: 0,
           boundsCenter: d.vec3f(0, 0, 0),
@@ -1154,7 +1161,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         qualityUniforms.write({
           maxSteps: preset.maxSteps,
           reflSteps: preset.reflSteps,
-          outlineSteps: preset.outlineSteps,
+          shadowSteps: preset.shadowSteps,
           zero: 0,
         });
         targetMs = 1000 / preset.fpsCap;
@@ -1283,7 +1290,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             async compileMs() {
               if (!latest) return null;
               const t0 = performance.now();
-              const fresh = shader.createScenePipeline(`${latest.code}\n// ${t0}`);
+              const fresh = shader.createScenePipeline(`${latest.code}\n// ${t0}`, modeId(useRenderStore.getState().renderMode));
               await fresh.initAsync();
               return { total: performance.now() - t0, codeKb: latest.code.length / 1024 };
             },
@@ -1293,7 +1300,10 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
             /** How far an item's grow-in has run, 0..1; null when it is not growing in. */
             appearProgress: (id: string) => spawnAnim.progress(id, performance.now()),
             /** True once the program for the current store root is on screen. */
-            synced: () => !!active && active.program.code === latest?.code && !dataDirty,
+            synced: () =>
+              !!active &&
+              active.program.code === `${useRenderStore.getState().renderMode}\n${latest?.code}` &&
+              !dataDirty,
           },
         };
       }

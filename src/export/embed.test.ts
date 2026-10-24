@@ -76,12 +76,33 @@ describe("embed export", () => {
 
   test("options become shader constants", () => {
     const chrome = generateEmbed(scene([shape("sphere")]), { ...OPTS, style: "chrome", background: "transparent", quality: "best" });
-    expect(chrome.scene.wgsl).toContain("const CHROME = true;");
+    expect(chrome.scene.wgsl).toContain("const STYLE = 1;");
     expect(chrome.scene.wgsl).toContain("const TRANSPARENT = true;");
     expect(chrome.scene.wgsl).toContain("const MAX_STEPS = 96;");
     expect(chrome.mountOptions.maxDpr).toBe(3);
     const spin = generateEmbed(scene([shape("sphere")]), { ...OPTS, motion: "spin" });
     expect(spin.mountOptions.autoRotate).toBeGreaterThan(0);
+  });
+
+  test("materials reach the renderer, inherited from groups", () => {
+    const red = { color: [1, 0, 0] as [number, number, number], roughness: 0.3, metalness: 0, emission: 0 };
+    const out = generateEmbed(
+      scene([group([shape("sphere"), shape("box", { op: "sUnion" })], { material: red })], "Mats"),
+      { ...OPTS, style: "studio" },
+    );
+    expect(out.scene.wgsl).toContain("fn sdMatsMaterial(p: vec3f) -> SdfMaterial");
+    expect(out.scene.wgsl).toContain("SdfMaterial(vec3f(1.0, 0.0, 0.0), 0.3, 0.0, 0.0)");
+    expect(out.scene.wgsl).toContain("mixMaterial(");
+    expect(out.scene.glsl).toContain("SdfMaterial sdMatsMaterial(vec3 p)");
+    expect(out.scene.wgsl).toContain("let m = sdMatsMaterial(p);");
+  });
+
+  test("studio floor sits under the lowest shape", () => {
+    const out = generateEmbed(scene([shape("sphere", { position: [0, -1, 0], params: [0.5, 0, 0, 0] })]), {
+      ...OPTS,
+      style: "studio",
+    });
+    expect(out.scene.wgsl).toContain("const FLOOR_Y = -0.5;");
   });
 
   test("file names are slugs", () => {

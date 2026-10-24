@@ -12,6 +12,7 @@ import {
   type SceneRoot,
   type ShapeType,
 } from "../store/sceneStore";
+import { colorToHex } from "../store/material";
 
 export type ArboristNode = {
   id: string;
@@ -19,6 +20,8 @@ export type ArboristNode = {
   name: string;
   shapeType?: ShapeType;
   op?: OpType;
+  /** Hex of the item's own material color (tree dot), if it has one. */
+  color?: string;
   children?: ArboristNode[];
 };
 
@@ -30,6 +33,7 @@ export function sceneItemToArborist(item: SceneItem): ArboristNode {
       name: item.name,
       shapeType: item.shapeType,
       op: item.op,
+      ...(item.material ? { color: colorToHex(item.material.color) } : {}),
     };
   }
   return {
@@ -37,6 +41,7 @@ export function sceneItemToArborist(item: SceneItem): ArboristNode {
     kind: "group",
     name: item.name,
     op: item.op,
+    ...(item.material ? { color: colorToHex(item.material.color) } : {}),
     children:
       item.items.length > 0 ? item.items.map(sceneItemToArborist) : [],
   };

@@ -1,4 +1,4 @@
-import { createShader } from "./shader";
+import { createShader, RENDER_MODE_STUDIO } from "./shader";
 import { compileScene } from "./sceneCompiler";
 import { kitchenSink } from "../test/fixtures";
 
@@ -19,6 +19,7 @@ export async function inspect({
     create: () =>
       createShader(root).createScenePipeline(
         compileScene(kitchenSink(), { imageLayer: () => 0 }).code,
+        RENDER_MODE_STUDIO, // the mode with the most code paths
       ),
   };
 }

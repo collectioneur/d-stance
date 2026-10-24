@@ -1288,6 +1288,127 @@ canvas {
   white-space: pre;
 }
 
+/* Section title with a trailing action (e.g. Material → Reset) */
+.props-section-title--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.props-section-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-4);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.props-section-action:hover {
+  color: var(--accent-text);
+  background: var(--bg-hover);
+}
+
+/* Material presets: small spheres in the preset color */
+.material-presets {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  margin: 2px 0 4px;
+}
+
+.material-preset {
+  --swatch: #b8b8b8;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-1);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.55), transparent 42%),
+    radial-gradient(circle at 50% 50%, var(--swatch) 40%, color-mix(in srgb, var(--swatch) 45%, #000) 100%);
+  cursor: pointer;
+  transition:
+    transform var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.material-preset[data-metal] {
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.95), transparent 30%),
+    linear-gradient(160deg, var(--swatch), color-mix(in srgb, var(--swatch) 30%, #000) 55%, var(--swatch));
+}
+
+.material-preset[data-emissive] {
+  box-shadow: 0 0 8px color-mix(in srgb, var(--swatch) 70%, transparent);
+}
+
+.material-preset:hover {
+  transform: scale(1.12);
+  border-color: var(--accent-border);
+}
+
+.material-preset--active {
+  border-color: var(--accent-text);
+  box-shadow: 0 0 0 1px var(--accent-text);
+}
+
+.color-field {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.color-swatch {
+  flex-shrink: 0;
+  width: 28px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid var(--border-2);
+  border-radius: 5px;
+  background: none;
+  cursor: pointer;
+}
+
+.color-swatch::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.color-swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+.color-swatch::-moz-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+.color-hex {
+  text-transform: lowercase;
+}
+
+/* Tree: own-material color dot */
+.scene-item-color {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
 /* Embed export: settings + live preview above the code */
 .embed-panel {
   display: flex;

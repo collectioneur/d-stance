@@ -21,6 +21,7 @@ const LOOKS: Choice<ExportLook>[] = [
   { value: "editor", label: "Same as editor" },
   { value: "classic", label: "Classic" },
   { value: "chrome", label: "Chrome" },
+  { value: "studio", label: "Studio" },
 ];
 const BACKGROUNDS: Choice<ExportBackground>[] = [
   { value: "studio", label: "Studio" },

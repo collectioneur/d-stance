@@ -31,6 +31,9 @@ export type ShapeType =
   | "image";
 export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract" | "sIntersect";
 
+import type { Material } from "./material";
+export type { Material } from "./material";
+
 export type ShapeLayer = {
   kind: "layer";
   id: string;
@@ -47,6 +50,7 @@ export type ShapeLayer = {
    * utils/imageSdf.ts) and the edge rounding radius (local units, ≥ 0).
    */
   image?: { sdf: string; round?: number };
+  material?: Material;
 };
 
 export type ObjectGroup = {
@@ -58,6 +62,8 @@ export type ObjectGroup = {
   scale: [number, number, number];
   op: OpType;
   smoothK: number;
+  /** Default for descendant shapes that have no material of their own. */
+  material?: Material;
   items: SceneItem[];
 };
 
@@ -477,7 +483,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material"
       >
     >,
   ) => void;
@@ -486,7 +492,7 @@ interface SceneState {
   updateGroup: (
     groupId: string,
     patch: Partial<
-      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK">
+      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material">
     >,
   ) => void;
   updateRootName: (name: string) => void;

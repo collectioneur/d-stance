@@ -62,6 +62,7 @@ export const GIZMO_ICONS = {
 export const RENDER_MODE_ICONS = {
   classic: shapeIcon("renderClassic"),
   chrome: shapeIcon("renderChrome"),
+  studio: shapeIcon("renderStudio"),
 };
 
 function shapeEntry(type: ShapeType) {

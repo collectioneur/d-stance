@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { decodeHash, encodeHash, SCHEMA_VERSION, type PersistedScene } from "./persistence";
 import { zeroCounters } from "./sceneStore";
-import { FAKE_IMAGE_SDF, kitchenSink, scene, shape } from "../test/fixtures";
+import { FAKE_IMAGE_SDF, group, kitchenSink, scene, shape } from "../test/fixtures";
 
 function blob(v: number, root: PersistedScene["root"]): string {
   return encodeHash({ v, root, counters: zeroCounters(), groupCounter: 0 });
@@ -64,5 +64,28 @@ describe("persistence", () => {
     const [s, i] = decoded!.root.items;
     expect("image" in s).toBe(false);
     expect((i as { image: { round?: number } }).image.round).toBeUndefined();
+  });
+});
+
+describe("persistence v7 materials", () => {
+  test("keeps valid materials and clamps hostile ones", () => {
+    const ok = shape("sphere", { id: "ok", material: { color: [0.1, 0.2, 0.3], roughness: 0.4, metalness: 1, emission: 2 } });
+    const bad = shape("box", { id: "bad" }) as unknown as Record<string, unknown>;
+    bad.material = { color: [9, -1, "x"], roughness: NaN, metalness: 5, emission: 1e9 };
+    const junk = shape("box", { id: "junk" }) as unknown as Record<string, unknown>;
+    junk.material = "red";
+    const g = group([], { id: "g" }) as unknown as Record<string, unknown>;
+    g.material = { color: [0, 1, 0] };
+    const decoded = decodeHash(blob(SCHEMA_VERSION, scene([ok, bad as never, junk as never, g as never])));
+    const [a, b, c, d] = decoded!.root.items;
+    expect(a.material).toEqual({ color: [0.1, 0.2, 0.3], roughness: 0.4, metalness: 1, emission: 2 });
+    expect(b.material).toEqual({ color: [1, 0, 0.72], roughness: 0.5, metalness: 1, emission: 10 });
+    expect("material" in c).toBe(false);
+    expect(d.material).toEqual({ color: [0, 1, 0], roughness: 0.5, metalness: 0, emission: 0 });
+  });
+
+  test("v6 blobs (no materials) still load", () => {
+    const decoded = decodeHash(blob(6, scene([shape("sphere", { id: "a" })])));
+    expect(decoded?.root.items[0].material).toBeUndefined();
   });
 });

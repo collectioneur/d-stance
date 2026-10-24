@@ -1,4 +1,4 @@
-import type { ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
+import type { Material, ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
 import { defaultParams } from "../store/sceneStore";
 
 type V3 = [number, number, number];
@@ -22,12 +22,22 @@ export function shape(
     op: opts.op ?? "union",
     smoothK: opts.smoothK ?? 0.1,
     ...(opts.image ? { image: opts.image } : {}),
+    ...(opts.material ? { material: opts.material } : {}),
   };
 }
 
 export function group(
   items: SceneItem[],
-  opts: Partial<{ id: string; name: string; position: V3; rotation: V3; scale: V3; op: OpType; smoothK: number }> = {},
+  opts: Partial<{
+    id: string;
+    name: string;
+    position: V3;
+    rotation: V3;
+    scale: V3;
+    op: OpType;
+    smoothK: number;
+    material: Material;
+  }> = {},
 ): ObjectGroup {
   return {
     kind: "group",
@@ -38,6 +48,7 @@ export function group(
     scale: opts.scale ?? [1, 1, 1],
     op: opts.op ?? "union",
     smoothK: opts.smoothK ?? 0.1,
+    ...(opts.material ? { material: opts.material } : {}),
     items,
   };
 }
@@ -57,7 +68,13 @@ export function kitchenSink(): SceneRoot {
   const ops: OpType[] = ["union", "subtract", "intersect", "sUnion", "sSubtract", "sIntersect"];
   return scene([
     shape("sphere", { id: "s1", position: [0.2, -0.1, 0.3] }),
-    shape("box", { id: "b1", op: "sUnion", smoothK: 0.2, rotation: [10, 20, 30] }),
+    shape("box", {
+      id: "b1",
+      op: "sUnion",
+      smoothK: 0.2,
+      rotation: [10, 20, 30],
+      material: { color: [0.9, 0.2, 0.1], roughness: 0.3, metalness: 1, emission: 0.5 },
+    }),
     group(
       [
         shape("torus", { id: "t1", scale: [1, 2, 1] }),

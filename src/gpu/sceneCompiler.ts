@@ -28,6 +28,7 @@ import {
   type ShapeLayer,
 } from "../store/sceneStore";
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
+import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { maxAbsScale, sceneBoundRadius, shapeBoundRadius } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
 
@@ -120,7 +121,9 @@ function boundSlotOf(node: IrNode): number {
   return node.kind === "leaf" ? node.base + 5 : node.kind === "group" ? node.base + 1 : node.base;
 }
 
-const LEAF_SLOTS = 6; // rows+offset ×3, params, misc, bound
+const LEAF_SLOTS = 8; // rows+offset ×3, params, misc, bound, material ×2
+/** Leaf material slots: (sRGB color, roughness), (metalness, emission, _, _). */
+const MAT = 6;
 const IMAGE_EXTRA_SLOTS = 1; // round, invert, layer
 const GROUP_SLOTS = 2; // misc, bound
 
@@ -169,7 +172,13 @@ class Builder {
     this.values[i + 3] = w;
   }
 
-  leaf(layer: ShapeLayer, ctx: BakeCtx, ancestors: ObjectGroup[], cull: boolean): LeafNode {
+  leaf(
+    layer: ShapeLayer,
+    ctx: BakeCtx,
+    ancestors: ObjectGroup[],
+    cull: boolean,
+    inherited: Material,
+  ): LeafNode {
     const image = layer.shapeType === "image";
     const base = this.alloc(LEAF_SLOTS + (image ? IMAGE_EXTRA_SLOTS : 0));
     const baked = bakeShape(ctx, layer.position, layer.rotation, layer.scale);
@@ -184,10 +193,13 @@ class Builder {
     for (const g of ancestors) radius *= maxAbsScale(g);
     radius += BOUND_EPS;
     this.set(base + 5, ...center, radius);
+    const mat = layer.material ?? inherited;
+    this.set(base + MAT, ...mat.color, mat.roughness);
+    this.set(base + MAT + 1, mat.metalness, mat.emission, 0, 0);
     if (image) {
       const round = Math.max(0, layer.image?.round ?? 0);
       const layerIdx = layer.image ? this.opts.imageLayer(layer.image.sdf) : 0;
-      this.set(base + 6, round, w > 0.5 ? 1 : 0, layerIdx, layer.image ? 1 : 0);
+      this.set(base + LEAF_SLOTS, round, w > 0.5 ? 1 : 0, layerIdx, layer.image ? 1 : 0);
     }
     this.markIndex.set(layer.id, (base + 4) * 4 + 2);
     this.leafIds.push(layer.id);
@@ -200,7 +212,13 @@ class Builder {
    * is hard union (sphere distance is a lower bound; only min() keeps the
    * zero set identical).
    */
-  items(items: SceneItem[], ctx: BakeCtx, ancestors: ObjectGroup[], unionAbove: boolean): IrNode[] {
+  items(
+    items: SceneItem[],
+    ctx: BakeCtx,
+    ancestors: ObjectGroup[],
+    unionAbove: boolean,
+    inherited: Material = DEFAULT_MATERIAL,
+  ): IrNode[] {
     const list = items.filter(itemContributes);
     const out: IrNode[] = [];
     for (let i = 0; i < list.length; i++) {
@@ -216,7 +234,7 @@ class Builder {
         }
       }
       if (item.kind === "layer") {
-        out.push(this.leaf(item, ctx, ancestors, cull));
+        out.push(this.leaf(item, ctx, ancestors, cull, inherited));
       } else {
         const base = this.alloc(GROUP_SLOTS);
         const children = this.items(
@@ -224,6 +242,7 @@ class Builder {
           composeGroupCtx(ctx, item.position, item.rotation, item.scale),
           [...ancestors, item],
           cull,
+          item.material ?? inherited,
         );
         const sphere = encloseSpheres(children);
         // Smooth ops bulge the surface outward by at most k/4.
@@ -311,7 +330,7 @@ function leafExpr(node: LeafNode): string {
   const P = slot(b + 3);
   let call: string;
   if (node.layer.shapeType === "image") {
-    call = `ds_sdImage(${lp}, ${P}, ${slot(b + 6)})`;
+    call = `ds_sdImage(${lp}, ${P}, ${slot(b + LEAF_SLOTS)})`;
   } else {
     const params = [`${P}.x`, `${P}.y`, `${P}.z`, `${P}.w`] as const;
     // Prefer a swizzle when a primitive takes the first three params as a vector.
@@ -343,10 +362,14 @@ function combine(op: OpType, a: string, b: string, k: string): string {
   }
 }
 
+/** A node's value: distance expression and (info pass only) its material. */
+type Val = { d: string; m: string };
+
 class Emitter {
   lines: string[] = [];
   private n = 0;
 
+  /** `info`: also track materials and highlight / pick marks (once-per-pixel pass). */
   constructor(private info: boolean) {}
 
   fresh(prefix: string) {
@@ -358,7 +381,7 @@ class Emitter {
   }
 
   /**
-   * Emits the CSG fold of `nodes`; returns the accumulator variable.
+   * Emits the CSG fold of `nodes`; returns the accumulator.
    *
    * Union-like children are gated by their bounding sphere against the
    * running result: union = min(acc, b) equals acc whenever b ≥ acc, and
@@ -370,36 +393,54 @@ class Emitter {
    * few shapes actually near the ray. The info pass widens the gate by the
    * glow band so highlights and picking still see every nearby node.
    */
-  nodes(nodes: IrNode[], depth: number): string {
-    const acc = this.fresh("a");
+  nodes(nodes: IrNode[], depth: number): Val {
+    const id = this.n++;
+    const acc = { d: `a${id}`, m: `m${id}` };
     const head = nodes[0];
     if (head.kind === "chunk") throw new Error("chunk cannot head a list");
-    this.push(depth, `var ${acc} = ${this.node(head, depth, head.cull)};`);
+    const h = this.node(head, depth, head.cull);
+    this.push(depth, `var ${acc.d} = ${h.d};`);
+    if (this.info) this.push(depth, `var ${acc.m} = ${h.m};`);
     for (let i = 1; i < nodes.length; i++) this.combineInto(acc, nodes[i], depth);
     return acc;
   }
 
-  combineInto(acc: string, node: IrNode, depth: number) {
+  combineInto(acc: Val, node: IrNode, depth: number) {
     const op = nodeOp(node);
+    const k = node.kind === "chunk" ? "" : `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
     if (op !== "union" && op !== "sUnion") {
       if (node.kind === "chunk") throw new Error("chunks are hard union");
-      const v = this.node(node, depth, false);
-      const k = `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
-      this.push(depth, `${acc} = ${combine(op, acc, v, k)};`);
+      this.combineStmt(op, acc, this.node(node, depth, false), k, depth);
       return;
     }
-    const k = node.kind === "chunk" ? "" : `${slot(node.base + (node.kind === "leaf" ? 4 : 0))}.y`;
-    let gate = acc;
+    let gate = acc.d;
     if (op === "sUnion") gate += ` + ${k}`;
     if (this.info) gate += ` + ${f(GLOW_BAND_HI)}`;
     this.push(depth, `if (ds_bound(p, ${boundSlotOf(node)}u) < ${gate}) {`);
     if (node.kind === "chunk") {
       for (const m of node.members) this.combineInto(acc, m, depth + 1);
     } else {
-      const v = this.node(node, depth + 1, false);
-      this.push(depth + 1, `${acc} = ${combine(op, acc, v, k)};`);
+      this.combineStmt(op, acc, this.node(node, depth + 1, false), k, depth + 1);
     }
     this.push(depth, `}`);
+  }
+
+  /**
+   * acc ⊕ v. Materials follow the distances: union / intersect take the
+   * winning operand's, smooth ops blend with the smooth-min weight, and a
+   * subtraction keeps the cut shape's material (hole walls match the body).
+   */
+  combineStmt(op: OpType, acc: Val, v: Val, k: string, depth: number) {
+    if (this.info) {
+      if (op === "union") this.push(depth, `if (${v.d} < ${acc.d}) { ${acc.m} = ${v.m}; }`);
+      else if (op === "intersect") this.push(depth, `if (${v.d} > ${acc.d}) { ${acc.m} = ${v.m}; }`);
+      else if (op === "sUnion") {
+        this.push(depth, `${acc.m} = ds_mixMat(${acc.m}, ${v.m}, ds_sminT(${acc.d}, ${v.d}, ${k}));`);
+      } else if (op === "sIntersect") {
+        this.push(depth, `${acc.m} = ds_mixMat(${acc.m}, ${v.m}, ds_sminT(-${acc.d}, -${v.d}, ${k}));`);
+      }
+    }
+    this.push(depth, `${acc.d} = ${combine(op, acc.d, v.d, k)};`);
   }
 
   /**
@@ -407,31 +448,36 @@ class Emitter {
    * so beyond CULL_DIST the sphere distance itself may stand in (used for
    * the first child of a list, which has no running result to gate on).
    */
-  node(node: LeafNode | GroupNode, depth: number, cull: boolean): string {
-    const v = this.fresh("v");
-    const boundSlot = boundSlotOf(node);
+  node(node: LeafNode | GroupNode, depth: number, cull: boolean): Val {
+    const id = this.n++;
+    const out = { d: `v${id}`, m: `w${id}` };
     if (cull) {
-      this.push(depth, `var ${v} = ds_bound(p, ${boundSlot}u);`);
-      this.push(depth, `if (${v} <= ${f(CULL_DIST)}) {`);
-      this.push(depth + 1, `${v} = ${this.value(node, depth + 1)};`);
+      this.push(depth, `var ${out.d} = ds_bound(p, ${boundSlotOf(node)}u);`);
+      if (this.info) this.push(depth, `var ${out.m} = ds_defaultMat();`);
+      this.push(depth, `if (${out.d} <= ${f(CULL_DIST)}) {`);
+      const val = this.value(node, depth + 1);
+      this.push(depth + 1, `${out.d} = ${val.d};`);
+      if (this.info) this.push(depth + 1, `${out.m} = ${val.m};`);
       this.push(depth, `}`);
     } else {
-      this.push(depth, `let ${v} = ${this.value(node, depth)};`);
+      const val = this.value(node, depth);
+      this.push(depth, `let ${out.d} = ${val.d};`);
+      if (this.info) this.push(depth, `let ${out.m} = ${val.m};`);
     }
     if (this.info) {
       const markSlot = node.kind === "leaf" ? node.base + 4 : node.base;
       if (node.kind === "leaf") {
-        this.push(depth, `ds_markLeaf(&info, ${v}, ${slot(markSlot)}.z, ${f(node.pickId)});`);
+        this.push(depth, `ds_markLeaf(&info, ${out.d}, ${slot(markSlot)}.z, ${f(node.pickId)});`);
       } else {
-        this.push(depth, `ds_mark(&info, ${v}, ${slot(markSlot)}.z);`);
+        this.push(depth, `ds_mark(&info, ${out.d}, ${slot(markSlot)}.z);`);
       }
     }
-    return v;
+    return out;
   }
 
-  /** Full value expression; groups emit their children first. */
-  value(node: LeafNode | GroupNode, depth: number): string {
-    if (node.kind === "leaf") return leafExpr(node);
+  /** Full value; groups emit their children first. */
+  value(node: LeafNode | GroupNode, depth: number): Val {
+    if (node.kind === "leaf") return { d: leafExpr(node), m: `ds_mat(${node.base + MAT}u)` };
     return this.nodes(node.children, depth);
   }
 }
@@ -468,6 +514,36 @@ fn ds_markLeaf(info: ptr<function, vec4f>, d: f32, strength: f32, id: f32) {
   }
 }
 
+// Materials (sRGB color, roughness), (metalness, emission, _, _); see MAT.
+struct DsMat { c: vec4f, e: vec4f }
+
+fn ds_mat(i: u32) -> DsMat {
+  return DsMat(${D}[i], ${D}[i + 1u]);
+}
+
+fn ds_defaultMat() -> DsMat {
+  return DsMat(vec4f(${DEFAULT_MATERIAL.color.map(f).join(", ")}, ${f(DEFAULT_MATERIAL.roughness)}), vec4f(${f(DEFAULT_MATERIAL.metalness)}, ${f(DEFAULT_MATERIAL.emission)}, 0.0, 0.0));
+}
+
+fn ds_mixMat(a: DsMat, b: DsMat, t: f32) -> DsMat {
+  return DsMat(mix(a.c, b.c, t), mix(a.e, b.e, t));
+}
+
+// Weight of b in ds_smin(a, b, k): 0 = all a, 1 = all b.
+fn ds_sminT(a: f32, b: f32, kIn: f32) -> f32 {
+  let k = max(kIn, 1e-6);
+  return 1.0 - clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+}
+
+struct DsInfo {
+  glow: f32,
+  id: f32,
+  color: vec3f,
+  roughness: f32,
+  metalness: f32,
+  emission: f32,
+}
+
 // Baked image SDF (src/utils/imageSdf.ts): r16float texel t = d_px / RES.
 // P = (half size, half thickness, bold, _), X = (round, invert, layer, has image).
 fn ds_sdImage(q: vec3f, P: vec4f, X: vec4f) -> f32 {
@@ -490,14 +566,19 @@ export function compileScene(root: SceneRoot, opts: CompileOptions): CompiledSce
   const ir = builder.items(root.items, identityCtx(), [], true);
 
   const sdf = new Emitter(false);
-  const sdfAcc = ir.length > 0 ? sdf.nodes(ir, 1) : "";
+  const sdfAcc = ir.length > 0 ? sdf.nodes(ir, 1).d : "1e10";
   const info = new Emitter(true);
-  if (ir.length > 0) info.nodes(ir, 1);
+  const infoMat = ir.length > 0 ? info.nodes(ir, 1).m : "ds_defaultMat()";
 
   const code = [
     HELPERS_WGSL,
-    `fn ds_sdScene(p: vec3f) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc || "1e10"};\n}`,
-    `fn ds_sceneInfo(p: vec3f) -> vec4f {\n  var info = vec4f(0.0, 0.0, 1e9, 0.0);\n${info.lines.join("\n")}\n  return info;\n}`,
+    `fn ds_sdScene(p: vec3f) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc};\n}`,
+    `fn ds_sceneInfo(p: vec3f) -> DsInfo {
+  var info = vec4f(0.0, 0.0, 1e9, 0.0);
+${info.lines.join("\n")}
+  let mat = ${infoMat};
+  return DsInfo(info.x, info.y, mat.c.xyz, mat.c.w, mat.e.x, mat.e.y);
+}`,
   ].join("\n\n");
 
   if (builder.slots > DATA_SLOTS) {
