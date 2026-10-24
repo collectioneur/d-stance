@@ -1345,6 +1345,37 @@ canvas {
   border-color: var(--accent-border);
 }
 
+.embed-preview-hint {
+  margin: -2px 0 4px;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+
+.embed-row--action {
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+}
+
+.embed-reset {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-1);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.embed-reset:hover {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+}
+
 .embed-download {
   display: flex;
   align-items: center;
