@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { bakeTestImage, box, canvasShot, imageDiff, openEditor, openHtml, sphere, waitForProgram } from "./helpers";
-import { csgScene } from "./scenes";
+import { csgScene, modifiersScene } from "./scenes";
 
 type Opts = { style: "classic" | "chrome"; background: "studio" | "transparent"; motion: "still"; quality: "fast" | "balanced" | "best" };
 const VIEW = { rotX: 0.3, rotY: 0.4, distance: 2.5 };
@@ -68,8 +68,13 @@ test.describe("embed export", () => {
   test("embed matches the editor viewport (objects only)", async ({ page }) => {
     // Lifted above the grid plane: the editor draws grid lines over anything
     // behind the plane, the embed has no grid.
-    const lifted = { id: "r", name: "Lifted", items: [{ kind: "group", id: "lift", name: "Lift", position: [0, -0.8, 0], rotation: [0, 0, 0], scale: [1, 1, 1], op: "union", smoothK: 0.1, items: csgScene().items }] };
-    for (const mode of ["classic", "chrome", "studio"] as const) {
+    const lift = (items: unknown[]) => ({ id: "r", name: "Lifted", items: [{ kind: "group", id: "lift", name: "Lift", position: [0, -0.8, 0], rotation: [0, 0, 0], scale: [1, 1, 1], op: "union", smoothK: 0.1, items }] });
+    for (const [mode, lifted] of [
+      ["classic", lift(csgScene().items)],
+      ["chrome", lift(csgScene().items)],
+      ["studio", lift(csgScene().items)],
+      ["studio", lift(modifiersScene().items)],
+    ] as const) {
       await page.addInitScript((m) => localStorage.setItem("d-stance_render_mode", JSON.stringify({ state: { renderMode: m, quality: 3 }, version: 0 })), mode);
       await openEditor(page, lifted as never);
       await waitForProgram(page);
@@ -112,6 +117,7 @@ test.describe("embed export", () => {
     const errors = await page.evaluate(async (view) => {
       const { generateEmbed } = await import("/src/export/embed.ts");
       const { kitchenSink } = await import("/src/test/fixtures.ts");
+      const { modifiersScene } = await import("/e2e/scenes.ts");
       const adapter = await navigator.gpu.requestAdapter();
       const device = await adapter!.requestDevice();
       const gl = new OffscreenCanvas(4, 4).getContext("webgl2")!;
@@ -122,7 +128,7 @@ test.describe("embed export", () => {
         return gl.getShaderParameter(sh, gl.COMPILE_STATUS) ? null : gl.getShaderInfoLog(sh);
       };
       const out: string[] = [];
-      for (const root of [kitchenSink(), { id: "e", name: "Empty", items: [] }]) {
+      for (const root of [kitchenSink(), modifiersScene(), { id: "e", name: "Empty", items: [] }]) {
         for (const style of ["classic", "chrome", "studio"]) {
           for (const background of ["studio", "transparent"]) {
             for (const quality of ["fast", "best"]) {

@@ -9,15 +9,17 @@ import {
 import { temporalStore } from "./sceneStore";
 import { isImageSdfDataUrl } from "../utils/imageSdf";
 import { sanitizeMaterial } from "./material";
+import { sanitizeModifiers } from "./modifiers";
 
 /**
  * v5: layers may carry `image.sdf` (baked PNG data URL) for shapeType "image".
  * v6: `image.round` (edge rounding radius, optional, default 0).
  * v7: optional `material` on layers and groups.
+ * v8: optional `modifiers` on layers and groups.
  */
-export const SCHEMA_VERSION = 7;
-/** v4–v6 are strict subsets of v7 (each only lacks optional fields), so they load as-is. */
-const ACCEPTED_VERSIONS = new Set([4, 5, 6, SCHEMA_VERSION]);
+export const SCHEMA_VERSION = 8;
+/** v4–v7 are strict subsets of v8 (each only lacks optional fields), so they load as-is. */
+const ACCEPTED_VERSIONS = new Set([4, 5, 6, 7, SCHEMA_VERSION]);
 const LS_KEY = "d-stance_scene";
 
 export type PersistedScene = {
@@ -33,6 +35,7 @@ type LooseItem = {
   scale?: unknown;
   image?: unknown;
   material?: unknown;
+  modifiers?: unknown;
   items?: unknown;
 };
 
@@ -78,6 +81,11 @@ function normalizePersisted(s: PersistedScene): PersistedScene {
         const material = sanitizeMaterial(item.material);
         if (material) item.material = material;
         else delete item.material;
+      }
+      if ("modifiers" in item) {
+        const modifiers = sanitizeModifiers(item.modifiers);
+        if (modifiers) item.modifiers = modifiers;
+        else delete item.modifiers;
       }
       if (item.kind === "group" && Array.isArray(item.items)) {
         item.items = fixItems(item.items as LooseItem[]);

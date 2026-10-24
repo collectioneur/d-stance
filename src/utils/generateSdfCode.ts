@@ -9,7 +9,18 @@ import {
 } from "../store/sceneStore";
 import { IMAGE_SDF_RES, IMAGE_SDF_STEP_PX } from "./imageSdf";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
-import { GLSL_HELPERS, TG_HELPERS, WGSL_HELPERS, primitiveCall } from "../sdf/primitives";
+import {
+  GLSL_HELPERS,
+  MODIFIER_GLSL,
+  MODIFIER_TG,
+  MODIFIER_WGSL,
+  TG_HELPERS,
+  WGSL_HELPERS,
+  primitiveCall,
+} from "../sdf/primitives";
+import { POINT_MODIFIERS, activeModifiers, scatterActive, type Modifier } from "../store/modifiers";
+import { groupPlan, shapePlan } from "../sdf/itemBounds";
+import { polarShift, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 
 export type CodeLang = "typegpu" | "wgsl" | "glsl";
 
@@ -65,6 +76,8 @@ interface ShapeRhs {
   imageRound: number;
   /** Own material, else nearest ancestor group's, else the default. */
   material: Material;
+  /** Distance modifiers on the shape's own result (local units). */
+  post: PostMod[];
 }
 interface VarRhs {
   kind: "var";
@@ -72,8 +85,25 @@ interface VarRhs {
 }
 type Rhs = ShapeRhs | VarRhs;
 
+type PostMod = { kind: "round" | "onion"; amount: number };
+type RepeatMod = Extract<Modifier, { kind: "repeat" }>;
+type PolarMod = Extract<Modifier, { kind: "polar" }>;
+/** The copies an overlapping repeat / polar repeat loops over. */
+/** The copies a repeat / polar repeat loops over (see withMods). */
+type CopySphere = { c: V3; r: number };
+type Copies =
+  | { kind: "repeat"; mod: RepeatMod; gap: V3; copy: CopySphere; ring: V3 | null; reach: number | null }
+  | { kind: "polar"; mod: PolarMod; reach: PolarReach; gap: [number, number]; copy: CopySphere };
+
 type Stmt =
   | { t: "point"; name: string; from: string; pos: V3 | null; rotRad: V3 | null; scale: V3 | null }
+  /** A shape's own local point (its transform), ahead of its point modifiers. */
+  | { t: "shapePoint"; name: string; rhs: ShapeRhs }
+  | { t: "pmod"; name: string; from: string; mod: Modifier }
+  /** Repeat / polar repeat: union over the copies a point can be nearest to, `unit`: step space → result. */
+  | { t: "loop"; acc: string; from: string; point: string; copies: Copies; unit: number; body: Stmt[]; result: string }
+  | { t: "scale"; name: string; k: number }
+  | { t: "post"; name: string; mod: PostMod }
   | { t: "def"; name: string; rhs: Rhs }
   | { t: "combine"; name: string; op: OpType; k: number; rhs: Rhs };
 
@@ -83,6 +113,7 @@ interface Ir {
   usedShapes: Set<ShapeType>;
   usesRotation: boolean;
   usesSmin: boolean;
+  usesModifiers: boolean;
   /** Distinct baked image SDF data URLs, in order of first use. */
   images: string[];
 }
@@ -108,12 +139,25 @@ function findItemIn(items: SceneItem[], itemId: string): SceneItem | null {
  */
 function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   const stmts: Stmt[] = [];
+  let sink = stmts;
   const usedShapes = new Set<ShapeType>();
   const images: string[] = [];
   let usesRotation = false;
   let usesSmin = false;
+  let usesModifiers = false;
   let accN = 0;
   let ptN = 0;
+  const emit = (stmt: Stmt) => sink.push(stmt);
+  const freshPoint = () => `q${++ptN}`;
+
+  function postMods(mods: Modifier[], unit: number): PostMod[] {
+    const out: PostMod[] = [];
+    for (const m of mods) {
+      if (m.kind === "round") out.push({ kind: "round", amount: m.radius * unit });
+      else if (m.kind === "onion") out.push({ kind: "onion", amount: m.thickness * unit });
+    }
+    return out;
+  }
 
   function shapeRhs(
     layer: ShapeLayer,
@@ -143,7 +187,76 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       imageIndex,
       imageRound: Math.max(0, layer.image?.round ?? 0),
       material: layer.material ?? inherited,
+      post: [],
     };
+  }
+
+  /**
+   * Point modifiers from index `i` on, then `body` at the resulting point.
+   * Overlapping repeats and polar repeats become a loop over the copies a
+   * point can be nearest to (same decision as the viewport:
+   * planPointModifiers).
+   */
+  function withMods(
+    point: Modifier[],
+    plan: ModifierPlan,
+    i: number,
+    q: string,
+    unit: number,
+    body: (q: string) => string | null,
+  ): string | null {
+    if (i === point.length) return body(q);
+    const m = point[i];
+    // Same loops as the viewport's withSteps (branch and bound over copies).
+    const copies: Copies | null =
+      m.kind === "repeat"
+        ? { kind: "repeat", mod: m, gap: plan.gap[i] as V3, copy: plan.copy[i]!, ring: plan.ring[i], reach: plan.reach[i] }
+        : m.kind === "polar"
+          ? { kind: "polar", mod: m, reach: plan.polar[i]!, gap: plan.gap[i] as [number, number], copy: plan.copy[i]! }
+          : null;
+    if (copies) {
+      const acc = `d${accN++}`;
+      const inner = freshPoint();
+      const outer = sink;
+      const loopBody: Stmt[] = [];
+      sink = loopBody;
+      // Scattered copies can shrink: nested bounds use the smallest they get.
+      const innerUnit = m.kind === "repeat" && scatterActive(m.scatter) ? unit * (1 - m.scatter.size) : unit;
+      const result = withMods(point, plan, i + 1, inner, innerUnit, body);
+      sink = outer;
+      if (!result) return null;
+      emit({ t: "loop", acc, from: q, point: inner, copies, unit, body: loopBody, result });
+      return acc;
+    }
+    const next = freshPoint();
+    emit({ t: "pmod", name: next, from: q, mod: m });
+    return withMods(point, plan, i + 1, next, unit, body);
+  }
+
+  /** A shape with modifiers: its value as an accumulator variable. */
+  function moddedShape(layer: ShapeLayer, point: string, accScl: V3, dropPos: boolean, inherited: Material): string | null {
+    usesModifiers = true;
+    const mods = activeModifiers(layer.modifiers);
+    const pointMods = mods.filter((m) => POINT_MODIFIERS.has(m.kind));
+    const plan = shapePlan(layer);
+    const full = shapeRhs(layer, point, accScl, dropPos, inherited);
+    const local = freshPoint();
+    emit({ t: "shapePoint", name: local, rhs: full });
+    return withMods(pointMods, plan, 0, local, full.factor * plan.invL, (q) => {
+      const acc = `d${accN++}`;
+      const rhs: ShapeRhs = {
+        ...full,
+        point: q,
+        pos: null,
+        rotRad: null,
+        accScl: null,
+        scale: null,
+        factor: full.factor * plan.invL,
+        post: postMods(mods, 1),
+      };
+      emit({ t: "def", name: acc, rhs });
+      return acc;
+    });
   }
 
   function groupPoint(group: ObjectGroup, point: string, dropPos: boolean): string {
@@ -152,9 +265,27 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     const scale = isOne(group.scale) ? null : group.scale;
     if (!pos && !rot && !scale) return point;
     if (rot) usesRotation = true;
-    const name = `q${++ptN}`;
-    stmts.push({ t: "point", name, from: point, pos, rotRad: rot, scale });
+    const name = freshPoint();
+    emit({ t: "point", name, from: point, pos, rotRad: rot, scale });
     return name;
+  }
+
+  /** A group's value (its own transform, modifiers, children) as a variable. */
+  function groupValue(group: ObjectGroup, point: string, accScl: V3, inherited: Material, dropPos: boolean): string | null {
+    const childPoint = groupPoint(group, point, dropPos);
+    const childAcc = mulV(accScl, group.scale);
+    const material = group.material ?? inherited;
+    const mods = activeModifiers(group.modifiers);
+    if (mods.length === 0) return walkItems(group.items, childPoint, childAcc, material);
+    usesModifiers = true;
+    const pointMods = mods.filter((m) => POINT_MODIFIERS.has(m.kind));
+    const plan = groupPlan(group);
+    if (!plan) return null;
+    const acc = withMods(pointMods, plan, 0, childPoint, minV(childAcc), (q) => walkItems(group.items, q, childAcc, material));
+    if (!acc) return null;
+    if (Math.abs(plan.invL - 1) > 1e-9) emit({ t: "scale", name: acc, k: plan.invL });
+    for (const post of postMods(mods, minV(childAcc))) emit({ t: "post", name: acc, mod: post });
+    return acc;
   }
 
   function walkItems(items: SceneItem[], point: string, accScl: V3, inherited: Material): string | null {
@@ -162,19 +293,23 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     for (const item of items) {
       let rhs: Rhs | null = null;
       if (item.kind === "layer") {
-        rhs = shapeRhs(item, point, accScl, false, inherited);
+        if (activeModifiers(item.modifiers).length > 0) {
+          const v = moddedShape(item, point, accScl, false, inherited);
+          if (v) rhs = { kind: "var", name: v };
+        } else {
+          rhs = shapeRhs(item, point, accScl, false, inherited);
+        }
       } else if (item.items.length > 0) {
-        const childPoint = groupPoint(item, point, false);
-        const childAcc = walkItems(item.items, childPoint, mulV(accScl, item.scale), item.material ?? inherited);
-        if (childAcc) rhs = { kind: "var", name: childAcc };
+        const v = groupValue(item, point, accScl, inherited, false);
+        if (v) rhs = { kind: "var", name: v };
       }
       if (!rhs) continue;
       if (!acc) {
         acc = `d${accN++}`;
-        stmts.push({ t: "def", name: acc, rhs });
+        emit({ t: "def", name: acc, rhs });
       } else {
         if (SMOOTH_OPS.has(item.op)) usesSmin = true;
-        stmts.push({ t: "combine", name: acc, op: item.op, k: item.smoothK, rhs });
+        emit({ t: "combine", name: acc, op: item.op, k: item.smoothK, rhs });
       }
     }
     return acc;
@@ -198,17 +333,20 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
   };
   let result: string | null;
   if (selected?.kind === "layer") {
-    const acc = `d${accN++}`;
-    stmts.push({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true, inheritedAt(selected.id)) });
-    result = acc;
+    if (activeModifiers(selected.modifiers).length > 0) {
+      result = moddedShape(selected, "p", [1, 1, 1], true, inheritedAt(selected.id));
+    } else {
+      const acc = `d${accN++}`;
+      emit({ t: "def", name: acc, rhs: shapeRhs(selected, "p", [1, 1, 1], true, inheritedAt(selected.id)) });
+      result = acc;
+    }
   } else if (selected?.kind === "group") {
-    const point = groupPoint(selected, "p", true);
-    result = walkItems(selected.items, point, selected.scale, selected.material ?? inheritedAt(selected.id));
+    result = groupValue(selected, "p", [1, 1, 1], inheritedAt(selected.id), true);
   } else {
     result = walkItems(root.items, "p", [1, 1, 1], DEFAULT_MATERIAL);
   }
 
-  return { stmts, result, usedShapes, usesRotation, usesSmin, images };
+  return { stmts, result, usedShapes, usesRotation, usesSmin, usesModifiers, images };
 }
 
 // Image SDF texel → distance. Must match sdImage in src/gpu/shader.ts.
@@ -307,6 +445,7 @@ const GLSL_SMIN = `float smin(float a, float b, float k) {
 interface Syntax {
   vec3(v: V3): string;
   vec2(x: number, y: number): string;
+  vec4(v: V3, w: number): string;
   minFn: string;
   maxFn: string;
   divVec(e: string, v: V3): string;
@@ -315,10 +454,18 @@ interface Syntax {
   assignStmt(name: string, expr: string): string;
   fnOpen(fn: string): string;
   fnClose: string;
+  absFn: string;
+  clampFn: string;
+  vec3Expr(c: readonly string[]): string;
+  uint(n: number): string;
+  loopOpen(n: string, count: number): string;
+  /** Small per-axis counts, as the repeatRing radix argument. */
+  radix3(v: Readonly<V3>): string;
   helpers: {
     shapes: Record<ShapeType, string>;
     rot: string;
     smin: string;
+    modifiers: string;
     imageSampler: string;
     image: (i: number, url: string) => string;
   };
@@ -328,7 +475,8 @@ const IDENT = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 const paren = (e: string) => (IDENT.test(e) ? e : `(${e})`);
 const neg = (e: string) => (IDENT.test(e) ? `-${e}` : `-(${e})`);
 
-function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
+/** The shape's local point: its transform applied to rhs.point. */
+function shapeLocalPoint(syn: Syntax, rhs: ShapeRhs): string {
   let lp = rhs.point;
   if (rhs.pos) lp = `${lp} - ${syn.vec3(rhs.pos)}`;
   if (rhs.rotRad) {
@@ -339,7 +487,11 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
     }
   }
   if (rhs.scale) lp = syn.divVec(lp, rhs.scale);
+  return lp;
+}
 
+function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
+  const lp = shapeLocalPoint(syn, rhs);
   const [p0, p1, p2, p3] = rhs.params;
   let call: string;
   if (rhs.shape === "image") {
@@ -353,7 +505,186 @@ function shapeCall(syn: Syntax, rhs: ShapeRhs): string {
       vec3: (x, y, z) => syn.vec3([Number(x), Number(y), Number(z)]),
     });
   }
+  for (const m of rhs.post) {
+    call = m.kind === "round" ? `(${call} - ${fmt(m.amount)})` : `(${syn.absFn}(${call}) - ${fmt(m.amount)})`;
+  }
   return Math.abs(rhs.factor - 1) > 1e-9 ? `${call} * ${fmt(rhs.factor)}` : call;
+}
+
+const AXIS = ["x", "y", "z"] as const;
+
+function modExpr(syn: Syntax, m: Modifier, q: string): string {
+  switch (m.kind) {
+    case "mirror":
+      return syn.vec3Expr(
+        AXIS.map((k, a) => {
+          if (!m.axes[a]) return `${q}.${k}`;
+          const d = m.offset[a];
+          return d === 0 ? `${syn.absFn}(${q}.${k})` : `${syn.absFn}(${q}.${k}) - ${fmt(d)}`;
+        }),
+      );
+    case "twist":
+      return `opTwist(${q}, ${fmt(m.amount)}, ${syn.uint(m.axis)})`;
+    case "bend":
+      return `opBend(${q}, ${fmt(m.amount)}, ${syn.uint(m.axis)})`;
+    case "elongate":
+      return `${q} - ${syn.clampFn}(${q}, ${syn.vec3([-m.size[0], -m.size[1], -m.size[2]])}, ${syn.vec3(m.size)})`;
+    default:
+      throw new Error(`not a point modifier: ${m.kind}`);
+  }
+}
+
+/**
+ * Statement lines for the SDF (msyn null) or the material function (msyn
+ * set: every accumulator dN carries a material mN alongside).
+ */
+function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, depth: number, out: string[]) {
+  const pad = "  ".repeat(depth);
+  const push = (line: string) => out.push(pad + line);
+  const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn!.lit(rhs.material));
+  for (const stmt of stmts) {
+    switch (stmt.t) {
+      case "point":
+        push(syn.pointStmt(stmt.name, pointExpr(syn, stmt)));
+        break;
+      case "shapePoint":
+        push(syn.pointStmt(stmt.name, shapeLocalPoint(syn, stmt.rhs)));
+        break;
+      case "pmod":
+        push(syn.pointStmt(stmt.name, modExpr(syn, stmt.mod, stmt.from)));
+        break;
+      case "def":
+        push(syn.defStmt(stmt.name, rhsExpr(syn, stmt.rhs)));
+        if (msyn) push(msyn.defMat(matName(stmt.name), mat(stmt.rhs)));
+        break;
+      case "combine": {
+        if (!msyn) {
+          push(syn.assignStmt(stmt.name, combineExpr(syn, stmt.name, stmt.op, stmt.k, rhsExpr(syn, stmt.rhs))));
+          break;
+        }
+        const a = stmt.name;
+        const m = matName(a);
+        const k = fmt(stmt.k);
+        let update = "";
+        if (stmt.op === "union") update = ` if (t < ${a}) { ${m} = tm; }`;
+        else if (stmt.op === "intersect") update = ` if (t > ${a}) { ${m} = tm; }`;
+        else if (stmt.op === "sUnion") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(${a}, t, ${k}));`;
+        else if (stmt.op === "sIntersect") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(-${a}, -t, ${k}));`;
+        push(
+          `  { ${msyn.tempF("t", rhsExpr(syn, stmt.rhs))} ${msyn.tempM("tm", mat(stmt.rhs))}${update} ${a} = ${combineExpr(syn, a, stmt.op, stmt.k, "t")}; }`,
+        );
+        break;
+      }
+      case "loop": {
+        const n = `n${stmt.acc.slice(1)}`;
+        const c = stmt.copies;
+        const unit = fmt(stmt.unit);
+        const k = stmt.acc.slice(1);
+        const lo = `lo${k}`;
+        let count: number;
+        let copy: string;
+        // A repeat candidate's step, computed once per candidate.
+        let step: string | null = null;
+        // Nearest copy first; see the viewport's SceneCompiler.nearest.
+        let near: { others: string; bound: string; far: string } | null = null;
+        // Scatter: a copy's own sphere, its frame and the factor its distance takes.
+        let scatter: { bound: (q: string) => string; point: (q: string) => string; size: string } | null = null;
+        if (c.kind === "repeat") {
+          const [sp, cnt, gap] = [c.mod.spacing, c.mod.count, c.gap].map((v) => syn.vec3(v));
+          const sphere = syn.vec4(c.copy.c, c.copy.r);
+          const cell = `cell${k}`;
+          push(syn.pointStmt(cell, `repeatCell(${stmt.from}, ${sp}, ${cnt})`));
+          // Candidates: the cells toward q (repeatStep), or the ring of cells
+          // around it, ring[k] choices per axis (repeatRing).
+          const st = `st${k}`;
+          count = c.ring ? c.ring[0] * c.ring[1] * c.ring[2] : 8;
+          step = c.ring ? `repeatRing(${n}, ${syn.radix3(c.ring)})` : `repeatStep(${n})`;
+          copy = `opRepeatNear(${stmt.from}, ${sp}, ${cell}, ${st})`;
+          const sc = c.mod.scatter;
+          if (scatterActive(sc)) {
+            const id = `opRepeatNearId(${stmt.from}, ${sp}, ${cell}, ${st})`;
+            const jitter = syn.vec4(sc.jitter, sc.size);
+            const spin = syn.vec4(sc.spin.map((deg) => (deg * Math.PI) / 180) as unknown as V3, sc.seed);
+            scatter = {
+              bound: (q) => `opScatterBound(${q}, ${id}, ${jitter}, ${spin}, ${fmt(c.reach!)})`,
+              point: (q) => `opScatterPoint(${q}, ${id}, ${jitter}, ${spin})`,
+              size: `opScatterSize(${id}, ${jitter}, ${spin})`,
+            };
+          }
+          near = {
+            others: `opRepeatOthers(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${sphere})`,
+            bound: `opRepeatNearBound(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${sphere}, ${st})`,
+            far: `${c.ring ? "opRepeatFarRing" : "opRepeatFar"}(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${gap})`,
+          };
+        } else {
+          const sector = fmt((2 * Math.PI) / c.mod.count);
+          const axis = syn.uint(c.mod.axis);
+          // Turned into the copy's sector, then out by the radius.
+          const out = c.mod.radius === 0 ? "" : ` - ${syn.vec3(polarShift(c.mod))}`;
+          if (c.reach === "all") {
+            count = c.mod.count;
+            copy = `opPolarCopy(${stmt.from}, ${sector}, ${axis}, ${n})${out}`;
+          } else {
+            const gap = syn.vec2(c.gap[0], c.gap[1]);
+            const sphere = syn.vec4(c.copy.c, c.copy.r);
+            const t = polarTurned(c.mod, c.copy.c);
+            const own = `own${k}`;
+            push(syn.pointStmt(own, `opPolarNear(${stmt.from}, ${sector}, ${axis}, ${syn.uint(0)})`));
+            count = Math.min(3, c.mod.count);
+            copy = `opPolarNear(${stmt.from}, ${sector}, ${axis}, ${n})${out}`;
+            near = {
+              others: `opPolarOthers(${own}, ${axis}, ${sphere}, ${syn.vec4([t[0], t[1], t[2]], t[3])}, ${syn.vec4([t[4], t[5], t[6]], t[7])})`,
+              bound: `opPolarNearBound(${stmt.from}, ${sector}, ${axis}, ${sphere}, ${n})`,
+              far: `opPolarFar(${stmt.from}, ${sector}, ${axis}, ${gap}, ${fmt(c.mod.count)})`,
+            };
+          }
+        }
+        if (near) push(syn.defStmt(lo, `${near.others} * ${unit}`));
+        push(syn.defStmt(stmt.acc, fmt(1e10)));
+        if (msyn) push(msyn.defMat(matName(stmt.acc), msyn.lit(DEFAULT_MATERIAL)));
+        push(`  ${syn.loopOpen(n, count)}`);
+        if (step) out.push(pad + "  " + syn.pointStmt(`st${k}`, step));
+        if (near) {
+          push(`    if (${n} > ${syn.uint(0)}) {`);
+          push(`      if (${stmt.acc} <= ${lo}) { break; }`);
+          push(`      if (${near.bound} * ${unit} >= ${stmt.acc}) { continue; }`);
+          push(`    }`);
+        }
+        let result = stmt.result;
+        if (scatter) {
+          const cq = `cq${k}`;
+          const size = `size${k}`;
+          out.push(pad + "  " + syn.pointStmt(cq, copy));
+          // A scattered copy's own sphere first: most candidates stop here.
+          push(`    if (${n} > ${syn.uint(0)}) { if (${scatter.bound(cq)} * ${unit} >= ${stmt.acc}) { continue; } }`);
+          out.push(pad + "  " + syn.pointStmt(stmt.point, scatter.point(cq)));
+          out.push(pad + "  " + syn.defStmt(size, scatter.size));
+          result = `${stmt.result} * ${size}`;
+        } else {
+          out.push(pad + "  " + syn.pointStmt(stmt.point, copy));
+        }
+        emitStmts(stmt.body, syn, msyn, depth + 1, out);
+        if (msyn) push(`    if (${result} < ${stmt.acc}) { ${matName(stmt.acc)} = ${matName(stmt.result)}; }`);
+        out.push(pad + "  " + syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${result})`));
+        push("  }");
+        if (near) push(`  if (${stmt.acc} > ${lo}) { ${syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${near.far} * ${unit})`).trim()} }`);
+        break;
+      }
+      case "scale":
+        push(syn.assignStmt(stmt.name, `${stmt.name} * ${fmt(stmt.k)}`));
+        break;
+      case "post":
+        push(
+          syn.assignStmt(
+            stmt.name,
+            stmt.mod.kind === "round"
+              ? `${stmt.name} - ${fmt(stmt.mod.amount)}`
+              : `${syn.absFn}(${stmt.name}) - ${fmt(stmt.mod.amount)}`,
+          ),
+        );
+        break;
+    }
+  }
 }
 
 function rhsExpr(syn: Syntax, rhs: Rhs): string {
@@ -393,11 +724,7 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   if (ir.stmts.length === 1 && ir.stmts[0].t === "def") {
     body.push(`  return ${rhsExpr(syn, ir.stmts[0].rhs)};`);
   } else {
-    for (const stmt of ir.stmts) {
-      if (stmt.t === "point") body.push(syn.pointStmt(stmt.name, pointExpr(syn, stmt)));
-      else if (stmt.t === "def") body.push(syn.defStmt(stmt.name, rhsExpr(syn, stmt.rhs)));
-      else body.push(syn.assignStmt(stmt.name, combineExpr(syn, stmt.name, stmt.op, stmt.k, rhsExpr(syn, stmt.rhs))));
-    }
+    emitStmts(ir.stmts, syn, null, 0, body);
     body.push(`  return ${ir.result};`);
   }
 
@@ -409,6 +736,7 @@ function render(ir: Ir, fnName: string, syn: Syntax): string {
   ir.images.forEach((url, i) => helpers.push(syn.helpers.image(i, url)));
   if (ir.usesRotation) helpers.push(syn.helpers.rot);
   if (ir.usesSmin) helpers.push(syn.helpers.smin);
+  if (ir.usesModifiers) helpers.push(syn.helpers.modifiers);
 
   return [...helpers, `${syn.fnOpen(fnName)}\n${body.join("\n")}\n${syn.fnClose}`].join("\n\n");
 }
@@ -479,31 +807,11 @@ float sminWeight(float a, float b, float k) {
 const matName = (acc: string) => `m${acc.slice(1)}`;
 
 function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSyntax): string {
-  const mat = (rhs: Rhs) => (rhs.kind === "var" ? matName(rhs.name) : msyn.lit(rhs.material));
   const body: string[] = [];
   if (!ir.result) {
     body.push(`  return ${msyn.lit(DEFAULT_MATERIAL)};`);
   } else {
-    for (const stmt of ir.stmts) {
-      if (stmt.t === "point") {
-        body.push(syn.pointStmt(stmt.name, pointExpr(syn, stmt)));
-      } else if (stmt.t === "def") {
-        body.push(syn.defStmt(stmt.name, rhsExpr(syn, stmt.rhs)));
-        body.push(msyn.defMat(matName(stmt.name), mat(stmt.rhs)));
-      } else {
-        const a = stmt.name;
-        const m = matName(a);
-        const k = fmt(stmt.k);
-        let update = "";
-        if (stmt.op === "union") update = ` if (t < ${a}) { ${m} = tm; }`;
-        else if (stmt.op === "intersect") update = ` if (t > ${a}) { ${m} = tm; }`;
-        else if (stmt.op === "sUnion") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(${a}, t, ${k}));`;
-        else if (stmt.op === "sIntersect") update = ` ${m} = mixMaterial(${m}, tm, sminWeight(-${a}, -t, ${k}));`;
-        body.push(
-          `  { ${msyn.tempF("t", rhsExpr(syn, stmt.rhs))} ${msyn.tempM("tm", mat(stmt.rhs))}${update} ${a} = ${combineExpr(syn, a, stmt.op, stmt.k, "t")}; }`,
-        );
-      }
-    }
+    emitStmts(ir.stmts, syn, msyn, 0, body);
     body.push(`  return ${matName(ir.result)};`);
   }
   return [msyn.decl, `${msyn.fnOpen(fnName)}\n${body.join("\n")}\n}`].join("\n\n");
@@ -512,6 +820,7 @@ function renderMaterial(ir: Ir, fnName: string, syn: Syntax, msyn: MaterialSynta
 const TG_SYNTAX: Syntax = {
   vec3: (v) => `d.vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `d.vec2f(${fmt(x)}, ${fmt(y)})`,
+  vec4: (v, w) => `d.vec4f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])}, ${fmt(w)})`,
   minFn: "std.min",
   maxFn: "std.max",
   divVec: (e, v) => `${paren(e)} * d.vec3f(${fmtRecip(v[0])}, ${fmtRecip(v[1])}, ${fmtRecip(v[2])})`,
@@ -520,12 +829,19 @@ const TG_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `const ${fn} = (p: d.v3f): number => {\n  "use gpu";`,
   fnClose: "};",
-  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
+  absFn: "std.abs",
+  clampFn: "std.clamp",
+  vec3Expr: (c) => `d.vec3f(${c.join(", ")})`,
+  uint: (n) => `${n}`,
+  loopOpen: (n, count) => `for (let ${n} = d.u32(0); ${n} < ${count}; ${n}++) {`,
+  radix3: (v) => `d.vec3u(${v.join(", ")})`,
+  helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, modifiers: MODIFIER_TG, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
 };
 
 const WGSL_SYNTAX: Syntax = {
   vec3: (v) => `vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `vec2f(${fmt(x)}, ${fmt(y)})`,
+  vec4: (v, w) => `vec4f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])}, ${fmt(w)})`,
   minFn: "min",
   maxFn: "max",
   divVec: (e, v) => `${paren(e)} / vec3f(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
@@ -534,12 +850,19 @@ const WGSL_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `fn ${fn}(p: vec3f) -> f32 {`,
   fnClose: "}",
-  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
+  absFn: "abs",
+  clampFn: "clamp",
+  vec3Expr: (c) => `vec3f(${c.join(", ")})`,
+  uint: (n) => `${n}u`,
+  loopOpen: (n, count) => `for (var ${n} = 0u; ${n} < ${count}u; ${n}++) {`,
+  radix3: (v) => `vec3u(${v.map((x) => `${x}u`).join(", ")})`,
+  helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, modifiers: MODIFIER_WGSL, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
 };
 
 const GLSL_SYNTAX: Syntax = {
   vec3: (v) => `vec3(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
   vec2: (x, y) => `vec2(${fmt(x)}, ${fmt(y)})`,
+  vec4: (v, w) => `vec4(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])}, ${fmt(w)})`,
   minFn: "min",
   maxFn: "max",
   divVec: (e, v) => `${paren(e)} / vec3(${fmt(v[0])}, ${fmt(v[1])}, ${fmt(v[2])})`,
@@ -548,7 +871,13 @@ const GLSL_SYNTAX: Syntax = {
   assignStmt: (n, e) => `  ${n} = ${e};`,
   fnOpen: (fn) => `float ${fn}(vec3 p) {`,
   fnClose: "}",
-  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, imageSampler: "", image: GLSL_IMAGE },
+  absFn: "abs",
+  clampFn: "clamp",
+  vec3Expr: (c) => `vec3(${c.join(", ")})`,
+  uint: (n) => `${n}`,
+  loopOpen: (n, count) => `for (int ${n} = 0; ${n} < ${count}; ${n}++) {`,
+  radix3: (v) => `ivec3(${v.join(", ")})`,
+  helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, modifiers: MODIFIER_GLSL, imageSampler: "", image: GLSL_IMAGE },
 };
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -559,6 +888,35 @@ const RESERVED = new Set([
   "applyInvRotXYZ",
   "ndot2",
   "sdImageField",
+  "repeatCell",
+  "repeatDir",
+  "repeatHas",
+  "repeatStep",
+  "opRepeatNear",
+  "opRepeatNearBound",
+  "opRepeatOthers",
+  "opRepeatFar",
+  "opRepeatFarRing",
+  "rot2",
+  "scatterHash",
+  "scatterBase",
+  "scatterValue",
+  "scatterMove",
+  "scatterSize",
+  "opScatterBound",
+  "repeatRing",
+  "opRepeatNearId",
+  "opScatterPoint",
+  "opScatterSize",
+  "polarUv",
+  "polarSet",
+  "opPolarNear",
+  "opPolarNearBound",
+  "opPolarOthers",
+  "opPolarFar",
+  "opPolarCopy",
+  "opTwist",
+  "opBend",
 ]);
 
 function sdfFnName(nodeName: string): string {

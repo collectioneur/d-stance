@@ -1,4 +1,4 @@
-import type { Material, ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
+import type { Material, Modifier, ObjectGroup, OpType, SceneItem, SceneRoot, ShapeLayer, ShapeType } from "../store/sceneStore";
 import { defaultParams } from "../store/sceneStore";
 
 type V3 = [number, number, number];
@@ -23,6 +23,7 @@ export function shape(
     smoothK: opts.smoothK ?? 0.1,
     ...(opts.image ? { image: opts.image } : {}),
     ...(opts.material ? { material: opts.material } : {}),
+    ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
   };
 }
 
@@ -37,6 +38,7 @@ export function group(
     op: OpType;
     smoothK: number;
     material: Material;
+    modifiers: Modifier[];
   }> = {},
 ): ObjectGroup {
   return {
@@ -49,6 +51,7 @@ export function group(
     op: opts.op ?? "union",
     smoothK: opts.smoothK ?? 0.1,
     ...(opts.material ? { material: opts.material } : {}),
+    ...(opts.modifiers ? { modifiers: opts.modifiers } : {}),
     items,
   };
 }

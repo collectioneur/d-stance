@@ -3,6 +3,7 @@ import { fullScreenTriangle } from "typegpu/common";
 import { MAX_IMAGES } from "../store/sceneStore";
 import { IMAGE_SDF_RES } from "../utils/imageSdf";
 import {
+  CULL_DIST,
   DATA_IDENT,
   DATA_SLOTS,
   IMAGE_SAMPLER_IDENT,
@@ -103,7 +104,7 @@ export const SceneInfo = d.struct({
 const renderModeSlot = tgpu.slot(RENDER_MODE_CLASSIC);
 
 /** Generated scene SDF: world point → signed distance. */
-const sceneSdfSlot = tgpu.slot<(p: d.v3f) => number>();
+const sceneSdfSlot = tgpu.slot<(p: d.v3f, standIn: number) => number>();
 /** Generated scene info at a surface point. */
 const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.InferGPU<typeof SceneInfo>>();
 
@@ -186,7 +187,17 @@ export function createShader(root: TgpuRoot) {
 
   const sdScene = (p: d.v3f): number => {
     "use gpu";
-    return sceneSdfSlot.$(p);
+    return sceneSdfSlot.$(p, CULL_DIST);
+  };
+
+  /**
+   * Scene distance without far shapes' bounding spheres standing in for
+   * them: soft shadows read the distance as "how near is geometry", and a
+   * sphere around a far shape would darken them in rings.
+   */
+  const sdSceneExact = (p: d.v3f): number => {
+    "use gpu";
+    return sceneSdfSlot.$(p, 1e10);
   };
 
   // Ray vs sphere: returns (tEnter, tExit); tExit < 0 = miss.
@@ -589,7 +600,7 @@ export function createShader(root: TgpuRoot) {
     let res = d.f32(1.0);
     let t = std.max(span.x, 0.02);
     for (let i = d.f32(0.0); i < qualityUniforms.$.shadowSteps; i += d.f32(1.0)) {
-      const h = sdScene(ro + rd * t);
+      const h = sdSceneExact(ro + rd * t);
       res = std.min(res, (8.0 * h) / t);
       t += std.clamp(h, 0.01, 0.2);
       if (res < 0.002 || t > span.y) {
@@ -959,7 +970,7 @@ export function createShader(root: TgpuRoot) {
       [IMAGE_TEX_IDENT]: imageSdfView,
       [IMAGE_SAMPLER_IDENT]: imageSdfSampler,
     });
-    const sdf = tgpu.fn([d.vec3f], d.f32)`(p) { DS_SCENE return ds_sdScene(p); }`.$uses({
+    const sdf = tgpu.fn([d.vec3f, d.f32], d.f32)`(p, standIn) { DS_SCENE return ds_sdScene(p, standIn); }`.$uses({
       DS_SCENE: decl,
     });
     const info = tgpu.fn([d.vec3f], SceneInfo)`(p) {

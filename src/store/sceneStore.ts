@@ -32,7 +32,9 @@ export type ShapeType =
 export type OpType = "union" | "subtract" | "intersect" | "sUnion" | "sSubtract" | "sIntersect";
 
 import type { Material } from "./material";
+import type { Modifier } from "./modifiers";
 export type { Material } from "./material";
+export type { Modifier } from "./modifiers";
 
 export type ShapeLayer = {
   kind: "layer";
@@ -51,6 +53,8 @@ export type ShapeLayer = {
    */
   image?: { sdf: string; round?: number };
   material?: Material;
+  /** Domain / distance modifiers in the shape's own space (src/store/modifiers.ts). */
+  modifiers?: Modifier[];
 };
 
 export type ObjectGroup = {
@@ -64,6 +68,8 @@ export type ObjectGroup = {
   smoothK: number;
   /** Default for descendant shapes that have no material of their own. */
   material?: Material;
+  /** Domain / distance modifiers applied in the group's frame to all children. */
+  modifiers?: Modifier[];
   items: SceneItem[];
 };
 
@@ -483,7 +489,7 @@ interface SceneState {
     patch: Partial<
       Pick<
         ShapeLayer,
-        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material"
+        "name" | "position" | "rotation" | "scale" | "params" | "op" | "smoothK" | "image" | "material" | "modifiers"
       >
     >,
   ) => void;
@@ -492,7 +498,7 @@ interface SceneState {
   updateGroup: (
     groupId: string,
     patch: Partial<
-      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material">
+      Pick<ObjectGroup, "name" | "position" | "rotation" | "scale" | "op" | "smoothK" | "material" | "modifiers">
     >,
   ) => void;
   updateRootName: (name: string) => void;

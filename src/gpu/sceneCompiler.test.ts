@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { compileScene, countDataSlots, DATA_SLOTS } from "./sceneCompiler";
 import { group, kitchenSink, scene, shape } from "../test/fixtures";
 import type { SceneRoot } from "../store/sceneStore";
+import type { Scatter } from "../store/modifiers";
 
 const OPTS = { imageLayer: () => 3 };
 const compile = (root: SceneRoot) => compileScene(root, OPTS);
@@ -59,7 +60,7 @@ describe("scene compiler", () => {
     const code = compile(kitchenSink()).code;
     expect(code).not.toMatch(/(?<!ds_)\bsd[A-Z]\w*\(/);
     expect(code).toContain("fn ds_sdSphere(");
-    expect(code).toContain("fn ds_sdScene(p: vec3f) -> f32");
+    expect(code).toContain("fn ds_sdScene(p: vec3f, standIn: f32) -> f32");
     expect(code).toContain("fn ds_sceneInfo(p: vec3f) -> DsInfo");
   });
 
@@ -113,9 +114,12 @@ describe("scene compiler", () => {
 
   test("the head of a hard-union scene may stand in its sphere far away", () => {
     const code = compile(scene([shape("box"), shape("sphere")])).code;
-    expect(code).toMatch(/var v\d+ = ds_bound\(p, 5u\);\n\s+if \(v\d+ <= 0\.15\)/);
+    const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    // How far is the caller's: marches pass CULL_DIST, soft shadows never let it stand in.
+    expect(sdf).toMatch(/var v\d+ = ds_bound\(p, 5u\);\n\s+if \(v\d+ <= standIn\)/);
+    expect(code.slice(code.indexOf("fn ds_sceneInfo"))).toMatch(/if \(v\d+ <= 0\.15\)/);
     const notUnion = compile(scene([shape("box"), shape("sphere", { op: "subtract" })])).code;
-    expect(notUnion).not.toMatch(/<= 0\.15/);
+    expect(notUnion).not.toMatch(/<= (0\.15|standIn)/);
   });
 
   test("slot budget fits the uniform binding for a capped scene", () => {
@@ -167,5 +171,128 @@ describe("scene compiler materials", () => {
     expect(info).toMatch(/ds_mixMat\(m\d+, w\d+, ds_sminT\(a\d+, v\d+, /);
     expect(info).toMatch(/if \(v\d+ > a\d+\) \{ m\d+ = w\d+; \}/);
     expect(info).toContain("return DsInfo(info.x, info.y, mat.c.xyz, mat.c.w, mat.e.x, mat.e.y);");
+  });
+});
+
+describe("scene compiler modifiers", () => {
+  const rep = (count: [number, number, number], spacing = 1) => ({
+    kind: "repeat" as const,
+    spacing: [spacing, spacing, spacing] as [number, number, number],
+    count,
+  });
+
+  test("a group with point modifiers evaluates its children in its own frame", () => {
+    const code = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([3, 1, 1])] })])).code;
+    const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    expect(sdf).toMatch(/let q\d+ = ds_xf\(p, \d+u\);/);
+    expect(sdf).toMatch(/let q\d+ = ds_opRepeatNear\(q\d+, /);
+    expect(sdf).toMatch(/ds_sdSphere\(ds_xf\(q\d+, \d+u\)/);
+  });
+
+  test("a repeat checks a neighbor copy only when its bound can beat the nearest", () => {
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    const out = compile(scene([shape("cone", { modifiers: [rep([3, 3, 3], 1.8)] })]));
+    const code = body(out.code);
+    expect(code).toMatch(
+      /let (t\d+) = ds_opRepeatOthers\(.*\n.*\n\s+for \(var (n\d+) = 0u; \2 < 8u; \2\+\+\) \{\n\s+let (s\d+) = ds_repeatStep\(\2\);\n\s+if \(\2 > 0u\) \{\n\s+if \((r\d+) <= \1\) \{ break; \}\n\s+if \(ds_opRepeatNearBound\(.*, \3\) \* .* >= \4\) \{ continue; \}/,
+    );
+    expect(code).toContain("ds_opRepeatFar(");
+    // Spacing, counts and the gap are values: a drag never recompiles.
+    expect(compile(scene([shape("cone", { modifiers: [rep([5, 1, 0], 3)] })])).code).toBe(out.code);
+    // The gap: half the spacing minus the cone's bound radius, per axis.
+    const gapAt = out.values.findIndex((v, i) => i % 4 === 0 && Math.abs(v - 0.9 + Math.hypot(0.4, 0.6)) < 0.02);
+    expect(gapAt).toBeGreaterThan(0);
+  });
+
+  test("a polar repeat checks its three nearest copies, or every copy around the axis", () => {
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    const polar = (count: number) => ({ kind: "polar" as const, count, axis: 1 as const, radius: 0 });
+    const spokes = (count: number, r = 0.2) =>
+      body(compile(scene([group([shape("sphere", { position: [1, 0, 0], params: [r, 0, 0, 0] })], { modifiers: [polar(count)] })])).code);
+    expect(spokes(6)).toMatch(/< min\(3u, u32\(dsData\[\d+\]\.x\)\); n/);
+    expect(spokes(6)).toContain("ds_opPolarOthers(");
+    expect(spokes(6)).toContain("ds_opPolarNearBound(");
+    expect(spokes(6)).toContain("ds_opPolarFar(");
+    expect(spokes(16)).toBe(spokes(6));
+    // A shape on its own axis: the nearest three are all of three copies; more need every copy.
+    expect(body(compile(scene([shape("cone", { modifiers: [polar(3)] })])).code)).toContain("ds_opPolarNear(");
+    const all5 = compile(scene([shape("cone", { modifiers: [polar(5)] })])).code;
+    expect(body(all5)).toMatch(/for \(var n\d+ = 0u; n\d+ < u32\(dsData\[\d+\]\.x\); n\d+\+\+\)/);
+    expect(body(all5)).toContain("ds_opPolarCopy(");
+    expect(compile(scene([shape("cone", { modifiers: [polar(9)] })])).code).toBe(all5);
+  });
+
+  test("a mirror's distance is a value: dragging it never recompiles", () => {
+    const mirror = (d: number) => compile(scene([shape("cone", { modifiers: [{ kind: "mirror", axes: [true, false, true], offset: [d, 0, d] }] })]));
+    const near = mirror(0);
+    expect(mirror(0.7).code).toBe(near.code);
+    expect(near.code).toMatch(/vec3f\(abs\(q\d+\.x\) - dsData\[\d+\]\.x, q\d+\.y, abs\(q\d+\.z\) - dsData\[\d+\]\.z\)/);
+  });
+
+  test("a polar repeat's radius is a value", () => {
+    const ring = (radius: number) =>
+      compile(scene([shape("cone", { modifiers: [{ kind: "polar", count: 6, axis: 1, radius }] })])).code;
+    expect(ring(1.5)).toBe(ring(2));
+    expect(ring(1.5)).toMatch(/ds_opPolarNear\(.*, n\d+\) - dsData\[\d+\]\.xyz/);
+  });
+
+  test("scatter adds code once it varies anything; its numbers are values", () => {
+    const grid = (scatter?: Scatter) =>
+      compile(scene([shape("cone", { modifiers: [{ kind: "repeat", spacing: [1.5, 1.5, 1.5], count: [3, 1, 3], ...(scatter && { scatter }) }] })])).code;
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    expect(body(grid())).not.toContain("ds_opScatterPoint(");
+    expect(grid({ jitter: [0, 0, 0], spin: [0, 0, 0], size: 0, seed: 5 })).toBe(grid());
+    const a = grid({ jitter: [0.1, 0, 0.1], spin: [0, 45, 0], size: 0.2, seed: 1 });
+    expect(a).toMatch(/let (q\d+) = ds_opScatterPoint\(q\d+, ds_opRepeatNearId\(/);
+    expect(a).toMatch(/let t\d+ = ds_sdCone\(.*\) \* dsData\[\d+\]\.x \* t\d+;/);
+    expect(grid({ jitter: [0.3, 0.2, 0], spin: [10, 0, 90], size: 0.5, seed: 42 })).toBe(a);
+  });
+
+  test("a repeat whose copies leave their cells checks the whole ring", () => {
+    const code = compile(scene([shape("sphere", { params: [0.6, 0, 0, 0], modifiers: [{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 3] }] })])).code;
+    const body = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    // x and z: stay, toward or away; y has one copy.
+    expect(body).toMatch(/for \(var (n\d+) = 0u; \1 < 9u; \1\+\+\) \{\n\s+let s\d+ = ds_repeatRing\(\1, vec3u\(3u, 1u, 3u\)\);/);
+    expect(body).toContain("ds_opRepeatFarRing(");
+  });
+
+  test("twist and bend scale the result by 1 / Lipschitz", () => {
+    const out = compile(scene([shape("box", { modifiers: [{ kind: "twist", amount: 3, axis: 1 }] })]));
+    const factor = out.values[16];
+    expect(factor).toBeGreaterThan(0);
+    expect(factor).toBeLessThan(1);
+  });
+
+  test("infinite repetition is unbounded and the march radius is capped", () => {
+    const out = compile(scene([group([shape("sphere")], { modifiers: [rep([0, 1, 0])] })]));
+    expect(out.boundsRadius).toBeLessThanOrEqual(100);
+    expect(out.boundsRadius).toBeGreaterThan(50);
+  });
+
+  test("bounds grow with limited repetition", () => {
+    const plain = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })])])).boundsRadius;
+    const repeated = compile(scene([group([shape("sphere", { params: [0.2, 0, 0, 0] })], { modifiers: [rep([5, 1, 1])] })])).boundsRadius;
+    expect(repeated).toBeGreaterThan(plain + 1.9);
+  });
+
+  test("a scaled group with modifiers keeps its children inside its bounds", () => {
+    const out = compile(
+      scene([group([shape("sphere", { position: [0.5, 0, 0], params: [0.3, 0, 0, 0] })], { scale: [3, 3, 3], modifiers: [{ kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] }] })]),
+    );
+    // group bound slot: radius must cover the mirrored sphere: (0.5 + 0.3) * 3
+    expect(out.values[7]).toBeGreaterThanOrEqual(2.4);
+  });
+
+  test("distance modifiers rewrite the result; switched-off ones vanish", () => {
+    const code = compile(scene([shape("sphere", { modifiers: [{ kind: "onion", thickness: 0.05 }] })])).code;
+    expect(code).toMatch(/\(abs\(ds_sdSphere\(q\d+, dsData\[\d+\]\.x\)\) - dsData\[\d+\]\.x\)/);
+    const off = compile(scene([shape("sphere", { modifiers: [{ kind: "onion", thickness: 0.05, off: true }] })])).code;
+    expect(off).toBe(compile(scene([shape("sphere")])).code);
+  });
+
+  test("modifier amounts are values, not code", () => {
+    const a = compile(scene([group([shape("sphere", { params: [0.1, 0, 0, 0] })], { modifiers: [rep([3, 1, 1], 1)] })])).code;
+    const b = compile(scene([group([shape("sphere", { params: [0.1, 0, 0, 0] })], { modifiers: [rep([5, 1, 1], 2)] })])).code;
+    expect(a).toBe(b);
   });
 });

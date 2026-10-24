@@ -13,6 +13,7 @@ import {
   type ShapeType,
 } from "../store/sceneStore";
 import { colorToHex } from "../store/material";
+import { activeModifiers } from "../store/modifiers";
 
 export type ArboristNode = {
   id: string;
@@ -22,8 +23,15 @@ export type ArboristNode = {
   op?: OpType;
   /** Hex of the item's own material color (tree dot), if it has one. */
   color?: string;
+  /** Number of active modifiers (tree badge). */
+  mods?: number;
   children?: ArboristNode[];
 };
+
+function modsBadge(item: SceneItem): { mods?: number } {
+  const n = activeModifiers(item.modifiers).length;
+  return n > 0 ? { mods: n } : {};
+}
 
 export function sceneItemToArborist(item: SceneItem): ArboristNode {
   if (item.kind === "layer") {
@@ -34,6 +42,7 @@ export function sceneItemToArborist(item: SceneItem): ArboristNode {
       shapeType: item.shapeType,
       op: item.op,
       ...(item.material ? { color: colorToHex(item.material.color) } : {}),
+      ...modsBadge(item),
     };
   }
   return {
@@ -42,6 +51,7 @@ export function sceneItemToArborist(item: SceneItem): ArboristNode {
     name: item.name,
     op: item.op,
     ...(item.material ? { color: colorToHex(item.material.color) } : {}),
+    ...modsBadge(item),
     children:
       item.items.length > 0 ? item.items.map(sceneItemToArborist) : [],
   };

@@ -693,3 +693,519 @@ export function primitiveCall(
       return `${fn}(${lp}, ${p0}, ${p1})`;
   }
 }
+
+// ── Modifier helpers (src/store/modifiers.ts) ────────────────────────────────
+// One source per language for the viewport compiler (WGSL, prefixed ds_) and
+// the export. Axis arguments: 0 = x, 1 = y, 2 = z.
+
+export const MODIFIER_WGSL = `// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it. Polar repetition: count copies around an
+// axis, sector = 2π / count. A point is checked against the nearest copy,
+// then (unless …Others says no other copy can be nearer) against the
+// neighbors whose bounding sphere (…NearBound) beats the result so far;
+// …Far caps it for the copies no candidate covers. See modifierMath.ts.
+
+// The cell (copy index per axis) nearest to q.
+fn repeatCell(q: vec3f, s: vec3f, c: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  let shift = h - floor(h);
+  return select(clamp(round(q / s - shift) + shift, -h, h), round(q / s), c < vec3f(0.5));
+}
+
+// Toward q from the center of cell id: +1 or −1 per axis.
+fn repeatDir(q: vec3f, s: vec3f, id: vec3f) -> vec3f {
+  return select(vec3f(1.0), vec3f(-1.0), q - s * id < vec3f(0.0));
+}
+
+// 1 where cell id holds a copy on that axis, else 0.
+fn repeatHas(id: vec3f, c: vec3f) -> vec3f {
+  let h = max(c - 1.0, vec3f(0.0)) * 0.5;
+  return select(vec3f(0.0), vec3f(1.0), (c < vec3f(0.5)) | (abs(id) <= h + 0.25));
+}
+
+// Candidate n's step from cell id, in units of "toward q" per axis: bit k
+// of n crosses the face toward q on axis k (copies inside their cells).
+fn repeatStep(n: u32) -> vec3f {
+  return vec3f(f32(n & 1u), f32((n >> 1u) & 1u), f32((n >> 2u) & 1u));
+}
+
+// Candidate n's step over the ring of cells around q's cell (copies that
+// leave their cells): radix.k choices per axis (1: stay; 2: stay, toward q;
+// 3: stay, toward, away), n counting through them axis by axis.
+fn repeatRing(n: u32, radix: vec3u) -> vec3f {
+  let d = vec3u(n % radix.x, (n / radix.x) % radix.y, n / (radix.x * radix.y));
+  return select(select(vec3f(0.0), vec3f(1.0), d == vec3u(1u)), vec3f(-1.0), d == vec3u(2u));
+}
+
+// A candidate copy's point: cell id stepped by step (repeatStep / repeatRing).
+fn opRepeatNear(q: vec3f, s: vec3f, id: vec3f, step: vec3f) -> vec3f {
+  return q - s * (id + repeatDir(q, s, id) * step);
+}
+
+// Lower bound of the distance to a candidate copy: to its bounding sphere
+// (sphere.xyz, sphere.w in the copy's frame); 1e10 when its cell is empty.
+fn opRepeatNearBound(q: vec3f, s: vec3f, c: vec3f, id: vec3f, sphere: vec4f, step: vec3f) -> f32 {
+  if (dot(abs(step) * (1.0 - repeatHas(id + repeatDir(q, s, id) * step, c)), vec3f(1.0)) > 0.0) { return 1e10; }
+  return length(opRepeatNear(q, s, id, step) - sphere.xyz) - sphere.w;
+}
+
+// Lower bound of the distance to every copy but cell id's: to the nearest
+// other copy's bounding sphere (sphere.xyz, .w in a copy's frame), one cell
+// over along one repeated axis. (Never below "across a face, a copy keeps its
+// gap", so that one is not needed here.)
+fn opRepeatOthers(q: vec3f, s: vec3f, c: vec3f, id: vec3f, sphere: vec4f) -> f32 {
+  let e = q - s * id - sphere.xyz;
+  let rep = (c < vec3f(0.5)) | (c > vec3f(1.5));
+  // Per axis: the nearest center offset over any copy, and over the copies
+  // one or more cells over.
+  let k = select(vec3f(0.0), round(e / s), rep);
+  let g = e - s * k;
+  let h = select(vec3f(1e10), select(g, s - abs(e), k == vec3f(0.0)), rep);
+  let m = dot(g, g) - g * g + h * h;
+  return sqrt(min(m.x, min(m.y, m.z))) - sphere.w;
+}
+
+// Lower bound of the distance to the copies no candidate covers (past the
+// far face, two cells toward q); 1e10 when there are none, or when copies
+// reach so far past their cell that it says nothing.
+fn opRepeatFar(q: vec3f, s: vec3f, c: vec3f, id: vec3f, gap: vec3f) -> f32 {
+  let dir = repeatDir(q, s, id);
+  let a = abs(q - s * id);
+  let away = mix(vec3f(1e10), s * 0.5 + a + gap, repeatHas(id - dir, c));
+  let two = mix(vec3f(1e10), s * 1.5 - a + gap, repeatHas(id + 2.0 * dir, c));
+  let t = min(away, two);
+  let m = min(t.x, min(t.y, t.z));
+  return select(m, 1e10, m <= 0.0);
+}
+
+// opRepeatFar for the whole-ring candidates: the copies two or more cells
+// away on some axis.
+fn opRepeatFarRing(q: vec3f, s: vec3f, c: vec3f, id: vec3f, gap: vec3f) -> f32 {
+  let dir = repeatDir(q, s, id);
+  let a = abs(q - s * id);
+  let toward = mix(vec3f(1e10), s * 1.5 - a + gap, repeatHas(id + 2.0 * dir, c));
+  let away = mix(vec3f(1e10), s * 1.5 + a + gap, repeatHas(id - 2.0 * dir, c));
+  let t = min(toward, away);
+  let m = min(t.x, min(t.y, t.z));
+  return select(m, 1e10, m <= 0.0);
+}
+
+fn rot2(v: vec2f, a: f32) -> vec2f {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Scattered repeats: integer hashing only (PCG), so every GPU picks the
+// same layout; modifierMath.ts scatterCopy mirrors it on the CPU.
+fn scatterHash(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+
+// A copy's hash: the start of its sequence of random values.
+fn scatterBase(id: vec3f, seed: f32) -> u32 {
+  let i = bitcast<vec3u>(vec3i(round(id * 2.0)));
+  return scatterHash(i.x ^ scatterHash(i.y ^ scatterHash(i.z ^ scatterHash(u32(seed)))));
+}
+
+// Value k of a copy's sequence, in [−1, 1]: 0–2 move, 3–5 turn, 6 size.
+fn scatterValue(base: u32, k: u32) -> f32 {
+  return f32(scatterHash(base + k) >> 8u) / 16777215.0 * 2.0 - 1.0;
+}
+
+fn scatterMove(base: u32, jitter: vec4f) -> vec3f {
+  return vec3f(scatterValue(base, 0u), scatterValue(base, 1u), scatterValue(base, 2u)) * jitter.xyz;
+}
+
+fn scatterSize(base: u32, jitter: vec4f) -> f32 {
+  return 1.0 + scatterValue(base, 6u) * jitter.w;
+}
+
+// A candidate copy's cell (opRepeatNear's).
+fn opRepeatNearId(q: vec3f, s: vec3f, id: vec3f, step: vec3f) -> vec3f {
+  return id + repeatDir(q, s, id) * step;
+}
+
+// A scattered copy's own frame: p (about its cell's center) moved by up to
+// jitter.xyz, turned by up to spin.xyz (radians, Euler XYZ like an item's
+// rotation) and scaled by its size. jitter.w: size, spin.w: seed.
+fn opScatterPoint(p: vec3f, id: vec3f, jitter: vec4f, spin: vec4f) -> vec3f {
+  let b = scatterBase(id, spin.w);
+  let q0 = p - scatterMove(b, jitter);
+  let a = vec3f(scatterValue(b, 3u), scatterValue(b, 4u), scatterValue(b, 5u)) * spin.xyz;
+  let xy = rot2(q0.xy, -a.z);
+  let zx = rot2(vec2f(q0.z, xy.x), -a.y);
+  let yz = rot2(vec2f(xy.y, zx.x), -a.x);
+  return vec3f(zx.y, yz.x, yz.y) / scatterSize(b, jitter);
+}
+
+// How much a scattered copy grows: its distance is multiplied by this.
+fn opScatterSize(id: vec3f, jitter: vec4f, spin: vec4f) -> f32 {
+  return scatterSize(scatterBase(id, spin.w), jitter);
+}
+
+// Lower bound of the distance to a scattered copy: to its own sphere (its
+// move, and reach · its size; reach: the unscattered copy's |center| + radius).
+fn opScatterBound(p: vec3f, id: vec3f, jitter: vec4f, spin: vec4f, reach: f32) -> f32 {
+  let b = scatterBase(id, spin.w);
+  return length(p - scatterMove(b, jitter)) - reach * scatterSize(b, jitter);
+}
+
+// The plane a polar repeat turns in, and back.
+fn polarUv(q: vec3f, axis: u32) -> vec2f {
+  if (axis == 0u) { return q.yz; }
+  if (axis == 1u) { return q.xz; }
+  return q.xy;
+}
+
+fn polarSet(q: vec3f, axis: u32, uv: vec2f) -> vec3f {
+  if (axis == 0u) { return vec3f(q.x, uv.x, uv.y); }
+  if (axis == 1u) { return vec3f(uv.x, q.y, uv.y); }
+  return vec3f(uv.x, uv.y, q.z);
+}
+
+// Candidate n: 0 the nearest sector's copy, 1 the next one toward q, 2 the
+// one on the other side.
+fn opPolarNear(q: vec3f, sector: f32, axis: u32, n: u32) -> vec3f {
+  let uv = polarUv(q, axis);
+  let a = atan2(uv.y, uv.x);
+  let id = round(a / sector);
+  let dir = select(1.0, -1.0, a < sector * id);
+  let k = select(select(0.0, dir, n == 1u), -dir, n == 2u);
+  return polarSet(q, axis, rot2(uv, -sector * (id + k)));
+}
+
+// Lower bound of the distance to candidate n's copy: to its bounding sphere.
+fn opPolarNearBound(q: vec3f, sector: f32, axis: u32, sphere: vec4f, n: u32) -> f32 {
+  return length(opPolarNear(q, sector, axis, n) - sphere.xyz) - sphere.w;
+}
+
+// Lower bound of the distance to every copy but the nearest sector's, from
+// p (q in that copy's frame, opPolarNear's copy 0): to the nearest other
+// copy's bounding sphere. near1 / near2: the sphere's center in the plane,
+// turned by ±1 / ±2 sectors (the nearest other is one of those).
+fn opPolarOthers(p: vec3f, axis: u32, sphere: vec4f, near1: vec4f, near2: vec4f) -> f32 {
+  let pu = polarUv(p, axis);
+  let cu = polarUv(sphere.xyz, axis);
+  let e = p - sphere.xyz;
+  let along = max(dot(e, e) - dot(pu - cu, pu - cu), 0.0);
+  let a = pu - near1.xy;
+  let b = pu - near1.zw;
+  let c = pu - near2.xy;
+  let d = pu - near2.zw;
+  return sqrt(min(min(dot(a, a), dot(b, b)), min(dot(c, c), dot(d, d))) + along) - sphere.w;
+}
+
+// Lower bound of the distance to the copies two or more sectors away (1e10:
+// none, or it says nothing).
+fn opPolarFar(q: vec3f, sector: f32, axis: u32, gap: vec2f, count: f32) -> f32 {
+  if (count < 3.5) { return 1e10; }
+  let uv = polarUv(q, axis);
+  let a = atan2(uv.y, uv.x);
+  let off = abs(a - sector * round(a / sector));
+  let rho = length(uv);
+  let lb = max(rho * sin(clamp(sector * 1.5 - off + gap.x, 0.0, 1.5707964)), gap.y - rho);
+  return select(lb, 1e10, lb <= 0.0);
+}
+
+// Copy n counted from q's nearest sector (every copy, for geometry that
+// reaches around the axis).
+fn opPolarCopy(q: vec3f, sector: f32, axis: u32, n: u32) -> vec3f {
+  let uv = polarUv(q, axis);
+  return polarSet(q, axis, rot2(uv, -sector * (round(atan2(uv.y, uv.x) / sector) + f32(n))));
+}
+
+fn opTwist(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.x); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.xz, k * q.y); return vec3f(r.x, q.y, r.y); }
+  let r = rot2(q.xy, k * q.z);
+  return vec3f(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+fn opBend(q: vec3f, k: f32, axis: u32) -> vec3f {
+  if (axis == 0u) { let r = rot2(q.yz, k * q.y); return vec3f(q.x, r.x, r.y); }
+  if (axis == 1u) { let r = rot2(q.zx, k * q.z); return vec3f(r.y, q.y, r.x); }
+  let r = rot2(q.xy, k * q.x);
+  return vec3f(r.x, r.y, q.z);
+}`;
+
+export const MODIFIER_GLSL = `// Repetition: c = copies per axis (1 = off, 0 = infinite), centered on the
+// origin; even counts straddle it. Polar repetition: count copies around an
+// axis, sector = 2π / count. A point is checked against the nearest copy,
+// then (unless …Others says no other copy can be nearer) against the
+// neighbors whose bounding sphere (…NearBound) beats the result so far;
+// …Far caps it for the copies no candidate covers. See modifierMath.ts.
+
+// The cell (copy index per axis) nearest to q.
+vec3 repeatCell(vec3 q, vec3 s, vec3 c) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  vec3 shift = h - floor(h);
+  return mix(clamp(round(q / s - shift) + shift, -h, h), round(q / s), lessThan(c, vec3(0.5)));
+}
+
+// Toward q from the center of cell id: +1 or −1 per axis.
+vec3 repeatDir(vec3 q, vec3 s, vec3 id) {
+  return mix(vec3(1.0), vec3(-1.0), lessThan(q - s * id, vec3(0.0)));
+}
+
+// 1 where cell id holds a copy on that axis, else 0.
+vec3 repeatHas(vec3 id, vec3 c) {
+  vec3 h = max(c - 1.0, 0.0) * 0.5;
+  return max(vec3(lessThan(c, vec3(0.5))), vec3(lessThanEqual(abs(id), h + 0.25)));
+}
+
+// Candidate n's step from cell id, in units of "toward q" per axis: bit k
+// of n crosses the face toward q on axis k (copies inside their cells).
+vec3 repeatStep(int n) {
+  return vec3(float(n & 1), float((n >> 1) & 1), float((n >> 2) & 1));
+}
+
+// Candidate n's step over the ring of cells around q's cell (copies that
+// leave their cells): radix.k choices per axis (1: stay; 2: stay, toward q;
+// 3: stay, toward, away), n counting through them axis by axis.
+vec3 repeatRing(int n, ivec3 radix) {
+  ivec3 d = ivec3(n % radix.x, (n / radix.x) % radix.y, n / (radix.x * radix.y));
+  return mix(mix(vec3(0.0), vec3(1.0), equal(d, ivec3(1))), vec3(-1.0), equal(d, ivec3(2)));
+}
+
+// A candidate copy's point: cell id stepped by step (repeatStep / repeatRing).
+vec3 opRepeatNear(vec3 q, vec3 s, vec3 id, vec3 step) {
+  return q - s * (id + repeatDir(q, s, id) * step);
+}
+
+// Lower bound of the distance to a candidate copy: to its bounding sphere
+// (sphere.xyz, sphere.w in the copy's frame); 1e10 when its cell is empty.
+float opRepeatNearBound(vec3 q, vec3 s, vec3 c, vec3 id, vec4 sphere, vec3 step) {
+  if (dot(abs(step) * (1.0 - repeatHas(id + repeatDir(q, s, id) * step, c)), vec3(1.0)) > 0.0) return 1e10;
+  return length(opRepeatNear(q, s, id, step) - sphere.xyz) - sphere.w;
+}
+
+// Lower bound of the distance to every copy but cell id's: to the nearest
+// other copy's bounding sphere (sphere.xyz, .w in a copy's frame), one cell
+// over along one repeated axis. (Never below "across a face, a copy keeps its
+// gap", so that one is not needed here.)
+float opRepeatOthers(vec3 q, vec3 s, vec3 c, vec3 id, vec4 sphere) {
+  vec3 e = q - s * id - sphere.xyz;
+  bvec3 rep = bvec3(max(vec3(lessThan(c, vec3(0.5))), vec3(greaterThan(c, vec3(1.5)))));
+  // Per axis: the nearest center offset over any copy, and over the copies
+  // one or more cells over.
+  vec3 k = mix(vec3(0.0), round(e / s), rep);
+  vec3 g = e - s * k;
+  vec3 h = mix(vec3(1e10), mix(g, s - abs(e), equal(k, vec3(0.0))), rep);
+  vec3 m = dot(g, g) - g * g + h * h;
+  return sqrt(min(m.x, min(m.y, m.z))) - sphere.w;
+}
+
+// Lower bound of the distance to the copies no candidate covers (past the
+// far face, two cells toward q); 1e10 when there are none, or when copies
+// reach so far past their cell that it says nothing.
+float opRepeatFar(vec3 q, vec3 s, vec3 c, vec3 id, vec3 gap) {
+  vec3 dir = repeatDir(q, s, id);
+  vec3 a = abs(q - s * id);
+  vec3 away = mix(vec3(1e10), s * 0.5 + a + gap, repeatHas(id - dir, c));
+  vec3 two = mix(vec3(1e10), s * 1.5 - a + gap, repeatHas(id + 2.0 * dir, c));
+  vec3 t = min(away, two);
+  float m = min(t.x, min(t.y, t.z));
+  return m <= 0.0 ? 1e10 : m;
+}
+
+// opRepeatFar for the whole-ring candidates: the copies two or more cells
+// away on some axis.
+float opRepeatFarRing(vec3 q, vec3 s, vec3 c, vec3 id, vec3 gap) {
+  vec3 dir = repeatDir(q, s, id);
+  vec3 a = abs(q - s * id);
+  vec3 toward = mix(vec3(1e10), s * 1.5 - a + gap, repeatHas(id + 2.0 * dir, c));
+  vec3 away = mix(vec3(1e10), s * 1.5 + a + gap, repeatHas(id - 2.0 * dir, c));
+  vec3 t = min(toward, away);
+  float m = min(t.x, min(t.y, t.z));
+  return m <= 0.0 ? 1e10 : m;
+}
+
+vec2 rot2(vec2 v, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Scattered repeats: integer hashing only (PCG), so every GPU picks the
+// same layout; modifierMath.ts scatterCopy mirrors it on the CPU.
+uint scatterHash(uint v) {
+  uint s = v * 747796405u + 2891336453u;
+  uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+
+// A copy's hash: the start of its sequence of random values.
+uint scatterBase(vec3 id, float seed) {
+  uvec3 i = uvec3(ivec3(round(id * 2.0)));
+  return scatterHash(i.x ^ scatterHash(i.y ^ scatterHash(i.z ^ scatterHash(uint(seed)))));
+}
+
+// Value k of a copy's sequence, in [−1, 1]: 0–2 move, 3–5 turn, 6 size.
+float scatterValue(uint base, uint k) {
+  return float(scatterHash(base + k) >> 8u) / 16777215.0 * 2.0 - 1.0;
+}
+
+vec3 scatterMove(uint base, vec4 jitter) {
+  return vec3(scatterValue(base, 0u), scatterValue(base, 1u), scatterValue(base, 2u)) * jitter.xyz;
+}
+
+float scatterSize(uint base, vec4 jitter) {
+  return 1.0 + scatterValue(base, 6u) * jitter.w;
+}
+
+// A candidate copy's cell (opRepeatNear's).
+vec3 opRepeatNearId(vec3 q, vec3 s, vec3 id, vec3 step) {
+  return id + repeatDir(q, s, id) * step;
+}
+
+// How much a scattered copy grows: its distance is multiplied by this.
+float opScatterSize(vec3 id, vec4 jitter, vec4 spin) {
+  return scatterSize(scatterBase(id, spin.w), jitter);
+}
+
+// Lower bound of the distance to a scattered copy: to its own sphere (its
+// move, and reach · its size; reach: the unscattered copy's |center| + radius).
+float opScatterBound(vec3 p, vec3 id, vec4 jitter, vec4 spin, float reach) {
+  uint b = scatterBase(id, spin.w);
+  return length(p - scatterMove(b, jitter)) - reach * scatterSize(b, jitter);
+}
+
+// A scattered copy's own frame: p (about its cell's center) moved by up to
+// jitter.xyz, turned by up to spin.xyz (radians, Euler XYZ like an item's
+// rotation) and scaled by its size. jitter.w: size, spin.w: seed.
+vec3 opScatterPoint(vec3 p, vec3 id, vec4 jitter, vec4 spin) {
+  uint b = scatterBase(id, spin.w);
+  vec3 q0 = p - scatterMove(b, jitter);
+  vec3 a = vec3(scatterValue(b, 3u), scatterValue(b, 4u), scatterValue(b, 5u)) * spin.xyz;
+  vec2 xy = rot2(q0.xy, -a.z);
+  vec2 zx = rot2(vec2(q0.z, xy.x), -a.y);
+  vec2 yz = rot2(vec2(xy.y, zx.x), -a.x);
+  return vec3(zx.y, yz.x, yz.y) / scatterSize(b, jitter);
+}
+
+// The plane a polar repeat turns in, and back.
+vec2 polarUv(vec3 q, int axis) {
+  return axis == 0 ? q.yz : axis == 1 ? q.xz : q.xy;
+}
+
+vec3 polarSet(vec3 q, int axis, vec2 uv) {
+  if (axis == 0) return vec3(q.x, uv.x, uv.y);
+  if (axis == 1) return vec3(uv.x, q.y, uv.y);
+  return vec3(uv.x, uv.y, q.z);
+}
+
+// Candidate n: 0 the nearest sector's copy, 1 the next one toward q, 2 the
+// one on the other side.
+vec3 opPolarNear(vec3 q, float sector, int axis, int n) {
+  vec2 uv = polarUv(q, axis);
+  float a = atan(uv.y, uv.x);
+  float id = round(a / sector);
+  float dir = a < sector * id ? -1.0 : 1.0;
+  float k = n == 1 ? dir : n == 2 ? -dir : 0.0;
+  return polarSet(q, axis, rot2(uv, -sector * (id + k)));
+}
+
+// Lower bound of the distance to candidate n's copy: to its bounding sphere.
+float opPolarNearBound(vec3 q, float sector, int axis, vec4 sphere, int n) {
+  return length(opPolarNear(q, sector, axis, n) - sphere.xyz) - sphere.w;
+}
+
+// Lower bound of the distance to every copy but the nearest sector's, from
+// p (q in that copy's frame, opPolarNear's copy 0): to the nearest other
+// copy's bounding sphere. near1 / near2: the sphere's center in the plane,
+// turned by ±1 / ±2 sectors (the nearest other is one of those).
+float opPolarOthers(vec3 p, int axis, vec4 sphere, vec4 near1, vec4 near2) {
+  vec2 pu = polarUv(p, axis);
+  vec2 cu = polarUv(sphere.xyz, axis);
+  vec3 e = p - sphere.xyz;
+  float along = max(dot(e, e) - dot(pu - cu, pu - cu), 0.0);
+  vec2 a = pu - near1.xy;
+  vec2 b = pu - near1.zw;
+  vec2 c = pu - near2.xy;
+  vec2 d = pu - near2.zw;
+  return sqrt(min(min(dot(a, a), dot(b, b)), min(dot(c, c), dot(d, d))) + along) - sphere.w;
+}
+
+// Lower bound of the distance to the copies two or more sectors away (1e10:
+// none, or it says nothing).
+float opPolarFar(vec3 q, float sector, int axis, vec2 gap, float count) {
+  if (count < 3.5) return 1e10;
+  vec2 uv = polarUv(q, axis);
+  float a = atan(uv.y, uv.x);
+  float off = abs(a - sector * round(a / sector));
+  float rho = length(uv);
+  float lb = max(rho * sin(clamp(sector * 1.5 - off + gap.x, 0.0, 1.5707964)), gap.y - rho);
+  return lb <= 0.0 ? 1e10 : lb;
+}
+
+// Copy n counted from q's nearest sector (every copy, for geometry that
+// reaches around the axis).
+vec3 opPolarCopy(vec3 q, float sector, int axis, int n) {
+  vec2 uv = polarUv(q, axis);
+  return polarSet(q, axis, rot2(uv, -sector * (round(atan(uv.y, uv.x) / sector) + float(n))));
+}
+
+vec3 opTwist(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.x); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.xz, k * q.y); return vec3(r.x, q.y, r.y); }
+  vec2 r = rot2(q.xy, k * q.z);
+  return vec3(r.x, r.y, q.z);
+}
+
+// Bend around an axis: the angle grows along the next axis (z: IQ's cheap bend).
+vec3 opBend(vec3 q, float k, int axis) {
+  if (axis == 0) { vec2 r = rot2(q.yz, k * q.y); return vec3(q.x, r.x, r.y); }
+  if (axis == 1) { vec2 r = rot2(q.zx, k * q.z); return vec3(r.y, q.y, r.x); }
+  vec2 r = rot2(q.xy, k * q.x);
+  return vec3(r.x, r.y, q.z);
+}`;
+
+/** TypeGPU export: the WGSL helpers as typed raw-WGSL functions. */
+export const MODIFIER_TG = (() => {
+  // [name, signature, params, helpers it calls] — callees first.
+  const fns: [string, string, string, string[]][] = [
+    ["repeatCell", "[d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, c)", []],
+    ["repeatDir", "[d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, id)", []],
+    ["repeatHas", "[d.vec3f, d.vec3f], d.vec3f", "(id, c)", []],
+    ["repeatStep", "[d.u32], d.vec3f", "(n)", []],
+    ["repeatRing", "[d.u32, d.vec3u], d.vec3f", "(n, radix)", []],
+    ["opRepeatNear", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, id, step)", ["repeatDir"]],
+    ["opRepeatNearBound", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f, d.vec4f, d.vec3f], d.f32", "(q, s, c, id, sphere, step)", ["repeatDir", "repeatHas", "opRepeatNear"]],
+    ["opRepeatOthers", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f, d.vec4f], d.f32", "(q, s, c, id, sphere)", []],
+    ["opRepeatFar", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.f32", "(q, s, c, id, gap)", ["repeatDir", "repeatHas"]],
+    ["opRepeatFarRing", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.f32", "(q, s, c, id, gap)", ["repeatDir", "repeatHas"]],
+    ["rot2", "[d.vec2f, d.f32], d.vec2f", "(v, a)", []],
+    ["scatterHash", "[d.u32], d.u32", "(v)", []],
+    ["scatterBase", "[d.vec3f, d.f32], d.u32", "(id, seed)", ["scatterHash"]],
+    ["scatterValue", "[d.u32, d.u32], d.f32", "(base, k)", ["scatterHash"]],
+    ["scatterMove", "[d.u32, d.vec4f], d.vec3f", "(base, jitter)", ["scatterValue"]],
+    ["scatterSize", "[d.u32, d.vec4f], d.f32", "(base, jitter)", ["scatterValue"]],
+    ["opRepeatNearId", "[d.vec3f, d.vec3f, d.vec3f, d.vec3f], d.vec3f", "(q, s, id, step)", ["repeatDir"]],
+    ["opScatterSize", "[d.vec3f, d.vec4f, d.vec4f], d.f32", "(id, jitter, spin)", ["scatterBase", "scatterSize"]],
+    ["opScatterBound", "[d.vec3f, d.vec3f, d.vec4f, d.vec4f, d.f32], d.f32", "(p, id, jitter, spin, reach)", ["scatterBase", "scatterMove", "scatterSize"]],
+    ["opScatterPoint", "[d.vec3f, d.vec3f, d.vec4f, d.vec4f], d.vec3f", "(p, id, jitter, spin)", ["scatterBase", "scatterMove", "scatterValue", "scatterSize", "rot2"]],
+    ["polarUv", "[d.vec3f, d.u32], d.vec2f", "(q, axis)", []],
+    ["polarSet", "[d.vec3f, d.u32, d.vec2f], d.vec3f", "(q, axis, uv)", []],
+    ["opPolarNear", "[d.vec3f, d.f32, d.u32, d.u32], d.vec3f", "(q, sector, axis, n)", ["polarUv", "polarSet", "rot2"]],
+    ["opPolarNearBound", "[d.vec3f, d.f32, d.u32, d.vec4f, d.u32], d.f32", "(q, sector, axis, sphere, n)", ["opPolarNear"]],
+    ["opPolarOthers", "[d.vec3f, d.u32, d.vec4f, d.vec4f, d.vec4f], d.f32", "(p, axis, sphere, near1, near2)", ["polarUv"]],
+    ["opPolarFar", "[d.vec3f, d.f32, d.u32, d.vec2f, d.f32], d.f32", "(q, sector, axis, gap, count)", ["polarUv"]],
+    ["opPolarCopy", "[d.vec3f, d.f32, d.u32, d.u32], d.vec3f", "(q, sector, axis, n)", ["polarUv", "polarSet", "rot2"]],
+    ["opTwist", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)", ["rot2"]],
+    ["opBend", "[d.vec3f, d.f32, d.u32], d.vec3f", "(q, k, axis)", ["rot2"]],
+  ];
+  const body = (name: string) => {
+    const m = MODIFIER_WGSL.match(new RegExp(`fn ${name}\\([^)]*\\) -> \\w+ (\\{[\\s\\S]*?\\n\\})`));
+    return m ? m[1] : "{}";
+  };
+  return fns
+    .map(([name, sig, params, calls]) => {
+      const uses = calls.length > 0 ? `.$uses({ ${calls.join(", ")} })` : "";
+      return `const ${name} = tgpu.fn(${sig})\`${params} ${body(name)}\`${uses};`;
+    })
+    .join("\n\n");
+})();

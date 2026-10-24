@@ -47,7 +47,17 @@ export default function RenderModePanel() {
         <span className="shape-btn-icon">
           <ActiveIcon size={14} />
         </span>
-        <span className="shape-btn-label">{active.label}</span>
+        {/* Every label stacked, only the active one as text: the trigger keeps
+            the longest label's width, and the list below matches it. */}
+        <span className="shape-btn-label render-mode-label">
+          {MODES.map((m) =>
+            m.value === active.value ? (
+              <span key={m.value}>{m.label}</span>
+            ) : (
+              <span key={m.value} className="render-mode-sizer" data-label={m.label} aria-hidden />
+            ),
+          )}
+        </span>
         <ChevronDown
           size={13}
           className={`render-mode-chevron${open ? " render-mode-chevron--open" : ""}`}
