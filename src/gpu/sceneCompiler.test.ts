@@ -223,7 +223,7 @@ describe("scene compiler modifiers", () => {
     const mirror = (d: number) => compile(scene([shape("cone", { modifiers: [{ kind: "mirror", axes: [true, false, true], offset: [d, 0, d] }] })]));
     const near = mirror(0);
     expect(mirror(0.7).code).toBe(near.code);
-    expect(near.code).toMatch(/vec3f\(abs\(q\d+\.x \+ dsData\[\d+\]\.x\) - dsData\[\d+\]\.x, q\d+\.y, abs\(q\d+\.z \+ dsData\[\d+\]\.z\) - dsData\[\d+\]\.z\)/);
+    expect(near.code).toMatch(/vec3f\(abs\(q\d+\.x\) - dsData\[\d+\]\.x, q\d+\.y, abs\(q\d+\.z\) - dsData\[\d+\]\.z\)/);
   });
 
   test("twist and bend scale the result by 1 / Lipschitz", () => {

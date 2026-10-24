@@ -516,7 +516,7 @@ function modExpr(syn: Syntax, m: Modifier, q: string): string {
         AXIS.map((k, a) => {
           if (!m.axes[a]) return `${q}.${k}`;
           const d = m.offset[a];
-          return d === 0 ? `${syn.absFn}(${q}.${k})` : `${syn.absFn}(${q}.${k} + ${fmt(d)}) - ${fmt(d)}`;
+          return d === 0 ? `${syn.absFn}(${q}.${k})` : `${syn.absFn}(${q}.${k}) - ${fmt(d)}`;
         }),
       );
     case "twist":

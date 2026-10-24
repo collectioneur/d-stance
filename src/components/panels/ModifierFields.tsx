@@ -164,7 +164,7 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
               ))}
             </div>
           </div>
-          <Vec3Row label="Distance" value={m.offset} min={-100} max={100} step={0.05} onChange={(offset) => onChange({ ...m, offset })} />
+          <Vec3Row label="Distance" value={m.offset} min={0} max={100} step={0.05} onChange={(offset) => onChange({ ...m, offset })} />
         </>
       );
     case "polar":

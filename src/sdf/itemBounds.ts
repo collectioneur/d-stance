@@ -45,16 +45,6 @@ export function shapePlan(item: Extract<SceneItem, { kind: "layer" }>): Modifier
   );
 }
 
-/**
- * How far a shape's geometry reaches from its own origin, in its local
- * (scaled) frame. Its modifiers may move the geometry's center off the
- * origin (a mirror at a distance), and the shape's bound sphere stays
- * centered on its position.
- */
-export function shapeReach(plan: ModifierPlan): number {
-  return plan.r >= UNBOUNDED ? UNBOUNDED : Math.hypot(plan.c[0], plan.c[1], plan.c[2]) + plan.r;
-}
-
 /** Children sphere of a group in its own (local) frame, post modifiers included. */
 export function groupLocalSphere(group: ObjectGroup): Sphere | null {
   const kids = group.items.map(itemSphere).filter((s): s is Sphere => !!s);
@@ -79,8 +69,7 @@ export function itemSphere(item: SceneItem): Sphere | null {
   if (item.kind === "layer") {
     const plan = shapePlan(item);
     const s = Math.max(Math.abs(item.scale[0]), Math.abs(item.scale[1]), Math.abs(item.scale[2]));
-    const reach = shapeReach(plan);
-    return { c: [...item.position], r: reach >= UNBOUNDED ? UNBOUNDED : reach * s };
+    return { c: [...item.position], r: plan.r >= UNBOUNDED ? UNBOUNDED : plan.r * s };
   }
   const plan = groupPlan(item);
   if (!plan) return null;

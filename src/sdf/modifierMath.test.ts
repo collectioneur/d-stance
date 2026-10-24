@@ -29,12 +29,12 @@ describe("polar repeat reach", () => {
 });
 
 describe("mirror bounds", () => {
-  test("the item and its reflection across the plane at −distance", () => {
-    // A sphere of radius 0.5 at the origin, mirrored in x across the plane x = −1:
-    // copies at 0 and −2, so the sphere around both sits at −1 with radius 1.5.
-    const out = expandThrough({ kind: "mirror", axes: [true, false, false], offset: [1, 5, 5] }, [0, 0.3, 0], 0.5);
-    expect(out.c).toEqual([-1, 0.3, 0]);
-    expect(out.r).toBeCloseTo(1.5);
+  test("the item and its reflection, to either side of the origin", () => {
+    // A sphere of radius 0.5 at x = 0.2, mirrored in x at distance 1: copies
+    // at ±1.2, so the sphere around both sits at 0 with radius 1.7.
+    const out = expandThrough({ kind: "mirror", axes: [true, false, false], offset: [1, 5, 5] }, [0.2, 0.3, 0], 0.5);
+    expect(out.c).toEqual([0, 0.3, 0]);
+    expect(out.r).toBeCloseTo(1.7);
   });
 });
 

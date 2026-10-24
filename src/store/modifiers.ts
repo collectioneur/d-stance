@@ -26,9 +26,8 @@ export type Modifier = (
       kind: "mirror";
       axes: [boolean, boolean, boolean];
       /**
-       * Per axis, how far the mirror plane sits from the item's origin, on the
-       * negative side (negative: the positive side). The item stays; its
-       * reflection is twice as far. 0 reflects across the origin.
+       * Per axis, how far the item and its reflection sit from the item's
+       * origin, on either side (≥ 0). 0 reflects across the origin.
        */
       offset: Vec3;
     }
@@ -73,7 +72,7 @@ export const MODIFIER_LABEL: Record<ModifierKind, string> = {
 
 export const MODIFIER_HINT: Record<ModifierKind, string> = {
   repeat: "Copies along each axis. Count 0 repeats forever.",
-  mirror: "Reflects the item across a plane this far from it.",
+  mirror: "A copy reflected across the item's center; both this far from it.",
   polar: "Copies around an axis, like spokes.",
   twist: "Rotates slices more the farther they are along the axis.",
   bend: "Curls the shape around an axis.",
@@ -92,7 +91,7 @@ export function createModifier(kind: ModifierKind, extent = 0.5): Modifier {
     case "repeat":
       return { kind, spacing: [gap, gap, gap], count: [3, 1, 1] };
     case "mirror": {
-      // The reflection just touches the item.
+      // The item and its reflection just touch.
       const d = Math.round(extent * 20) / 20;
       return { kind, axes: [true, false, false], offset: [d, d, d] };
     }
@@ -140,7 +139,7 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
       return {
         kind: "mirror",
         axes: [a[0] === true, a[1] === true, a[2] === true],
-        offset: vec(raw.offset, [0, 0, 0], -100, 100),
+        offset: vec(raw.offset, [0, 0, 0], 0, 100),
         ...off,
       };
     }

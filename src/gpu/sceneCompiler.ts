@@ -32,7 +32,7 @@ import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
 import { UNBOUNDED, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
-import { groupPlan, shapePlan, shapeReach } from "../sdf/itemBounds";
+import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
 
@@ -295,8 +295,7 @@ class Builder {
     this.set(base + 3, a, b, c, w);
     this.set(base + 4 + MISC, baked.factor * local.invL, layer.smoothK, 0, 0);
     const center = itemLocalToWorldPosition(layer.position, frameAncestors) as Vec3;
-    const reach = shapeReach(local);
-    let radius = reach >= UNBOUNDED ? UNBOUNDED : reach * shapeScale;
+    let radius = local.r >= UNBOUNDED ? UNBOUNDED : local.r * shapeScale;
     for (const g of frameAncestors) radius *= maxAbsScale(g);
     radius = Math.min(UNBOUNDED, radius + BOUND_EPS);
     this.set(base + 5, ...center, radius);
@@ -522,7 +521,7 @@ function stepExpr(s: Exclude<PointStep, { kind: "repeat" | "polar" }>, q: string
   switch (s.kind) {
     case "mirror": {
       const o = slot(s.slot);
-      const c = ["x", "y", "z"].map((k, a) => (s.axes[a] ? `abs(${q}.${k} + ${o}.${k}) - ${o}.${k}` : `${q}.${k}`));
+      const c = ["x", "y", "z"].map((k, a) => (s.axes[a] ? `abs(${q}.${k}) - ${o}.${k}` : `${q}.${k}`));
       return `vec3f(${c.join(", ")})`;
     }
     case "twist":

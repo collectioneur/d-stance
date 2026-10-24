@@ -28,7 +28,7 @@ describe("modifiers", () => {
     expect(sanitizeModifier({ kind: "mirror", axes: [1, true, "yes"], offset: [1e9, "x", -2], off: "true" })).toEqual({
       kind: "mirror",
       axes: [false, true, false],
-      offset: [100, 0, -2],
+      offset: [100, 0, 0],
     });
   });
 
@@ -36,7 +36,7 @@ describe("modifiers", () => {
     expect(sanitizeModifier({ kind: "mirror", axes: [true, false, false] })).toEqual({ kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] });
   });
 
-  test("a new mirror puts its reflection just against the item", () => {
+  test("a new mirror puts the item and its reflection just apart", () => {
     const m = createModifier("mirror", 0.4);
     expect(m.kind === "mirror" && m.offset[0]).toBe(0.4);
   });
