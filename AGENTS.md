@@ -15,6 +15,7 @@ Agents break this repo by desyncing **cross-file contracts**, not by missing a T
 | Transforms, gizmo, scale | `src/gpu/bake.ts` (composition order), `src/gpu/gizmo.ts` |
 | Tree / DnD / add / remove | `src/scene/arboristAdapter.ts`, `countInstructions`, caps in `sceneStore.ts` |
 | Scene SDF codegen / culling / pick / highlight | `src/gpu/sceneCompiler.ts` (+ its tests) and the program cache in `src/gpu/useGpu.ts` |
+| Embed / Shadertoy export | `src/export/` (`embed.ts`, `renderTemplates.ts`, `runtime.js`) |
 | Save / load / URL hash | `src/store/persistence.ts` (`SCHEMA_VERSION`, `normalizePersisted`) |
 | Quality presets | `src/utils/quality.ts` (`assertQualityInvariants`) |
 | UI | Changed flow in the browser. Screenshot ≠ verification. |
@@ -30,6 +31,8 @@ sceneStore (CSG tree)
   → shader.ts raymarches through two slots filled with the generated functions
   → persistence.ts writes hash + localStorage
   → generateSdfCode.ts exports the same tree as TypeGPU / WGSL / GLSL (same primitive sources)
+  → src/export/embed.ts wraps that SDF in the viewport's camera + shading (renderTemplates.ts)
+    and inlines runtime.js → HTML snippet / JS module / standalone page / Shadertoy
 ```
 
 Selection lives on the store (`selectedItemId`, `selectedContainerId`, `rootSelected`). Undo/redo (`undoScene` / `redoScene`) clears selection back to the scene root.
@@ -64,6 +67,16 @@ A shape is not registered until **all** of these know it, with the same key:
 Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake.ts`) into `row0/1/2`, `offset`, `factor`.
 
 Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` live in `sdImageField` (`src/sdf/primitives.ts`, shared by viewport and export) and `imageSdf.ts`; change one, change both. The layer's `params[3]` is the invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`); the compiler writes `(round, invert, layer, hasImage)` into the leaf's extra slot. Texture layers are assigned per distinct `image.sdf` string by `syncImageSlots` before every compile.
+
+### 2b. Embed export
+
+- `renderTemplates.ts` mirrors the viewport math in `shader.ts` (camera orbit order, march epsilons, classic/chrome shading, background). Change shading in one, change the other; `e2e/embed.spec.ts` compares the embed against the editor and WebGPU against WebGL2.
+- `runtime.js` is plain JS on purpose: its source is inlined verbatim into every export (`?raw`). No imports, no TypeScript. Its types live in `runtime.d.ts`.
+- The WebGPU view uniform is 48 bytes (`res, rot, dist, time, center`) at `@group(0) @binding(100)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. Avoid WGSL reserved words in templates (`target` is one).
+- The runtime compiles the WebGPU pipeline before calling `getContext("webgpu")`: a canvas keeps its first context type, and WebGL2 must stay possible as the fallback.
+- Inline JSON goes through `scriptJson` (escapes `<`). Scene names are user data.
+- The editor preview is `EmbedExport.preview`: the same document plus `onView` → `postMessage`. Orbiting / zooming it stores a custom start view per scene id in `exportStore` (a browser preference, not the scene: no schema change). With `fit`, `view.zoom` multiplies the fitted distance so the framing survives resizes.
+- Plain wheel zooms only where it would not scroll anything (`wheel: "auto"`) or after a click on the canvas; pinches (pointer, ctrl + wheel, Safari gesture events) always zoom.
 
 ### 3. Bake math
 
