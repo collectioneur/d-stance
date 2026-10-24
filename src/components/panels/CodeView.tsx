@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSceneStore } from "../../store/sceneStore";
 import { useRenderStore } from "../../store/renderStore";
-import { useExportStore } from "../../store/exportStore";
+import { startView, useExportStore } from "../../store/exportStore";
 import { useViewStore } from "../../store/viewStore";
 import { generateSdfCode, type CodeLang } from "../../utils/generateSdfCode";
 import { exportFileName, generateEmbed } from "../../export/embed";
@@ -68,7 +68,7 @@ export default function CodeView() {
   const selectedItemId = useSceneStore((s) => s.selectedItemId);
   const renderMode = useRenderStore((s) => s.renderMode);
   const view = useViewStore();
-  const { look, background, motion, quality, format, framing } = useExportStore();
+  const { look, background, motion, quality, format, framing, custom } = useExportStore();
   const [lang, setLangState] = useState<Tab>(loadTab);
   const [copied, setCopied] = useState(false);
   const [html, setHtml] = useState<string | null>(null);
@@ -87,20 +87,23 @@ export default function CodeView() {
     () => (isScene ? null : generateSdfCode(root, selectedItemId)),
     [isScene, root, selectedItemId],
   );
-  const exp = useMemo(
-    () =>
-      isScene
-        ? generateEmbed(root, {
-            style: look === "editor" ? renderMode : look,
-            background,
-            motion,
-            quality,
-            framing,
-            view: { rotX: view.rotX, rotY: view.rotY, distance: view.distance },
-          })
-        : null,
-    [isScene, root, look, renderMode, background, motion, quality, framing, view.rotX, view.rotY, view.distance],
-  );
+  const exp = useMemo(() => {
+    if (!isScene) return null;
+    const start = startView({ framing, custom }, root.id, {
+      rotX: view.rotX,
+      rotY: view.rotY,
+      distance: view.distance,
+    });
+    return generateEmbed(root, {
+      style: look === "editor" ? renderMode : look,
+      background,
+      motion,
+      quality,
+      framing: start.framing,
+      view: start.view,
+      zoom: start.zoom,
+    });
+  }, [isScene, root, look, renderMode, background, motion, quality, framing, custom, view.rotX, view.rotY, view.distance]);
   const code = exp
     ? lang === "shadertoy"
       ? exp.shadertoy
@@ -188,7 +191,7 @@ export default function CodeView() {
           </button>
         ))}
       </div>
-      {lang === "embed" && exp && <EmbedPanel exp={exp} fileName={exportFileName(root, format)} />}
+      {lang === "embed" && exp && <EmbedPanel exp={exp} sceneId={root.id} fileName={exportFileName(root, format)} />}
       {lang === "shadertoy" && exp && exp.shadertoyDropped > 0 && (
         <p className="code-note">
           {exp.shadertoyDropped} image layer{exp.shadertoyDropped > 1 ? "s are" : " is"} left out — Shadertoy

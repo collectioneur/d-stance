@@ -92,6 +92,8 @@ Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float
 - The WebGPU view uniform is 48 bytes (`res, rot, dist, time, center`) at `@group(0) @binding(100)`; generated image bindings own `binding(0)` (sampler) and `binding(1..N)`. Avoid WGSL reserved words in templates (`target` is one).
 - The runtime compiles the WebGPU pipeline before calling `getContext("webgpu")`: a canvas keeps its first context type, and WebGL2 must stay possible as the fallback.
 - Inline JSON goes through `scriptJson` (escapes `<`). Scene names are user data.
+- The editor preview is `EmbedExport.preview`: the same document plus `onView` → `postMessage`. Orbiting / zooming it stores a custom start view per scene id in `exportStore` (a browser preference, not the scene: no schema change). With `fit`, `view.zoom` multiplies the fitted distance so the framing survives resizes.
+- Plain wheel zooms only where it would not scroll anything (`wheel: "auto"`) or after a click on the canvas; pinches (pointer, ctrl + wheel, Safari gesture events) always zoom.
 
 ### 3. Bake math
 

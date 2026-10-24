@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { exportFileName, generateEmbed, type EmbedOptions } from "./embed";
+import { startView } from "../store/exportStore";
 import { FAKE_IMAGE_SDF, group, scene, shape } from "../test/fixtures";
 
 const OPTS: EmbedOptions = {
@@ -107,5 +108,43 @@ describe("embed export", () => {
   test("file names are slugs", () => {
     expect(exportFileName(scene([], "My Cool Scene!"), "html")).toBe("my-cool-scene.html");
     expect(exportFileName(scene([], "!!!"), "module")).toBe("scene.js");
+  });
+
+  test("a zoom set in the preview scales the fitted distance and travels with the scene", () => {
+    const root = scene([shape("sphere")]);
+    const fit = generateEmbed(root, { ...OPTS, framing: "fit" });
+    const zoomed = generateEmbed(root, { ...OPTS, framing: "fit", zoom: 0.5 });
+    expect(fit.scene.view).not.toHaveProperty("zoom");
+    expect(zoomed.scene.view.zoom).toBe(0.5);
+    expect(zoomed.scene.view.distance).toBeCloseTo(fit.scene.view.distance / 2, 4);
+    expect(zoomed.shadertoy).not.toBe(fit.shadertoy);
+  });
+
+  test("only the editor preview reports the camera to its parent", () => {
+    const out = generateEmbed(scene([shape("sphere")]), OPTS);
+    expect(out.preview).toContain("parent.postMessage({ dstanceView: v }");
+    expect(out.document).not.toContain("postMessage");
+    expect(out.html).not.toContain("postMessage");
+    expect(out.module).not.toContain("parent.postMessage");
+  });
+});
+
+describe("export start view", () => {
+  const editor = { rotX: 1, rotY: 2, distance: 3 };
+  const custom = { scene: "a", base: "fit" as const, rotX: 0.1, rotY: 0.2, zoom: 0.7, distance: 4 };
+
+  test("a view set in the preview applies to its own scene only", () => {
+    expect(startView({ framing: "custom", custom }, "a", editor)).toEqual({
+      framing: "fit",
+      view: { rotX: 0.1, rotY: 0.2, distance: 4 },
+      zoom: 0.7,
+      custom: true,
+    });
+    expect(startView({ framing: "custom", custom }, "b", editor)).toEqual({ framing: "fit", view: editor, zoom: 1, custom: false });
+  });
+
+  test("fit and editor framings follow the editor camera", () => {
+    expect(startView({ framing: "editor", custom }, "a", editor)).toMatchObject({ framing: "editor", view: editor });
+    expect(startView({ framing: "fit", custom: null }, "a", editor)).toMatchObject({ framing: "fit", view: editor, zoom: 1 });
   });
 });
