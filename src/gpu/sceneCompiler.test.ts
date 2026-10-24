@@ -219,6 +219,13 @@ describe("scene compiler modifiers", () => {
     expect(compile(scene([shape("cone", { modifiers: [polar(9)] })])).code).toBe(all5);
   });
 
+  test("a mirror's distance is a value: dragging it never recompiles", () => {
+    const mirror = (d: number) => compile(scene([shape("cone", { modifiers: [{ kind: "mirror", axes: [true, false, true], offset: [d, 0, d] }] })]));
+    const near = mirror(0);
+    expect(mirror(0.7).code).toBe(near.code);
+    expect(near.code).toMatch(/vec3f\(abs\(q\d+\.x \+ dsData\[\d+\]\.x\) - dsData\[\d+\]\.x, q\d+\.y, abs\(q\d+\.z \+ dsData\[\d+\]\.z\) - dsData\[\d+\]\.z\)/);
+  });
+
   test("twist and bend scale the result by 1 / Lipschitz", () => {
     const out = compile(scene([shape("box", { modifiers: [{ kind: "twist", amount: 3, axis: 1 }] })]));
     const factor = out.values[16];
@@ -240,7 +247,7 @@ describe("scene compiler modifiers", () => {
 
   test("a scaled group with modifiers keeps its children inside its bounds", () => {
     const out = compile(
-      scene([group([shape("sphere", { position: [0.5, 0, 0], params: [0.3, 0, 0, 0] })], { scale: [3, 3, 3], modifiers: [{ kind: "mirror", axes: [true, false, false] }] })]),
+      scene([group([shape("sphere", { position: [0.5, 0, 0], params: [0.3, 0, 0, 0] })], { scale: [3, 3, 3], modifiers: [{ kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] }] })]),
     );
     // group bound slot: radius must cover the mirrored sphere: (0.5 + 0.3) * 3
     expect(out.values[7]).toBeGreaterThanOrEqual(2.4);

@@ -167,7 +167,7 @@ export function modifiersScene() {
       }),
       group([layer("sphere", [0.12, 0, 0, 0], { position: [0.15, 0, 0] as V3 }), layer("box", [0.05, 0.2, 0.05, 0], { position: [0.15, 0, 0] as V3 })], {
         position: at(-1, 0.6),
-        modifiers: [{ kind: "mirror", axes: [true, false, false] }],
+        modifiers: [{ kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] }],
       }),
       group(
         [

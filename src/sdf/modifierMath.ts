@@ -28,8 +28,9 @@ export function expandThrough(m: Modifier, c: Vec3, r: number): { c: Vec3; r: nu
       return { c, r: r + Math.hypot(half[0], half[1], half[2]) };
     }
     case "mirror": {
-      const off = c.map((v, a) => (m.axes[a] ? v : 0));
-      return { c: c.map((v, a) => (m.axes[a] ? 0 : v)) as Vec3, r: r + Math.hypot(off[0], off[1], off[2]) };
+      // The item and its reflection across the plane at −offset: centered on the plane.
+      const off = c.map((v, a) => (m.axes[a] ? v + m.offset[a] : 0));
+      return { c: c.map((v, a) => (m.axes[a] ? -m.offset[a] : v)) as Vec3, r: r + Math.hypot(off[0], off[1], off[2]) };
     }
     case "polar":
     case "twist":

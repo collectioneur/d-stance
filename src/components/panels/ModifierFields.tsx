@@ -143,26 +143,29 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
       );
     case "mirror":
       return (
-        <div className="prop-row">
-          <label className="prop-label">Axes</label>
-          <div className="axis-picker" role="group" aria-label="Mirror axes">
-            {AXES.map((axis, a) => (
-              <button
-                key={axis}
-                type="button"
-                aria-pressed={m.axes[a]}
-                className={`axis-picker-btn${m.axes[a] ? " axis-picker-btn--active" : ""}`}
-                onClick={() => {
-                  const axes = [...m.axes] as [boolean, boolean, boolean];
-                  axes[a] = !axes[a];
-                  onChange({ ...m, axes });
-                }}
-              >
-                {axis}
-              </button>
-            ))}
+        <>
+          <div className="prop-row">
+            <label className="prop-label">Axes</label>
+            <div className="axis-picker" role="group" aria-label="Mirror axes">
+              {AXES.map((axis, a) => (
+                <button
+                  key={axis}
+                  type="button"
+                  aria-pressed={m.axes[a]}
+                  className={`axis-picker-btn${m.axes[a] ? " axis-picker-btn--active" : ""}`}
+                  onClick={() => {
+                    const axes = [...m.axes] as [boolean, boolean, boolean];
+                    axes[a] = !axes[a];
+                    onChange({ ...m, axes });
+                  }}
+                >
+                  {axis}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+          <Vec3Row label="Distance" value={m.offset} min={-100} max={100} step={0.05} onChange={(offset) => onChange({ ...m, offset })} />
+        </>
       );
     case "polar":
       return (

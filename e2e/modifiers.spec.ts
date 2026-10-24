@@ -102,6 +102,23 @@ test.describe("modifiers", () => {
     expect((await imageDiff(page, repeated, byHand)).over16).toBeLessThan(0.0003);
   });
 
+  test("a mirror at a distance matches the reflection placed by hand", async ({ page }) => {
+    // Mirror x at distance 0.8 in the cone's own frame (turned 30° about z):
+    // the reflection sits 1.6 along that frame's x axis. The cone's bound
+    // (and so the scene's, it stands at the origin) must reach it too, or
+    // the march cuts it off.
+    const cone = (extra: Record<string, unknown>) =>
+      sphere({ shapeType: "cone", name: "Cone", rotation: [0, 0, 30], params: [0.4, 0.6, 0, 0], ...extra });
+    const at: [number, number, number] = [0, 0, 0];
+    const mirrored = await shot(page, [cone({ id: "c", position: at, modifiers: [{ kind: "mirror", axes: [true, false, false], offset: [0.8, 0, 0] }] })]);
+    const a = Math.PI / 6;
+    const byHand = await shot(page, [
+      cone({ id: "c0", position: at }),
+      cone({ id: "c1", position: [at[0] - 1.6 * Math.cos(a), at[1] - 1.6 * Math.sin(a), at[2]] }),
+    ]);
+    expect((await imageDiff(page, mirrored, byHand)).over16).toBeLessThan(0.002);
+  });
+
   test("an infinite grid renders to the horizon", async ({ page }) => {
     const errors = await openEditor(page, infiniteScene() as never);
     await waitForProgram(page);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { planPointModifiers, polarGap, polarReach, repeatGap } from "./modifierMath";
+import { expandThrough, planPointModifiers, polarGap, polarReach, repeatGap } from "./modifierMath";
 
 const polar = (count: number, axis: 0 | 1 | 2 = 1) => ({ kind: "polar" as const, count, axis });
 
@@ -25,6 +25,16 @@ describe("polar repeat reach", () => {
     // Axis x: the plane is (y, z); an offset along x keeps the spoke on the axis.
     expect(polarReach(polar(6, 0), [5, 0, 0], 0.2)).toBe("all");
     expect(polarReach(polar(6, 0), [0, 1, 0], 0.2)).toBe("near");
+  });
+});
+
+describe("mirror bounds", () => {
+  test("the item and its reflection across the plane at −distance", () => {
+    // A sphere of radius 0.5 at the origin, mirrored in x across the plane x = −1:
+    // copies at 0 and −2, so the sphere around both sits at −1 with radius 1.5.
+    const out = expandThrough({ kind: "mirror", axes: [true, false, false], offset: [1, 5, 5] }, [0, 0.3, 0], 0.5);
+    expect(out.c).toEqual([-1, 0.3, 0]);
+    expect(out.r).toBeCloseTo(1.5);
   });
 });
 

@@ -22,7 +22,16 @@ export type Modifier = (
       /** Copies per axis: 1 = not repeated, 0 = infinite, n ≥ 2 = n copies centered on the origin. */
       count: Vec3;
     }
-  | { kind: "mirror"; axes: [boolean, boolean, boolean] }
+  | {
+      kind: "mirror";
+      axes: [boolean, boolean, boolean];
+      /**
+       * Per axis, how far the mirror plane sits from the item's origin, on the
+       * negative side (negative: the positive side). The item stays; its
+       * reflection is twice as far. 0 reflects across the origin.
+       */
+      offset: Vec3;
+    }
   | { kind: "polar"; count: number; axis: Axis }
   | { kind: "twist"; /** radians per unit along the axis */ amount: number; axis: Axis }
   | { kind: "bend"; /** radians per unit along the bent direction */ amount: number; axis: Axis }
@@ -64,7 +73,7 @@ export const MODIFIER_LABEL: Record<ModifierKind, string> = {
 
 export const MODIFIER_HINT: Record<ModifierKind, string> = {
   repeat: "Copies along each axis. Count 0 repeats forever.",
-  mirror: "Reflects the positive side onto the negative.",
+  mirror: "Reflects the item across a plane this far from it.",
   polar: "Copies around an axis, like spokes.",
   twist: "Rotates slices more the farther they are along the axis.",
   bend: "Curls the shape around an axis.",
@@ -82,8 +91,11 @@ export function createModifier(kind: ModifierKind, extent = 0.5): Modifier {
   switch (kind) {
     case "repeat":
       return { kind, spacing: [gap, gap, gap], count: [3, 1, 1] };
-    case "mirror":
-      return { kind, axes: [true, false, false] };
+    case "mirror": {
+      // The reflection just touches the item.
+      const d = Math.round(extent * 20) / 20;
+      return { kind, axes: [true, false, false], offset: [d, d, d] };
+    }
     case "polar":
       return { kind, count: 6, axis: 1 };
     case "twist":
@@ -125,7 +137,12 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
     }
     case "mirror": {
       const a = Array.isArray(raw.axes) ? raw.axes : [];
-      return { kind: "mirror", axes: [a[0] === true, a[1] === true, a[2] === true], ...off };
+      return {
+        kind: "mirror",
+        axes: [a[0] === true, a[1] === true, a[2] === true],
+        offset: vec(raw.offset, [0, 0, 0], -100, 100),
+        ...off,
+      };
     }
     case "polar":
       return { kind: "polar", count: int(raw.count, 6, 1, MAX_POLAR_COUNT), axis: axis(raw.axis, 1), ...off };

@@ -25,7 +25,20 @@ describe("modifiers", () => {
     expect(sanitizeModifier({ kind: "onion", thickness: 0 })).toEqual({ kind: "onion", thickness: 0.001 });
     expect(sanitizeModifier({ kind: "evil" })).toBeUndefined();
     expect(sanitizeModifier("repeat")).toBeUndefined();
-    expect(sanitizeModifier({ kind: "mirror", axes: [1, true, "yes"], off: "true" })).toEqual({ kind: "mirror", axes: [false, true, false] });
+    expect(sanitizeModifier({ kind: "mirror", axes: [1, true, "yes"], offset: [1e9, "x", -2], off: "true" })).toEqual({
+      kind: "mirror",
+      axes: [false, true, false],
+      offset: [100, 0, -2],
+    });
+  });
+
+  test("mirrors saved before the distance existed reflect across the origin", () => {
+    expect(sanitizeModifier({ kind: "mirror", axes: [true, false, false] })).toEqual({ kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] });
+  });
+
+  test("a new mirror puts its reflection just against the item", () => {
+    const m = createModifier("mirror", 0.4);
+    expect(m.kind === "mirror" && m.offset[0]).toBe(0.4);
   });
 
   test("lists are capped and empty lists vanish", () => {

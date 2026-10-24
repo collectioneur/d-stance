@@ -32,7 +32,7 @@ import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
 import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
 import { UNBOUNDED, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
-import { groupPlan, shapePlan } from "../sdf/itemBounds";
+import { groupPlan, shapePlan, shapeReach } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
 import { itemLocalToWorldPosition } from "./gizmo";
 
@@ -79,7 +79,7 @@ export interface CompileOptions {
 /** A point-modifier step as emitted (structure only; numbers live in slots). */
 type PointStep =
   | { kind: "repeat"; slot: number }
-  | { kind: "mirror"; axes: [boolean, boolean, boolean] }
+  | { kind: "mirror"; slot: number; axes: [boolean, boolean, boolean] }
   | { kind: "polar"; slot: number; axis: Axis; reach: PolarReach }
   | { kind: "twist" | "bend"; slot: number; axis: Axis }
   | { kind: "elongate"; slot: number };
@@ -224,8 +224,11 @@ class Builder {
           this.set(slot + 3, ...copy.c, copy.r);
           return { kind: "repeat", slot };
         }
-        case "mirror":
-          return { kind: "mirror", axes: [...m.axes] };
+        case "mirror": {
+          const slot = this.alloc(1);
+          this.set(slot, ...m.offset, 0);
+          return { kind: "mirror", slot, axes: [...m.axes] };
+        }
         case "polar": {
           const slot = this.alloc(4);
           const copy = plan.copy[i]!;
@@ -292,7 +295,8 @@ class Builder {
     this.set(base + 3, a, b, c, w);
     this.set(base + 4 + MISC, baked.factor * local.invL, layer.smoothK, 0, 0);
     const center = itemLocalToWorldPosition(layer.position, frameAncestors) as Vec3;
-    let radius = local.r >= UNBOUNDED ? UNBOUNDED : local.r * shapeScale;
+    const reach = shapeReach(local);
+    let radius = reach >= UNBOUNDED ? UNBOUNDED : reach * shapeScale;
     for (const g of frameAncestors) radius *= maxAbsScale(g);
     radius = Math.min(UNBOUNDED, radius + BOUND_EPS);
     this.set(base + 5, ...center, radius);
@@ -517,7 +521,8 @@ function leafCall(node: LeafNode, lp: string): string {
 function stepExpr(s: Exclude<PointStep, { kind: "repeat" | "polar" }>, q: string): string {
   switch (s.kind) {
     case "mirror": {
-      const c = ["x", "y", "z"].map((k, a) => (s.axes[a] ? `abs(${q}.${k})` : `${q}.${k}`));
+      const o = slot(s.slot);
+      const c = ["x", "y", "z"].map((k, a) => (s.axes[a] ? `abs(${q}.${k} + ${o}.${k}) - ${o}.${k}` : `${q}.${k}`));
       return `vec3f(${c.join(", ")})`;
     }
     case "twist":

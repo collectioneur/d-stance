@@ -101,7 +101,7 @@ describe("generateSdfCode modifiers", () => {
       group([shape("sphere", { params: [0.48, 0, 0, 0] })], {
         modifiers: [{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1] }, { kind: "twist", amount: 2, axis: 1 }],
       }),
-      shape("box", { op: "sUnion", modifiers: [{ kind: "round", radius: 0.05 }, { kind: "mirror", axes: [true, false, false] }] }),
+      shape("box", { op: "sUnion", modifiers: [{ kind: "round", radius: 0.05 }, { kind: "mirror", axes: [true, false, false], offset: [0, 0, 0] }] }),
     ]);
     const out = generateSdfCode(root, null);
     for (const code of [out.wgsl, out.glsl, out.typegpu]) {
@@ -114,6 +114,16 @@ describe("generateSdfCode modifiers", () => {
     expect(out.glsl).toContain("float opRepeatNearBound(");
     expect(out.typegpu).toContain("const opRepeatNearBound = tgpu.fn(");
     expect(out.wgsl).toMatch(/d0 = d0 \* 0\.\d+;/);
+  });
+
+  test("a mirror at a distance reflects across the plane there, in every language", () => {
+    const at = (d: number) =>
+      generateSdfCode(scene([shape("box", { modifiers: [{ kind: "mirror", axes: [true, false, false], offset: [d, 0, 0] }] })]), null);
+    expect(at(0).wgsl).toMatch(/vec3f\(abs\(q\d+\.x\), q\d+\.y, q\d+\.z\)/);
+    const far = at(0.75);
+    expect(far.wgsl).toMatch(/abs\(q\d+\.x \+ 0\.75\) - 0\.75/);
+    expect(far.glsl).toMatch(/abs\(q\d+\.x \+ 0\.75\) - 0\.75/);
+    expect(far.typegpu).toMatch(/std\.abs\(q\d+\.x \+ 0\.75\) - 0\.75/);
   });
 
   test("modifier output is stable", () => {

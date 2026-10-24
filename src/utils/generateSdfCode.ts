@@ -512,7 +512,13 @@ const AXIS = ["x", "y", "z"] as const;
 function modExpr(syn: Syntax, m: Modifier, q: string): string {
   switch (m.kind) {
     case "mirror":
-      return syn.vec3Expr(AXIS.map((k, a) => (m.axes[a] ? `${syn.absFn}(${q}.${k})` : `${q}.${k}`)));
+      return syn.vec3Expr(
+        AXIS.map((k, a) => {
+          if (!m.axes[a]) return `${q}.${k}`;
+          const d = m.offset[a];
+          return d === 0 ? `${syn.absFn}(${q}.${k})` : `${syn.absFn}(${q}.${k} + ${fmt(d)}) - ${fmt(d)}`;
+        }),
+      );
     case "twist":
       return `opTwist(${q}, ${fmt(m.amount)}, ${syn.uint(m.axis)})`;
     case "bend":
