@@ -7,6 +7,9 @@ import { MIN_SCALE } from "../utils/scale";
  * animating items are scaled about their own pivot.
  *
  * - Appear (add, paste, duplicate, redo): grow from 0 with a small overshoot.
+ *   The clock starts when the item reaches the screen: a new item changes the
+ *   scene's structure, and the program that draws it may take a while to
+ *   compile. Until then the item waits at its smallest size.
  * - Vanish (delete, undo of an add): the pre-removal root is drawn for a moment
  *   with the removed items shrinking, so a subtract visibly closes up. Any
  *   further edit cancels it at once (that root is stale by then).
@@ -17,6 +20,11 @@ const VANISH_MS = 200;
 const MAX_ANIMATED = 24;
 /** Smallest animated factor; scale itself is still clamped to MIN_SCALE. */
 const MIN_FACTOR = 0.02;
+/**
+ * A grow-in that never sees its item drawn (a failed compile) is let go after
+ * this. Cold compiles of big scenes take seconds, so it is generous.
+ */
+const MAX_WAIT_MS = 10_000;
 
 /** Overshoots ~6% around t≈0.7, then settles on 1. */
 export function easeOutBack(t: number): number {
@@ -56,7 +64,8 @@ function scaleItems(items: SceneItem[], factors: Map<string, number>): SceneItem
 }
 
 export class SpawnAnimator {
-  private appear = new Map<string, number>();
+  /** Item id → grow-in start, or `waitingSince` until the item is first drawn. */
+  private appear = new Map<string, { start: number } | { waitingSince: number }>();
   private vanish: { ids: string[]; start: number; from: SceneRoot; after: SceneRoot } | null = null;
 
   /** Call when the store root changes (not for the first root). */
@@ -69,7 +78,7 @@ export class SpawnAnimator {
 
     for (const id of this.appear.keys()) if (!after.has(id)) this.appear.delete(id);
     if (added.size > 0 && added.size <= MAX_ANIMATED) {
-      for (const id of topLevel(next.items, added)) this.appear.set(id, now);
+      for (const id of topLevel(next.items, added)) this.appear.set(id, { waitingSince: now });
     }
     // Pure removals only: drawing `prev` must not hide any other change.
     if (removed.size > 0 && added.size === 0 && removed.size <= MAX_ANIMATED) {
@@ -77,11 +86,27 @@ export class SpawnAnimator {
     }
   }
 
-  /** The root to draw at `now`, and whether anything is still animating. */
-  frame(root: SceneRoot, now: number): { root: SceneRoot; animating: boolean } {
+  /** How far `id`'s grow-in has run at `now` (0..1), null when it is not growing in. */
+  progress(id: string, now: number): number | null {
+    const a = this.appear.get(id);
+    if (!a) return null;
+    return "start" in a ? Math.min(1, Math.max(0, (now - a.start) / APPEAR_MS)) : 0;
+  }
+
+  /**
+   * The root to draw at `now`, and whether anything is still animating.
+   * `drawn(id)`: the program on screen draws item `id` — waiting grow-ins
+   * start then (default: at once).
+   */
+  frame(root: SceneRoot, now: number, drawn: (id: string) => boolean = () => true): { root: SceneRoot; animating: boolean } {
     const factors = new Map<string, number>();
-    for (const [id, start] of this.appear) {
-      const t = (now - start) / APPEAR_MS;
+    for (const [id, a] of this.appear) {
+      if (!("start" in a)) {
+        if (drawn(id) || now - a.waitingSince > MAX_WAIT_MS) this.appear.set(id, { start: now });
+        factors.set(id, MIN_FACTOR);
+        continue;
+      }
+      const t = (now - a.start) / APPEAR_MS;
       if (t >= 1) this.appear.delete(id);
       else factors.set(id, Math.max(MIN_FACTOR, easeOutBack(Math.max(0, t))));
     }

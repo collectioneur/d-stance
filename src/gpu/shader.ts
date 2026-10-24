@@ -1,88 +1,19 @@
 import { tgpu, d, std } from "typegpu";
 import { fullScreenTriangle } from "typegpu/common";
-import {
-  MAX_GPU_OBJECTS,
-  MAX_IMAGES,
-  MAX_INSTRUCTIONS,
-  MAX_PICK_INSTRUCTIONS,
-  MAX_PICK_OBJECTS,
-} from "../store/sceneStore";
+import { MAX_IMAGES } from "../store/sceneStore";
 import { IMAGE_SDF_RES } from "../utils/imageSdf";
+import {
+  DATA_IDENT,
+  DATA_SLOTS,
+  IMAGE_SAMPLER_IDENT,
+  IMAGE_TEX_IDENT,
+} from "./sceneCompiler";
 
 type TgpuRoot = Awaited<ReturnType<typeof tgpu.init>>;
 
-export {
-  MAX_GPU_OBJECTS,
-  MAX_INSTRUCTIONS,
-  MAX_PICK_INSTRUCTIONS,
-  MAX_PICK_OBJECTS,
-};
-
-export const OPCODE_PUSH_SHAPE = 0;
-export const OPCODE_OP = 1;
-
-export const SHAPE_TYPE_INT = {
-  sphere: 0,
-  box: 1,
-  torus: 2,
-  cylinder: 3,
-  capsule: 4,
-  cone: 5,
-  roundedBox: 6,
-  boxFrame: 7,
-  cappedTorus: 8,
-  link: 9,
-  hexPrism: 10,
-  triPrism: 11,
-  roundedCylinder: 12,
-  roundCone: 13,
-  solidAngle: 14,
-  cutSphere: 15,
-  cutHollowSphere: 16,
-  deathStar: 17,
-  rhombus: 18,
-  octahedron: 19,
-  pyramid: 20,
-  vesica: 21,
-  image: 22,
-} as const;
-
-export const OP_TYPE_INT = {
-  union: 0,
-  subtract: 1,
-  intersect: 2,
-  sUnion: 3,
-  sSubtract: 4,
-  sIntersect: 5,
-} as const;
-
-// Each instruction is PUSH_SHAPE (0) or OP (1). Group/layer transforms are
-// baked on the CPU into one inverse affine map per shape (see bake.ts):
-//   q = (row0·p, row1·p, row2·p) + offset;  dist = sd(q, params) * factor
-// Layout: 4×u32/f32 header (16 B) + vec4f (16 B) + 4×(vec3f + f32) (64 B)
-//         + boundCenter/Radius (16 B) = 112 B
-const Instruction = d.struct({
-  opcode: d.u32, // 0=PUSH_SHAPE, 1=OP
-  shapeType: d.u32, // for PUSH_SHAPE: SHAPE_TYPE_INT value
-  opType: d.u32, // for OP: 0=union,1=subtract,2=intersect,3=sUnion,4=sSubtract,5=sIntersect
-  smoothK: d.f32, // for smooth OPs
-  params: d.vec4f, // for PUSH_SHAPE: shape params
-  row0: d.vec3f, // rows of the baked inverse affine matrix
-  factor: d.f32, // conservative distance factor: min(scale)·min(accScl)
-  row1: d.vec3f,
-  unionOnly: d.u32, // 1 = every CSG op above this shape is hard union
-  row2: d.vec3f,
-  _pad2: d.f32,
-  offset: d.vec3f, // baked translation: M·(b − shapePos)
-  _pad3: d.f32,
-  boundCenter: d.vec3f, // world-space bounding sphere of this shape
-  boundRadius: d.f32,
-});
-
-const ObjectInfo = d.struct({
-  start: d.u32, // index into flat instruction buffer
-  count: d.u32, // number of instructions for this object
-});
+// The scene SDF is not written here: sceneCompiler.ts generates WGSL per scene
+// structure and useGpu.ts plugs it into the two slots below. Everything in
+// this file is fixed (camera, shading, grid, gizmo).
 
 const CameraUniforms = d.struct({
   time: d.f32,
@@ -92,21 +23,12 @@ const CameraUniforms = d.struct({
 });
 
 const SceneUniforms = d.struct({
-  objectCount: d.u32,
   boundsRadius: d.f32, // conservative world-space bounding sphere of scene
   renderMode: d.u32, // RENDER_MODE_CLASSIC | RENDER_MODE_CHROME
+  selectAll: d.u32, // 1 = scene root selected: every surface glows
   _pad1: d.f32,
   boundsCenter: d.vec3f,
   _pad2: d.f32,
-});
-
-const SelectionUniforms = d.struct({
-  enabled: d.u32,
-  usesSceneSdf: d.u32,
-  count: d.u32,
-  boundsRadius: d.f32, // conservative world bounding sphere of selected subtree
-  boundsCenter: d.vec3f,
-  _pad: d.f32,
 });
 
 const GizmoUniforms = d.struct({
@@ -126,54 +48,21 @@ const GizmoUniforms = d.struct({
 });
 
 const PickUniforms = d.struct({
-  objectCount: d.u32,
   pickPass: d.u32,
-});
-
-/**
- * Hover glow, two slots so moving between shapes cross-fades: the shape under
- * the cursor (fading in) and the one just left (fading out). Pick ids are
- * 1-based, 0 = empty slot.
- */
-const HoverUniforms = d.struct({
-  pickId: d.u32,
-  strength: d.f32,
-  prevPickId: d.u32,
-  prevStrength: d.f32,
 });
 
 const QualityUniforms = d.struct({
   maxSteps: d.f32,
   reflSteps: d.f32,
   outlineSteps: d.f32,
-  _pad: d.f32,
+  /**
+   * Always 0. Loop bounds built from it are opaque to the shader compiler, so
+   * loops that call the (large, generated) scene SDF stay loops instead of
+   * being unrolled into one inlined copy per tap — IQ's ZERO trick.
+   */
+  zero: d.u32,
 });
 
-const TOTAL_INSTRUCTIONS = MAX_INSTRUCTIONS;
-
-const emptyInstruction = {
-  opcode: 0,
-  shapeType: 0,
-  opType: 0,
-  smoothK: 0,
-  params: d.vec4f(0, 0, 0, 0),
-  row0: d.vec3f(1, 0, 0),
-  factor: 0,
-  row1: d.vec3f(0, 1, 0),
-  unionOnly: 0,
-  row2: d.vec3f(0, 0, 1),
-  _pad2: 0,
-  offset: d.vec3f(0, 0, 0),
-  _pad3: 0,
-  boundCenter: d.vec3f(0, 0, 0),
-  boundRadius: 0,
-};
-
-const emptyObjectInfo = { start: 0, count: 0 };
-
-/** Surface glow band: |own SDF| below LO glows fully, fades out by HI. */
-const GLOW_BAND_LO = 0.004;
-export const GLOW_BAND_HI = 0.035;
 const RAY_MISS_T = 50.0;
 /** In-loop hit: `dist < HIT_EPS * max(t,1)`. Same scale as the reflection march. */
 const HIT_EPS = 0.001;
@@ -183,14 +72,9 @@ const HIT_EPS = 0.001;
  * ponytail: inflates the silhouette by ~REST_HIT_EPS; upgrade is pixel-radius.
  */
 const REST_HIT_EPS = 0.01;
-/**
- * Sphere-skip only above this. March hits at `HIT_EPS*t` / leftover `REST_HIT_EPS`;
- * returning a smaller sphereDist paints the bounding sphere as the surface.
- */
-const SHAPE_BOUND_SKIP = 0.15;
-/** Surface tie epsilon for pick — prefer smaller CSG subtree (more specific item). */
-const PICK_TIE_EPS = 0.002;
 
+/** Pick pass: scene object ids (16 bit: low byte in R and B, high byte in G). */
+export const PICK_PASS_SCENE = 1;
 /** Pick pass: ray-march translate gizmo, output axis id 1/2/3 in R. */
 export const PICK_PASS_GIZMO = 2;
 
@@ -198,6 +82,11 @@ export const PICK_PASS_GIZMO = 2;
 export const RENDER_MODE_CLASSIC = 0;
 /** Reflective chrome shading (reflection march + AO + tonemap). */
 export const RENDER_MODE_CHROME = 1;
+
+/** Generated scene SDF: world point → signed distance. */
+const sceneSdfSlot = tgpu.slot<(p: d.v3f) => number>();
+/** Generated scene info at a surface point: (glow, pick id, |d| of pick, 0). */
+const sceneInfoSlot = tgpu.slot<(p: d.v3f) => d.v4f>();
 
 export function createShader(root: TgpuRoot) {
   const cameraUniforms = root.createUniform(CameraUniforms, {
@@ -207,20 +96,12 @@ export function createShader(root: TgpuRoot) {
     distance: 2.5,
   });
   const sceneUniforms = root.createUniform(SceneUniforms, {
-    objectCount: 0,
     boundsRadius: 0,
     renderMode: RENDER_MODE_CHROME,
+    selectAll: 0,
     _pad1: 0,
     boundsCenter: d.vec3f(0, 0, 0),
     _pad2: 0,
-  });
-  const selectionUniforms = root.createUniform(SelectionUniforms, {
-    enabled: 0,
-    usesSceneSdf: 0,
-    count: 0,
-    boundsRadius: 0,
-    boundsCenter: d.vec3f(0, 0, 0),
-    _pad: 0,
   });
   const gizmoUniforms = root.createUniform(GizmoUniforms, {
     enabled: 0,
@@ -237,52 +118,16 @@ export function createShader(root: TgpuRoot) {
     axisZ: d.vec3f(0.0, 0.0, 1.0),
     _padZ: 0,
   });
-
-  const instructionsBuffer = root.createReadonly(
-    d.arrayOf(Instruction, TOTAL_INSTRUCTIONS),
-    Array.from({ length: TOTAL_INSTRUCTIONS }, () => ({ ...emptyInstruction })),
-  );
-
-  const objectInfoBuffer = root.createReadonly(
-    d.arrayOf(ObjectInfo, MAX_GPU_OBJECTS),
-    Array.from({ length: MAX_GPU_OBJECTS }, () => ({ ...emptyObjectInfo })),
-  );
-
-  const selectionInstructionsBuffer = root.createReadonly(
-    d.arrayOf(Instruction, MAX_INSTRUCTIONS),
-    Array.from({ length: MAX_INSTRUCTIONS }, () => ({
-      ...emptyInstruction,
-    })),
-  );
-
-  const pickUniforms = root.createUniform(PickUniforms, {
-    objectCount: 0,
-    pickPass: 0,
-  });
-  const hoverUniforms = root.createUniform(HoverUniforms, {
-    pickId: 0,
-    strength: 0,
-    prevPickId: 0,
-    prevStrength: 0,
-  });
+  const pickUniforms = root.createUniform(PickUniforms, { pickPass: 0 });
   const qualityUniforms = root.createUniform(QualityUniforms, {
     maxSteps: 48,
     reflSteps: 24,
     outlineSteps: 24,
-    _pad: 0,
+    zero: 0,
   });
 
-  const pickInstructionsBuffer = root.createReadonly(
-    d.arrayOf(Instruction, MAX_PICK_INSTRUCTIONS),
-    Array.from({ length: MAX_PICK_INSTRUCTIONS }, () => ({
-      ...emptyInstruction,
-    })),
-  );
-
-  const pickObjectInfoBuffer = root.createReadonly(
-    d.arrayOf(ObjectInfo, MAX_PICK_OBJECTS),
-    Array.from({ length: MAX_PICK_OBJECTS }, () => ({ ...emptyObjectInfo })),
-  );
+  /** Every number of the compiled scene (see sceneCompiler.ts). */
+  const sceneData = root.createUniform(d.arrayOf(d.vec4f, DATA_SLOTS));
 
   // Baked 2D SDFs of imported images, one array layer per distinct image.
   // r16float texel t (= d_px / RES) ⇒ distance = t · (2 · halfSize).
@@ -301,13 +146,6 @@ export function createShader(root: TgpuRoot) {
     addressModeV: "clamp-to-edge",
   });
 
-  // ── SDF primitives ────────────────────────────────────────────────────────
-
-  const sdSphere = (p: d.v3f, R: number): number => {
-    "use gpu";
-    return std.length(p) - R;
-  };
-
   const sdBox = (p: d.v3f, b: d.v3f): number => {
     "use gpu";
     const q = std.abs(p) - b;
@@ -315,344 +153,6 @@ export function createShader(root: TgpuRoot) {
       std.length(std.max(q, d.vec3f(0.0))) +
       std.min(std.max(q.x, std.max(q.y, q.z)), 0.0)
     );
-  };
-
-  const sdTorus = (p: d.v3f, t: d.v2f): number => {
-    "use gpu";
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)) - t.x, p.y);
-    return std.length(q) - t.y;
-  };
-
-  const sdCylinder = (p: d.v3f, r: number, h: number): number => {
-    "use gpu";
-    const d2 = d.vec2f(std.length(d.vec2f(p.x, p.z)) - r, std.abs(p.y) - h);
-    return (
-      std.min(std.max(d2.x, d2.y), 0.0) + std.length(std.max(d2, d.vec2f(0.0)))
-    );
-  };
-
-  const sdCapsule = (p: d.v3f, r: number, h: number): number => {
-    "use gpu";
-    const py = std.clamp(p.y, -h, h);
-    return std.length(p - d.vec3f(0.0, py, 0.0)) - r;
-  };
-
-  const sdCone = (p: d.v3f, r: number, h: number): number => {
-    "use gpu";
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), p.y);
-    const k1 = d.vec2f(0.0, h);
-    const k2 = d.vec2f(-r, 2.0 * h);
-    let capR = d.f32(0.0);
-    if (p.y < 0.0) {
-      capR = d.f32(r);
-    }
-    const ca = d.vec2f(q.x - std.min(q.x, capR), std.abs(p.y) - h);
-    const t = std.clamp(std.dot(k1 - q, k2) / std.dot(k2, k2), 0.0, 1.0);
-    const cb = q - k1 + k2 * t;
-    let s = d.f32(1.0);
-    if (cb.x < 0.0) {
-      if (ca.y < 0.0) {
-        s = d.f32(-1.0);
-      }
-    }
-    return s * std.sqrt(std.min(std.dot(ca, ca), std.dot(cb, cb)));
-  };
-
-  const sdRoundedBox = (p: d.v3f, b: d.v3f, r: number): number => {
-    "use gpu";
-    const q = std.abs(p) - b;
-    return (
-      std.length(std.max(q, d.vec3f(0.0))) +
-      std.min(std.max(q.x, std.max(q.y, q.z)), 0.0) -
-      r
-    );
-  };
-
-  const sdBoxFrame = (pIn: d.v3f, b: d.v3f, e: number): number => {
-    "use gpu";
-    const p = std.abs(pIn) - b;
-    const q = std.abs(p + d.vec3f(e)) - d.vec3f(e);
-    const dA =
-      std.length(std.max(d.vec3f(p.x, q.y, q.z), d.vec3f(0.0))) +
-      std.min(std.max(p.x, std.max(q.y, q.z)), 0.0);
-    const dB =
-      std.length(std.max(d.vec3f(q.x, p.y, q.z), d.vec3f(0.0))) +
-      std.min(std.max(q.x, std.max(p.y, q.z)), 0.0);
-    const dC =
-      std.length(std.max(d.vec3f(q.x, q.y, p.z), d.vec3f(0.0))) +
-      std.min(std.max(q.x, std.max(q.y, p.z)), 0.0);
-    return std.min(dA, std.min(dB, dC));
-  };
-
-  // Angle params arrive in degrees (UI convention, same as rotation).
-  const sdCappedTorus = (
-    pIn: d.v3f,
-    ra: number,
-    rb: number,
-    angleDeg: number,
-  ): number => {
-    "use gpu";
-    const an = angleDeg * 0.017453292519943295;
-    const sc = d.vec2f(std.sin(an), std.cos(an));
-    // IQ's version is z-up; remap to this project's y-up torus orientation.
-    const p = d.vec3f(std.abs(pIn.x), pIn.z, pIn.y);
-    let k = std.length(d.vec2f(p.x, p.y));
-    if (sc.y * p.x > sc.x * p.y) {
-      k = std.dot(d.vec2f(p.x, p.y), sc);
-    }
-    return std.sqrt(std.dot(p, p) + ra * ra - 2.0 * ra * k) - rb;
-  };
-
-  const sdLink = (p: d.v3f, le: number, r1: number, r2: number): number => {
-    "use gpu";
-    const q = d.vec3f(p.x, std.max(std.abs(p.y) - le, 0.0), p.z);
-    return (
-      std.length(d.vec2f(std.length(d.vec2f(q.x, q.y)) - r1, q.z)) - r2
-    );
-  };
-
-  const sdHexPrism = (pIn: d.v3f, r: number, h: number): number => {
-    "use gpu";
-    const k = d.vec3f(-0.8660254, 0.5, 0.57735);
-    // y-up: prism axis along y (IQ's is along z).
-    const q0 = std.abs(d.vec3f(pIn.x, pIn.z, pIn.y));
-    const kd = 2.0 * std.min(std.dot(d.vec2f(k.x, k.y), d.vec2f(q0.x, q0.y)), 0.0);
-    const qx = q0.x - kd * k.x;
-    const qy = q0.y - kd * k.y;
-    const d1 =
-      std.length(d.vec2f(qx - std.clamp(qx, -k.z * r, k.z * r), qy - r)) *
-      std.sign(qy - r);
-    const d2 = q0.z - h;
-    return (
-      std.min(std.max(d1, d2), 0.0) +
-      std.length(std.max(d.vec2f(d1, d2), d.vec2f(0.0)))
-    );
-  };
-
-  const sdTriPrism = (pIn: d.v3f, r: number, h: number): number => {
-    "use gpu";
-    const p = d.vec3f(pIn.x, pIn.z, pIn.y);
-    const q = std.abs(p);
-    return std.max(
-      q.z - h,
-      std.max(q.x * 0.866025 + p.y * 0.5, -p.y) - r * 0.5,
-    );
-  };
-
-  const sdRoundedCylinder = (
-    p: d.v3f,
-    ra: number,
-    rb: number,
-    h: number,
-  ): number => {
-    "use gpu";
-    const d2 = d.vec2f(
-      std.length(d.vec2f(p.x, p.z)) - ra + rb,
-      std.abs(p.y) - h,
-    );
-    return (
-      std.min(std.max(d2.x, d2.y), 0.0) +
-      std.length(std.max(d2, d.vec2f(0.0))) -
-      rb
-    );
-  };
-
-  const sdRoundCone = (p: d.v3f, r1: number, r2: number, h: number): number => {
-    "use gpu";
-    // Clamp keeps sqrt real when |r1 - r2| >= h (user-editable params).
-    const b = std.clamp((r1 - r2) / std.max(h, 0.0001), -0.999, 0.999);
-    const a = std.sqrt(1.0 - b * b);
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), p.y);
-    const k = std.dot(q, d.vec2f(-b, a));
-    let result = std.dot(q, d.vec2f(a, b)) - r1;
-    if (k < 0.0) {
-      result = std.length(q) - r1;
-    } else if (k > a * h) {
-      result = std.length(q - d.vec2f(0.0, h)) - r2;
-    }
-    return result;
-  };
-
-  const sdSolidAngle = (p: d.v3f, angleDeg: number, ra: number): number => {
-    "use gpu";
-    const an = angleDeg * 0.017453292519943295;
-    const sc = d.vec2f(std.sin(an), std.cos(an));
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), p.y);
-    const l = std.length(q) - ra;
-    const m = std.length(q - sc * std.clamp(std.dot(q, sc), 0.0, ra));
-    return std.max(l, m * std.sign(sc.y * q.x - sc.x * q.y));
-  };
-
-  const sdCutSphere = (p: d.v3f, r: number, hIn: number): number => {
-    "use gpu";
-    const h = std.clamp(hIn, -r * 0.999, r * 0.999);
-    const w = std.sqrt(r * r - h * h);
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), p.y);
-    const s = std.max(
-      (h - r) * q.x * q.x + w * w * (h + r - 2.0 * q.y),
-      h * q.x - w * q.y,
-    );
-    let result = std.length(q - d.vec2f(w, h));
-    if (s < 0.0) {
-      result = std.length(q) - r;
-    } else if (q.x < w) {
-      result = h - q.y;
-    }
-    return result;
-  };
-
-  const sdCutHollowSphere = (
-    p: d.v3f,
-    r: number,
-    hIn: number,
-    t: number,
-  ): number => {
-    "use gpu";
-    const h = std.clamp(hIn, -r * 0.999, r * 0.999);
-    const w = std.sqrt(r * r - h * h);
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), p.y);
-    let result = std.abs(std.length(q) - r);
-    if (h * q.x < w * q.y) {
-      result = std.length(q - d.vec2f(w, h));
-    }
-    return result - t;
-  };
-
-  const sdDeathStar = (p: d.v3f, ra: number, rb: number, dOff: number): number => {
-    "use gpu";
-    const dd = std.max(dOff, 0.0001);
-    const a = (ra * ra - rb * rb + dd * dd) / (2.0 * dd);
-    const b = std.sqrt(std.max(ra * ra - a * a, 0.0));
-    // Cut opens along +y (IQ's is along +x).
-    const q = d.vec2f(p.y, std.length(d.vec2f(p.x, p.z)));
-    let result = std.max(
-      std.length(q) - ra,
-      -(std.length(q - d.vec2f(dd, 0.0)) - rb),
-    );
-    if (q.x * b - q.y * a > dd * std.max(b - q.y, 0.0)) {
-      result = std.length(q - d.vec2f(a, b));
-    }
-    return result;
-  };
-
-  const ndot2 = (a: d.v2f, b: d.v2f): number => {
-    "use gpu";
-    return a.x * b.x - a.y * b.y;
-  };
-
-  const sdRhombus = (
-    p: d.v3f,
-    la: number,
-    lb: number,
-    h: number,
-    ra: number,
-  ): number => {
-    "use gpu";
-    const q = std.abs(p);
-    const b = d.vec2f(la, lb);
-    const f = std.clamp(
-      ndot2(b, b - d.vec2f(2.0 * q.x, 2.0 * q.z)) / std.dot(b, b),
-      -1.0,
-      1.0,
-    );
-    const qx =
-      std.length(
-        d.vec2f(q.x, q.z) - b * d.vec2f(1.0 - f, 1.0 + f) * 0.5,
-      ) *
-        std.sign(q.x * b.y + q.z * b.x - b.x * b.y) -
-      ra;
-    const qy = q.y - h;
-    return (
-      std.min(std.max(qx, qy), 0.0) +
-      std.length(std.max(d.vec2f(qx, qy), d.vec2f(0.0)))
-    );
-  };
-
-  const sdOctahedron = (pIn: d.v3f, s: number): number => {
-    "use gpu";
-    const p = std.abs(pIn);
-    const m = p.x + p.y + p.z - s;
-    let result = m * 0.57735027;
-    let q = d.vec3f(0.0);
-    let onEdge = d.f32(0.0);
-    if (3.0 * p.x < m) {
-      q = d.vec3f(p.x, p.y, p.z);
-      onEdge = d.f32(1.0);
-    } else if (3.0 * p.y < m) {
-      q = d.vec3f(p.y, p.z, p.x);
-      onEdge = d.f32(1.0);
-    } else if (3.0 * p.z < m) {
-      q = d.vec3f(p.z, p.x, p.y);
-      onEdge = d.f32(1.0);
-    }
-    if (onEdge > 0.5) {
-      const k = std.clamp(0.5 * (q.z - q.y + s), 0.0, s);
-      result = std.length(d.vec3f(q.x, q.y - s + k, q.z - k));
-    }
-    return result;
-  };
-
-  // IQ's unit-base pyramid, uniformly scaled so `base` is the footprint width.
-  // IQ's original overestimates distance below the base plane (it only
-  // measures to the slant faces), which makes rays tunnel through the bottom
-  // and corrupts normals. Split: exact base-face distance for p.y < 0, slant
-  // machinery only when outside the slant half-space, analytic interior.
-  const sdPyramid = (pIn: d.v3f, base: number, height: number): number => {
-    "use gpu";
-    const invB = 1.0 / std.max(base, 0.0001);
-    const p0 = d.vec3f(pIn.x * invB, pIn.y * invB, pIn.z * invB);
-    const h = height * invB;
-    const m2 = h * h + 0.25;
-    let px = std.abs(p0.x);
-    let pz = std.abs(p0.z);
-    if (pz > px) {
-      const tmp = px;
-      px = pz;
-      pz = tmp;
-    }
-    px = px - 0.5;
-    pz = pz - 0.5;
-    const q = d.vec3f(pz, h * p0.y - 0.5 * px, h * px + 0.5 * p0.y);
-
-    // Fully inside: below the (folded) closest slant plane and above base.
-    if (q.z < 0.0 && p0.y > 0.0) {
-      return -std.min(-q.z / std.sqrt(m2), p0.y) * base;
-    }
-
-    let dSlant = d.f32(1e10);
-    if (q.z > 0.0) {
-      const s = std.max(-q.x, 0.0);
-      const t = std.clamp((q.y - 0.5 * pz) / (m2 + 0.25), 0.0, 1.0);
-      const a = m2 * (q.x + s) * (q.x + s) + q.y * q.y;
-      const b =
-        m2 * (q.x + 0.5 * t) * (q.x + 0.5 * t) +
-        (q.y - m2 * t) * (q.y - m2 * t);
-      let d2 = std.min(a, b);
-      if (std.min(q.y, -q.x * m2 - q.y * 0.5) > 0.0) {
-        d2 = d.f32(0.0);
-      }
-      dSlant = std.sqrt((d2 + q.z * q.z) / m2);
-    }
-    let dBase = d.f32(1e10);
-    if (p0.y < 0.0) {
-      dBase = std.length(
-        d.vec3f(std.max(px, 0.0), p0.y, std.max(pz, 0.0)),
-      );
-    }
-    return std.min(dSlant, dBase) * base;
-  };
-
-  // 2D vesica revolved around y — a lens/spindle solid.
-  const sdVesica = (p: d.v3f, r: number, dIn: number): number => {
-    "use gpu";
-    const dd = std.clamp(dIn, 0.0001, r * 0.999);
-    const b = std.sqrt(r * r - dd * dd);
-    const q = d.vec2f(std.length(d.vec2f(p.x, p.z)), std.abs(p.y));
-    let result = std.length(q - d.vec2f(-dd, 0.0)) - r;
-    if ((q.y - b) * dd > q.x * b) {
-      result = std.length(q - d.vec2f(0.0, b));
-    }
-    return result;
   };
 
   const divAccSclBy = (acc: d.v3f, s: d.v3f): d.v3f => {
@@ -665,284 +165,9 @@ export function createShader(root: TgpuRoot) {
     return d.vec3f(a.x * b.x, a.y * b.y, a.z * b.z);
   };
 
-  // Apply a shape's baked inverse affine map: q = M·p + offset.
-  // M composes all ancestor group transforms + the shape's own rotation/scale
-  // (including the unsheared-rotation trick for non-uniform parent scale);
-  // computed once per scene change on the CPU (bake.ts).
-  const bakedLocalPoint = (
-    p: d.v3f,
-    row0: d.v3f,
-    row1: d.v3f,
-    row2: d.v3f,
-    offset: d.v3f,
-  ): d.v3f => {
-    "use gpu";
-    return (
-      d.vec3f(std.dot(row0, p), std.dot(row1, p), std.dot(row2, p)) + offset
-    );
-  };
-
-  // Extruded image SDF. Local square [-s, s]² maps to the texture. Inside the
-  // square the texel is the distance; outside, clamp-to-edge gives the
-  // distance dEdge at the nearest edge point q, and since the content lies
-  // inside the square, |p − c|² ≥ |p − q|² + |q − c|², so √(dBox² + dEdge²)
-  // is a tight lower bound that is continuous across the edge.
-  // bold thickens the silhouette; invert = 1 turns it into a plate with the
-  // silhouette cut out; rnd rounds every edge (2D corners and the extrusion
-  // rims) by eroding the 2D field and the half-thickness by rnd, then
-  // inflating the extruded solid back by rnd. Sampling must be
-  // textureSampleLevel: this runs in non-uniform control flow inside the
-  // instruction loop.
-  const sdImage = (
-    p: d.v3f,
-    s: number,
-    h: number,
-    bold: number,
-    rnd: number,
-    invert: number,
-    layer: number,
-  ): number => {
-    "use gpu";
-    // Viewport camera sits at −Z with screen-up = world −Y, so image row 0
-    // (top) maps to −Y and the logo reads upright from the default view.
-    const uv = d.vec2f(p.x, p.y) * (0.5 / s) + d.vec2f(0.5);
-    const t = std.textureSampleLevel(imageSdfView.$, imageSdfSampler.$, uv, d.u32(layer), 0).x;
-    const dTex = t * (2.0 * s);
-    const b = std.abs(d.vec2f(p.x, p.y)) - d.vec2f(s);
-    const dBox = std.length(std.max(b, d.vec2f(0.0))) + std.min(std.max(b.x, b.y), 0.0);
-    let d2 = dTex - bold;
-    if (invert > 0.5) {
-      d2 = std.max(-d2, dBox);
-    } else if (dBox > 0.0) {
-      const dEdge = std.max(dTex, 0.0);
-      d2 = std.sqrt(dBox * dBox + dEdge * dEdge) - bold;
-    }
-    const r = std.min(rnd, h);
-    const w = d.vec2f(d2 + r, std.abs(p.z) - (h - r));
-    return std.min(std.max(w.x, w.y), 0.0) + std.length(std.max(w, d.vec2f(0.0))) - r;
-  };
-
-  const evalShape = (lp: d.v3f, shapeType: number, params: d.v4f): number => {
-    "use gpu";
-    let result = d.f32(1e10);
-    if (shapeType === d.u32(0)) {
-      result = sdSphere(lp, params.x);
-    } else if (shapeType === d.u32(1)) {
-      result = sdBox(lp, d.vec3f(params.x, params.y, params.z));
-    } else if (shapeType === d.u32(2)) {
-      result = sdTorus(lp, d.vec2f(params.x, params.y));
-    } else if (shapeType === d.u32(3)) {
-      result = sdCylinder(lp, params.x, params.y);
-    } else if (shapeType === d.u32(4)) {
-      result = sdCapsule(lp, params.x, params.y);
-    } else if (shapeType === d.u32(5)) {
-      result = sdCone(lp, params.x, params.y);
-    } else if (shapeType === d.u32(6)) {
-      result = sdRoundedBox(lp, d.vec3f(params.x, params.y, params.z), params.w);
-    } else if (shapeType === d.u32(7)) {
-      result = sdBoxFrame(lp, d.vec3f(params.x, params.y, params.z), params.w);
-    } else if (shapeType === d.u32(8)) {
-      result = sdCappedTorus(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(9)) {
-      result = sdLink(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(10)) {
-      result = sdHexPrism(lp, params.x, params.y);
-    } else if (shapeType === d.u32(11)) {
-      result = sdTriPrism(lp, params.x, params.y);
-    } else if (shapeType === d.u32(12)) {
-      result = sdRoundedCylinder(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(13)) {
-      result = sdRoundCone(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(14)) {
-      result = sdSolidAngle(lp, params.x, params.y);
-    } else if (shapeType === d.u32(15)) {
-      result = sdCutSphere(lp, params.x, params.y);
-    } else if (shapeType === d.u32(16)) {
-      result = sdCutHollowSphere(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(17)) {
-      result = sdDeathStar(lp, params.x, params.y, params.z);
-    } else if (shapeType === d.u32(18)) {
-      result = sdRhombus(lp, params.x, params.y, params.z, params.w);
-    } else if (shapeType === d.u32(19)) {
-      result = sdOctahedron(lp, params.x);
-    } else if (shapeType === d.u32(20)) {
-      result = sdPyramid(lp, params.x, params.y);
-    } else if (shapeType === d.u32(21)) {
-      result = sdVesica(lp, params.x, params.y);
-    } else if (shapeType === d.u32(22)) {
-      // params: x = half size, y = half thickness, z = bold, w = packed
-      // round·1000/STEP + invert·100 + layer (all exact integers) — see
-      // packImageParams in useGpu.ts.
-      const roundQ = std.floor(params.w / 1000.0);
-      const rem = params.w - roundQ * 1000.0;
-      let invert = d.f32(0.0);
-      if (rem >= 100.0) invert = d.f32(1.0);
-      const layer = rem - invert * 100.0;
-      result = sdImage(lp, params.x, params.y, params.z, roundQ * 0.001, invert, layer);
-    }
-    return result;
-  };
-
-  // Polynomial smooth-min (IQ)
-  const smin = (a: number, b: number, k: number): number => {
-    "use gpu";
-    const h = std.clamp(0.5 + (0.5 * (b - a)) / k, 0.0, 1.0);
-    return std.mix(b, a, h) - k * h * (1.0 - h);
-  };
-
-  // Apply a CSG operation: a = left operand, b = right operand
-  const applyOp = (a: number, b: number, opType: number, k: number): number => {
-    "use gpu";
-    let result = a;
-    if (opType === d.u32(0)) {
-      result = std.min(a, b); // union
-    } else if (opType === d.u32(1)) {
-      result = std.max(a, -b); // subtract: a minus b
-    } else if (opType === d.u32(2)) {
-      result = std.max(a, b); // intersect
-    } else if (opType === d.u32(3)) {
-      result = smin(a, b, k); // smooth union
-    } else if (opType === d.u32(4)) {
-      result = -smin(-a, b, k); // smooth subtract
-    } else if (opType === d.u32(5)) {
-      result = -smin(-a, -b, k); // smooth intersect
-    }
-    return result;
-  };
-
-  // Sphere dist is a conservative SDF lower bound. Safe to substitute when
-  // every CSG op above this shape is hard union (min): zero-set unchanged.
-  // Subtract/intersect/smooth paths keep a full eval (CPU sets unionOnly=0).
-  // Skip only when sphereDist > SHAPE_BOUND_SKIP — otherwise the march hit
-  // test (`dist < k*t`) treats the bounding sphere as the surface.
-  const evalPushedShape = (
-    p: d.v3f,
-    unionOnly: number,
-    boundCenter: d.v3f,
-    boundRadius: number,
-    row0: d.v3f,
-    row1: d.v3f,
-    row2: d.v3f,
-    offset: d.v3f,
-    shapeType: number,
-    params: d.v4f,
-    factor: number,
-  ): number => {
-    "use gpu";
-    if (unionOnly === d.u32(1)) {
-      const sphereDist = std.length(p - boundCenter) - boundRadius;
-      if (sphereDist > SHAPE_BOUND_SKIP) {
-        return sphereDist;
-      }
-    }
-    const q = bakedLocalPoint(p, row0, row1, row2, offset);
-    return evalShape(q, shapeType, params) * factor;
-  };
-
-  // ── Stack-machine sdScene ─────────────────────────────────────────────────
-  //
-  // The JS side compiles each CSG tree into a postorder instruction sequence
-  // with all group/layer transforms baked into per-shape inverse affine maps
-  // (bake.ts). PUSH_SHAPE evaluates a shape and pushes its SDF value; OP pops
-  // two values, applies the operation, and pushes the result. After all
-  // instructions the result sits in s0. Max stack depth for 15-node binary
-  // tree is 8. Named variables s0..s7 + sp avoid the need for local WGSL arrays.
   const sdScene = (p: d.v3f): number => {
     "use gpu";
-    let dist = d.f32(1e10);
-
-    // SDF stack
-    let s0 = d.f32(0.0);
-    let s1 = d.f32(0.0);
-    let s2 = d.f32(0.0);
-    let s3 = d.f32(0.0);
-    let s4 = d.f32(0.0);
-    let s5 = d.f32(0.0);
-    let s6 = d.f32(0.0);
-    let s7 = d.f32(0.0);
-    let sp = d.u32(0);
-
-    const objCount = sceneUniforms.$.objectCount;
-    for (let o = d.u32(0); o < objCount; o += d.u32(1)) {
-      s0 = d.f32(0.0);
-      s1 = d.f32(0.0);
-      s2 = d.f32(0.0);
-      s3 = d.f32(0.0);
-      s4 = d.f32(0.0);
-      s5 = d.f32(0.0);
-      s6 = d.f32(0.0);
-      s7 = d.f32(0.0);
-      sp = d.u32(0);
-
-      const info = objectInfoBuffer.$[o];
-      const end = info.start + info.count;
-
-      for (let i = info.start; i < end; i += d.u32(1)) {
-        const instr = instructionsBuffer.$[i];
-
-        if (instr.opcode === d.u32(0)) {
-          const val = evalPushedShape(
-            p,
-            instr.unionOnly,
-            instr.boundCenter,
-            instr.boundRadius,
-            instr.row0,
-            instr.row1,
-            instr.row2,
-            instr.offset,
-            instr.shapeType,
-            instr.params,
-            instr.factor,
-          );
-          if (sp === d.u32(0)) s0 = val;
-          else if (sp === d.u32(1)) s1 = val;
-          else if (sp === d.u32(2)) s2 = val;
-          else if (sp === d.u32(3)) s3 = val;
-          else if (sp === d.u32(4)) s4 = val;
-          else if (sp === d.u32(5)) s5 = val;
-          else if (sp === d.u32(6)) s6 = val;
-          else s7 = val;
-          sp += d.u32(1);
-        } else if (instr.opcode === d.u32(1)) {
-          sp -= d.u32(1);
-          let b = d.f32(0.0);
-          if (sp === d.u32(0)) b = s0;
-          else if (sp === d.u32(1)) b = s1;
-          else if (sp === d.u32(2)) b = s2;
-          else if (sp === d.u32(3)) b = s3;
-          else if (sp === d.u32(4)) b = s4;
-          else if (sp === d.u32(5)) b = s5;
-          else if (sp === d.u32(6)) b = s6;
-          else b = s7;
-
-          sp -= d.u32(1);
-          let a = d.f32(0.0);
-          if (sp === d.u32(0)) a = s0;
-          else if (sp === d.u32(1)) a = s1;
-          else if (sp === d.u32(2)) a = s2;
-          else if (sp === d.u32(3)) a = s3;
-          else if (sp === d.u32(4)) a = s4;
-          else if (sp === d.u32(5)) a = s5;
-          else if (sp === d.u32(6)) a = s6;
-          else a = s7;
-
-          const result = applyOp(a, b, instr.opType, instr.smoothK);
-          if (sp === d.u32(0)) s0 = result;
-          else if (sp === d.u32(1)) s1 = result;
-          else if (sp === d.u32(2)) s2 = result;
-          else if (sp === d.u32(3)) s3 = result;
-          else if (sp === d.u32(4)) s4 = result;
-          else if (sp === d.u32(5)) s5 = result;
-          else if (sp === d.u32(6)) s6 = result;
-          else s7 = result;
-          sp += d.u32(1);
-        }
-      }
-
-      dist = std.min(dist, s0);
-    }
-
-    return dist;
+    return sceneSdfSlot.$(p);
   };
 
   // Ray vs sphere: returns (tEnter, tExit); tExit < 0 = miss.
@@ -972,220 +197,6 @@ export function createShader(root: TgpuRoot) {
       sceneUniforms.$.boundsCenter,
       sceneUniforms.$.boundsRadius,
     );
-  };
-
-  // Evaluate SDF for an instruction range from the selection buffer.
-  const evalSelectionInstructionRange = (
-    p: d.v3f,
-    start: number,
-    count: number,
-  ): number => {
-    "use gpu";
-    let s0 = d.f32(0.0);
-    let s1 = d.f32(0.0);
-    let s2 = d.f32(0.0);
-    let s3 = d.f32(0.0);
-    let s4 = d.f32(0.0);
-    let s5 = d.f32(0.0);
-    let s6 = d.f32(0.0);
-    let s7 = d.f32(0.0);
-    let sp = d.u32(0);
-
-    const end = start + count;
-    for (let i = start; i < end; i += d.u32(1)) {
-      const instr = selectionInstructionsBuffer.$[i];
-
-      if (instr.opcode === d.u32(0)) {
-        const val = evalPushedShape(
-          p,
-          instr.unionOnly,
-          instr.boundCenter,
-          instr.boundRadius,
-          instr.row0,
-          instr.row1,
-          instr.row2,
-          instr.offset,
-          instr.shapeType,
-          instr.params,
-          instr.factor,
-        );
-        if (sp === d.u32(0)) s0 = val;
-        else if (sp === d.u32(1)) s1 = val;
-        else if (sp === d.u32(2)) s2 = val;
-        else if (sp === d.u32(3)) s3 = val;
-        else if (sp === d.u32(4)) s4 = val;
-        else if (sp === d.u32(5)) s5 = val;
-        else if (sp === d.u32(6)) s6 = val;
-        else s7 = val;
-        sp += d.u32(1);
-      } else if (instr.opcode === d.u32(1)) {
-        sp -= d.u32(1);
-        let b = d.f32(0.0);
-        if (sp === d.u32(0)) b = s0;
-        else if (sp === d.u32(1)) b = s1;
-        else if (sp === d.u32(2)) b = s2;
-        else if (sp === d.u32(3)) b = s3;
-        else if (sp === d.u32(4)) b = s4;
-        else if (sp === d.u32(5)) b = s5;
-        else if (sp === d.u32(6)) b = s6;
-        else b = s7;
-
-        sp -= d.u32(1);
-        let a = d.f32(0.0);
-        if (sp === d.u32(0)) a = s0;
-        else if (sp === d.u32(1)) a = s1;
-        else if (sp === d.u32(2)) a = s2;
-        else if (sp === d.u32(3)) a = s3;
-        else if (sp === d.u32(4)) a = s4;
-        else if (sp === d.u32(5)) a = s5;
-        else if (sp === d.u32(6)) a = s6;
-        else a = s7;
-
-        const result = applyOp(a, b, instr.opType, instr.smoothK);
-        if (sp === d.u32(0)) s0 = result;
-        else if (sp === d.u32(1)) s1 = result;
-        else if (sp === d.u32(2)) s2 = result;
-        else if (sp === d.u32(3)) s3 = result;
-        else if (sp === d.u32(4)) s4 = result;
-        else if (sp === d.u32(5)) s5 = result;
-        else if (sp === d.u32(6)) s6 = result;
-        else s7 = result;
-        sp += d.u32(1);
-      }
-    }
-
-    return s0;
-  };
-
-  const sdSelection = (p: d.v3f): number => {
-    "use gpu";
-    return evalSelectionInstructionRange(
-      p,
-      d.u32(0),
-      selectionUniforms.$.count,
-    );
-  };
-
-  const evalPickInstructionRange = (
-    p: d.v3f,
-    start: number,
-    count: number,
-  ): number => {
-    "use gpu";
-    let s0 = d.f32(0.0);
-    let s1 = d.f32(0.0);
-    let s2 = d.f32(0.0);
-    let s3 = d.f32(0.0);
-    let s4 = d.f32(0.0);
-    let s5 = d.f32(0.0);
-    let s6 = d.f32(0.0);
-    let s7 = d.f32(0.0);
-    let sp = d.u32(0);
-
-    const end = start + count;
-    for (let i = start; i < end; i += d.u32(1)) {
-      const instr = pickInstructionsBuffer.$[i];
-
-      if (instr.opcode === d.u32(0)) {
-        const val = evalPushedShape(
-          p,
-          instr.unionOnly,
-          instr.boundCenter,
-          instr.boundRadius,
-          instr.row0,
-          instr.row1,
-          instr.row2,
-          instr.offset,
-          instr.shapeType,
-          instr.params,
-          instr.factor,
-        );
-        if (sp === d.u32(0)) s0 = val;
-        else if (sp === d.u32(1)) s1 = val;
-        else if (sp === d.u32(2)) s2 = val;
-        else if (sp === d.u32(3)) s3 = val;
-        else if (sp === d.u32(4)) s4 = val;
-        else if (sp === d.u32(5)) s5 = val;
-        else if (sp === d.u32(6)) s6 = val;
-        else s7 = val;
-        sp += d.u32(1);
-      } else if (instr.opcode === d.u32(1)) {
-        sp -= d.u32(1);
-        let b = d.f32(0.0);
-        if (sp === d.u32(0)) b = s0;
-        else if (sp === d.u32(1)) b = s1;
-        else if (sp === d.u32(2)) b = s2;
-        else if (sp === d.u32(3)) b = s3;
-        else if (sp === d.u32(4)) b = s4;
-        else if (sp === d.u32(5)) b = s5;
-        else if (sp === d.u32(6)) b = s6;
-        else b = s7;
-
-        sp -= d.u32(1);
-        let a = d.f32(0.0);
-        if (sp === d.u32(0)) a = s0;
-        else if (sp === d.u32(1)) a = s1;
-        else if (sp === d.u32(2)) a = s2;
-        else if (sp === d.u32(3)) a = s3;
-        else if (sp === d.u32(4)) a = s4;
-        else if (sp === d.u32(5)) a = s5;
-        else if (sp === d.u32(6)) a = s6;
-        else a = s7;
-
-        const result = applyOp(a, b, instr.opType, instr.smoothK);
-        if (sp === d.u32(0)) s0 = result;
-        else if (sp === d.u32(1)) s1 = result;
-        else if (sp === d.u32(2)) s2 = result;
-        else if (sp === d.u32(3)) s3 = result;
-        else if (sp === d.u32(4)) s4 = result;
-        else if (sp === d.u32(5)) s5 = result;
-        else if (sp === d.u32(6)) s6 = result;
-        else s7 = result;
-        sp += d.u32(1);
-      }
-    }
-
-    return s0;
-  };
-
-  const resolvePickObjectId = (p: d.v3f): number => {
-    "use gpu";
-    let bestId = d.u32(0);
-    let bestDist = d.f32(1e9);
-    let bestCount = d.u32(0xffffffff);
-    const n = pickUniforms.$.objectCount;
-    for (let o = d.u32(0); o < n; o += d.u32(1)) {
-      const info = pickObjectInfoBuffer.$[o];
-      const dval = evalPickInstructionRange(p, info.start, info.count);
-      const ad = std.abs(dval);
-      const closer = ad < bestDist;
-      const tiedCloser =
-        ad <= bestDist + PICK_TIE_EPS && info.count < bestCount;
-      if (closer || tiedCloser) {
-        bestDist = ad;
-        bestId = o + d.u32(1);
-        bestCount = info.count;
-      }
-    }
-    return bestId;
-  };
-
-  /**
-   * Selected shapes glow constantly, like hover. One selection-SDF eval at the
-   * scene hit (no extra march); outside the selection's sphere it is skipped.
-   */
-  const selectionGlow = (p: d.v3f): number => {
-    "use gpu";
-    if (selectionUniforms.$.enabled !== d.u32(1)) {
-      return 0.0;
-    }
-    if (selectionUniforms.$.usesSceneSdf === d.u32(1)) {
-      return 1.0; // the scene root: every surface is selected
-    }
-    if (std.length(p - selectionUniforms.$.boundsCenter) > selectionUniforms.$.boundsRadius) {
-      return 0.0;
-    }
-    return 1.0 - std.smoothstep(GLOW_BAND_LO, GLOW_BAND_HI, std.abs(sdSelection(p)));
   };
 
   const GIZMO_ARROW_LEN = 0.85;
@@ -1459,12 +470,13 @@ export function createShader(root: TgpuRoot) {
     return d.vec3f(v, v, v);
   };
 
-  // 5-tap SDF ambient occlusion (IQ style)
+  // 3-tap SDF ambient occlusion (IQ style)
   const calcAO = (p: d.v3f, n: d.v3f): number => {
     "use gpu";
     let occ = d.f32(0.0);
     let sca = d.f32(1.0);
-    for (let i = d.f32(1.0); i <= d.f32(3.0); i += d.f32(1.0)) {
+    const taps = d.f32(3 + qualityUniforms.$.zero);
+    for (let i = d.f32(1.0); i <= taps; i += d.f32(1.0)) {
       const hr = 0.01 + 0.12 * (i / 3.0);
       const dd = sdScene(p + n * hr);
       occ += (hr - dd) * sca;
@@ -1514,25 +526,36 @@ export function createShader(root: TgpuRoot) {
   const calcNormalCheap = (p: d.v3f, d0: number): d.v3f => {
     "use gpu";
     const eps = 0.001;
-    return std.normalize(
-      d.vec3f(
-        sdScene(p + d.vec3f(eps, 0.0, 0.0)) - d0,
-        sdScene(p + d.vec3f(0.0, eps, 0.0)) - d0,
-        sdScene(p + d.vec3f(0.0, 0.0, eps)) - d0,
-      ),
-    );
+    let n = d.vec3f(0.0);
+    for (let i = d.u32(0); i < d.u32(3) + qualityUniforms.$.zero; i += d.u32(1)) {
+      let e = d.vec3f(1.0, 0.0, 0.0);
+      if (i === d.u32(1)) {
+        e = d.vec3f(0.0, 1.0, 0.0);
+      } else if (i === d.u32(2)) {
+        e = d.vec3f(0.0, 0.0, 1.0);
+      }
+      n += e * (sdScene(p + e * eps) - d0);
+    }
+    return std.normalize(n);
   };
 
+  // Tetrahedral normal: taps at eps·(1,-1,-1), (-1,-1,1), (-1,1,-1), (1,1,1).
   const calcNormal = (p: d.v3f): d.v3f => {
     "use gpu";
     const eps = 0.001;
-    const k = d.vec2f(1.0, -1.0);
-    return std.normalize(
-      d.vec3f(k.x, k.y, k.y) * sdScene(p + d.vec3f(eps, -eps, -eps)) +
-        d.vec3f(k.y, k.y, k.x) * sdScene(p + d.vec3f(-eps, -eps, eps)) +
-        d.vec3f(k.y, k.x, k.y) * sdScene(p + d.vec3f(-eps, eps, -eps)) +
-        d.vec3f(k.x, k.x, k.x) * sdScene(p + d.vec3f(eps, eps, eps)),
-    );
+    let n = d.vec3f(0.0);
+    for (let i = d.u32(0); i < d.u32(4) + qualityUniforms.$.zero; i += d.u32(1)) {
+      let e = d.vec3f(1.0, 1.0, 1.0);
+      if (i === d.u32(0)) {
+        e = d.vec3f(1.0, -1.0, -1.0);
+      } else if (i === d.u32(1)) {
+        e = d.vec3f(-1.0, -1.0, 1.0);
+      } else if (i === d.u32(2)) {
+        e = d.vec3f(-1.0, 1.0, -1.0);
+      }
+      n += e * sdScene(p + e * eps);
+    }
+    return std.normalize(n);
   };
 
   const rayMarch = (ro: d.v3f, rd: d.v3f): d.v2f => {
@@ -1579,17 +602,6 @@ export function createShader(root: TgpuRoot) {
     return 1.0 - std.clamp(std.abs(coord) / std.max(w, 0.0001), 0.0, 1.0);
   };
 
-  /** How much hover slot `pickId` glows at surface point `p` (its own SDF ~ 0 there). */
-  const hoverGlow = (p: d.v3f, pickId: number, strength: number): number => {
-    "use gpu";
-    if (pickId === d.u32(0) || strength <= 0.001) {
-      return 0.0;
-    }
-    const info = pickObjectInfoBuffer.$[pickId - d.u32(1)];
-    const dObj = evalPickInstructionRange(p, info.start, info.count);
-    return (1.0 - std.smoothstep(GLOW_BAND_LO, GLOW_BAND_HI, std.abs(dObj))) * strength;
-  };
-
   const rot2D = (angle: number): d.m2x2f => {
     "use gpu";
     const c = std.cos(angle);
@@ -1601,8 +613,8 @@ export function createShader(root: TgpuRoot) {
     "use gpu";
 
     const pickPass = pickUniforms.$.pickPass;
-    const isScenePickPass = pickPass === d.u32(1);
-    const isGizmoPickPass = pickPass === d.u32(2);
+    const isScenePickPass = pickPass === d.u32(PICK_PASS_SCENE);
+    const isGizmoPickPass = pickPass === d.u32(PICK_PASS_GIZMO);
     const sampleUv = d.vec2f(uv.x, uv.y);
     const uvn = sampleUv * 2.0 - d.vec2f(1.0, 1.0);
     const uvCorrected = d.vec2f(uvn.x * cameraUniforms.$.aspect, uvn.y);
@@ -1653,20 +665,23 @@ export function createShader(root: TgpuRoot) {
       return d.vec4f(idNorm, idNorm, idNorm, 1.0);
     }
 
+    // One march serves the pick pass and the image: each call site inlines
+    // the generated scene SDF again.
+    const sceneResult = rayMarch(ro, rd);
+    const tScene = sceneResult.x;
+
     if (isScenePickPass) {
-      const tPick = rayMarch(ro, rd).x;
+      const tPick = tScene;
       if (tPick > RAY_MISS_T) {
         return d.vec4f(0.0, 0.0, 0.0, 0.0);
       }
       const hitP = ro + rd * tPick;
-      const pickId = resolvePickObjectId(hitP);
-      const idf = d.f32(pickId);
-      const idNorm = idf / 255.0;
-      return d.vec4f(idNorm, idNorm, idNorm, 1.0);
+      // 16-bit id; low byte in R and B so BGRA and RGBA targets read the same.
+      const id = sceneInfoSlot.$(hitP).y;
+      const hi = std.floor(id / 256.0);
+      const lo = (id - hi * 256.0) / 255.0;
+      return d.vec4f(lo, hi / 255.0, lo, 1.0);
     }
-
-    const sceneResult = rayMarch(ro, rd);
-    const tScene = sceneResult.x;
 
     const sceneHit = tScene <= RAY_MISS_T;
 
@@ -1740,12 +755,10 @@ export function createShader(root: TgpuRoot) {
 
       // Glow: a soft fresnel rim on selected shapes (constant) and on the
       // hovered one (cross-fading with the one just left); fades across joins.
-      const glow = std.min(
-        selectionGlow(pos) +
-          hoverGlow(pos, hoverUniforms.$.pickId, hoverUniforms.$.strength) +
-          hoverGlow(pos, hoverUniforms.$.prevPickId, hoverUniforms.$.prevStrength),
-        1.0,
-      );
+      let glow = sceneInfoSlot.$(pos).x;
+      if (sceneUniforms.$.selectAll === d.u32(1)) {
+        glow = d.f32(1.0);
+      }
       if (glow > 0.0) {
         const rim = std.pow(1.0 - std.max(std.dot(N, viewDir), 0.0), 2.5);
         col = col + d.vec3f(0.55, 0.66, 0.85) * ((rim * 0.5 + 0.1) * glow);
@@ -1790,25 +803,39 @@ export function createShader(root: TgpuRoot) {
     return d.vec4f(col, 1.0);
   };
 
-  const pipeline = root.createRenderPipeline({
-    vertex: fullScreenTriangle,
-    fragment,
-  });
+  /**
+   * Render pipeline for one compiled scene (sceneCompiler.ts `code`). The
+   * caller owns caching and async init; buffers above are shared by all.
+   */
+  function createScenePipeline(code: string) {
+    const decl = tgpu["~unstable"].declare(code).$uses({
+      [DATA_IDENT]: sceneData,
+      [IMAGE_TEX_IDENT]: imageSdfView,
+      [IMAGE_SAMPLER_IDENT]: imageSdfSampler,
+    });
+    const sdf = tgpu.fn([d.vec3f], d.f32)`(p) { DS_SCENE return ds_sdScene(p); }`.$uses({
+      DS_SCENE: decl,
+    });
+    const info = tgpu.fn([d.vec3f], d.vec4f)`(p) { DS_SCENE return ds_sceneInfo(p); }`.$uses({
+      DS_SCENE: decl,
+    });
+    return root
+      .with(sceneSdfSlot, sdf)
+      .with(sceneInfoSlot, info)
+      .createRenderPipeline({
+        vertex: fullScreenTriangle,
+        fragment,
+      });
+  }
 
   return {
-    pipeline,
+    createScenePipeline,
     cameraUniforms,
     sceneUniforms,
-    selectionUniforms,
     gizmoUniforms,
-    instructionsBuffer,
-    objectInfoBuffer,
-    selectionInstructionsBuffer,
-    pickInstructionsBuffer,
-    pickObjectInfoBuffer,
     pickUniforms,
-    hoverUniforms,
     qualityUniforms,
+    sceneData,
     imageSdfTexture,
   };
 }
