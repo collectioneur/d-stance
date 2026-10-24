@@ -1,6 +1,6 @@
 # d-stance
 
-Browser-only 3D SDF editor. No backend. Scene is a CSG tree (shapes + groups + boolean ops). CPU bakes each shape into one inverse affine map, packs a flat instruction buffer, GPU raymarches it in a fullscreen TypeGPU fragment shader.
+Browser-only 3D SDF editor. No backend. Scene is a CSG tree (shapes + groups + boolean ops). CPU bakes each shape into one inverse affine map; the scene compiler turns the tree's structure into WGSL and its numbers into a uniform value buffer; a fullscreen TypeGPU fragment shader raymarches the generated SDF.
 
 Stack: React 19, Vite, TypeScript (`tsover` 5.9 — workspace TS, not the editor builtin), TypeGPU 0.12, Zustand + zundo.
 
@@ -11,24 +11,25 @@ Agents break this repo by desyncing **cross-file contracts**, not by missing a T
 | Touching | Read first |
 |---|---|
 | TypeGPU / `"use gpu"` | `.agents/skills/typegpu`. Never guess APIs. After GPU edits: `npm run inspect:gpu`. |
-| New or changed primitive | `src/store/sceneStore.ts` + `src/gpu/shader.ts` (`SHAPE_TYPE_INT`, `sd*`, dispatch switch) + `src/utils/generateSdfCode.ts` + `src/utils/commands.ts` |
+| New or changed primitive | `src/store/sceneStore.ts` + `src/sdf/primitives.ts` (WGSL / GLSL / TypeGPU source + `primitiveCall`) + `src/gpu/bounds.ts` (`shapeBoundRadius`) + `src/utils/commands.ts` |
 | Transforms, gizmo, scale | `src/gpu/bake.ts` (composition order), `src/gpu/gizmo.ts` |
 | Tree / DnD / add / remove | `src/scene/arboristAdapter.ts`, `countInstructions`, caps in `sceneStore.ts` |
-| Instruction layout / opcodes / SDF eval | `src/gpu/shader.ts` **and** packer in `src/gpu/useGpu.ts` |
+| Scene SDF codegen / culling / pick / highlight | `src/gpu/sceneCompiler.ts` (+ its tests) and the program cache in `src/gpu/useGpu.ts` |
 | Save / load / URL hash | `src/store/persistence.ts` (`SCHEMA_VERSION`, `normalizePersisted`) |
 | Quality presets | `src/utils/quality.ts` (`assertQualityInvariants`) |
 | UI | Changed flow in the browser. Screenshot ≠ verification. |
 
-Do not open `src/gpu/shader.ts` (~1700 lines) unless the task needs it. Do not “clean up” it while doing something else.
+`src/gpu/shader.ts` is the fixed part of the renderer (camera, shading, grid, gizmo). Do not open it unless the task needs it. Do not “clean up” it while doing something else.
 
 ## Data flow
 
 ```
 sceneStore (CSG tree)
-  → useGpu.ts packs instructions (bake.ts per shape)
-  → shader.ts raymarches Instruction[]
+  → sceneCompiler.ts: structure → WGSL (ds_sdScene, ds_sceneInfo), numbers → Float32Array (bake.ts per shape)
+  → useGpu.ts: code string → cached pipeline (initAsync, off the critical path); values → uniform buffer
+  → shader.ts raymarches through two slots filled with the generated functions
   → persistence.ts writes hash + localStorage
-  → generateSdfCode.ts exports the same tree as TypeGPU / WGSL / GLSL
+  → generateSdfCode.ts exports the same tree as TypeGPU / WGSL / GLSL (same primitive sources)
 ```
 
 Selection lives on the store (`selectedItemId`, `selectedContainerId`, `rootSelected`). Undo/redo (`undoScene` / `redoScene`) clears selection back to the scene root.
@@ -42,26 +43,27 @@ These are the things that silently black-screen, clip the CSG, or lose the user�
 A shape is not registered until **all** of these know it, with the same key:
 
 - `ShapeType` + `DEFAULT_PARAMS` + `TYPE_LABEL` in `sceneStore.ts`
-- `SHAPE_TYPE_INT` in `shader.ts` — unique dense ints `0..n-1`
-- `sd*` primitive + dispatch `switch` in `shader.ts`
-- TypeGPU / WGSL / GLSL emitters in `generateSdfCode.ts`
+- `TG_HELPERS` / `WGSL_HELPERS` / `GLSL_HELPERS` and `primitiveCall` in `src/sdf/primitives.ts` — one source per language, used by both the viewport (compiled scene) and the export. `primitiveCall`'s switch has no default, so `tsc` catches a missing arm.
+- `shapeBoundRadius` in `src/gpu/bounds.ts` — a too-small radius makes culling cut the shape off.
 - `SHAPE_ICONS` in `commands.ts` (`Record<ShapeType, …>` will fail typecheck if an icon is missing; toolbar `SHAPES` vs palette `EXTRA_SHAPES` is a separate product choice). Icons are generated: add the shape to `icons` in `scripts/gen-shape-icons.mjs`, run `node scripts/gen-shape-icons.mjs`
+- `e2e/scenes.ts` `SHAPES` (render tests) and `src/test/fixtures.ts` `kitchenSink` (codegen snapshot + compile test).
 
-Adding a shape without codegen or without a GPU case is a shippable bug. TypeScript will not notice a missing `switch` arm if there is a default.
+### 2. Compiled scene
 
-### 2. Instruction stream
+`compileScene(root)` (sceneCompiler.ts) returns `{ code, values, leafIds, markIndex }`.
 
-Packed by `useGpu.ts`, consumed by `shader.ts`. Both sides must stay in lockstep.
-
-- Opcodes: `OPCODE_PUSH_SHAPE = 0`, `OPCODE_OP = 1`
-- Ops: `OP_TYPE_INT` (`union`…`sIntersect` = 0…5)
-- `Instruction` is **112 bytes**. Fields and `_pad*` exist for WGSL alignment. Do not reorder, drop pads, or pack extra fields without updating the CPU writer and every empty-instruction filler.
-- GPU eval: `q = (row0·p, row1·p, row2·p) + offset`, `dist = sd(q, params) * factor`
-- `countInstructions(tree)` must match the length of the packed stream (excluding the pad-to-`MAX_INSTRUCTIONS` tail). If they drift, the cap lies and the GPU reads garbage or clips the scene.
+- **Code is the cache key.** Equal code ⇔ equal value layout. Anything that changes slot allocation or emitted statements must be reflected in the code string, or a cached program reads the wrong slots. Structure (node kinds, shape types, ops, image presence, chunking) goes into code; numbers never do — a slider drag must not recompile.
+- Values are vec4f slots in `dsData` (uniform, `DATA_SLOTS` = 4096 = 64 KiB). Leaf: 3 rows (+offset in `.w`), params, misc `(factor, smoothK, highlight, _)`, bound sphere, image extras. Group: misc, bound. Chunk: bound.
+- GPU eval per leaf: `q = (row0·p, row1·p, row2·p) + offset`, `dist = sd(q, params) * factor`.
+- Culling: union / sUnion siblings are gated by their bounding sphere against the running result (`bound < acc (+k)`); subtract / intersect children always evaluate. The head of a list may stand in its sphere beyond `CULL_DIST` only if every op up to the root is hard union. Long hard-union runs are split into list-order chunks (positions never change the code). A bound radius that is too small silently clips geometry — see `bounds.ts`.
+- `ds_sceneInfo` (evaluated once per pixel at the hit) gives highlight glow and the pick id. Pick ids are 16-bit: low byte in R and B, high byte in G (`readPickIdFromBytes`).
+- Generated helpers are prefixed `ds_` so they cannot collide with names TypeGPU generates.
+- The program on screen keeps its own `CompiledScene`: values are uploaded only when they match the active program; pick ids resolve against the program that drew them.
+- Frames are drawn only when an input changed (camera, size, values, program, gizmo mode, images). Anything new that changes the image must feed that signature in `frame()`.
 
 Group/layer transforms are **not** a GPU stack. They are baked on the CPU (`bake.ts`) into `row0/1/2`, `offset`, `factor`.
 
-Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` are shared by `imageSdf.ts`, `shader.ts` (`sdImage`) and `generateSdfCode.ts` (`sdImageField`); change one, change all. GPU `params.w` packs `round·1000/IMAGE_ROUND_STEP + invert·100 + layer` (`packImageParams` in `useGpu.ts`); the layer's own `params[3]` is the plain invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`). Slots are assigned per distinct `image.sdf` string by `syncImageSlots` before every pack.
+Shape `image` samples a baked 2D SDF (`src/utils/imageSdf.ts`) from an `r16float` `texture_2d_array` (`IMAGE_SDF_RES`², `MAX_IMAGES` layers). The PNG stores 16 bits as coarse `.r` + residual `.g` (`IMAGE_SDF_STEP_PX`); `decodeSdfPng` reassembles to f16 for the app, exported code reassembles per tap. Texel→distance mapping and the outside-the-square bound `√(dBox² + dEdge²)` live in `sdImageField` (`src/sdf/primitives.ts`, shared by viewport and export) and `imageSdf.ts`; change one, change both. The layer's `params[3]` is the invert flag and the rounding radius lives in `image.round` (optional, default 0, ≤ `IMAGE_ROUND_MAX`); the compiler writes `(round, invert, layer, hasImage)` into the leaf's extra slot. Texture layers are assigned per distinct `image.sdf` string by `syncImageSlots` before every compile.
 
 ### 3. Bake math
 
@@ -95,11 +97,9 @@ Losing a scene is data loss. Treat persist mistakes like a security bug.
 
 | Cap | Value | Meaning |
 |---|---|---|
-| `MAX_INSTRUCTIONS` | 256 | Scene CSG instruction budget |
+| `MAX_INSTRUCTIONS` | 256 | Scene size budget (`countInstructions`: shapes + ops) |
 | `MAX_TRANSFORM_DEPTH` | 16 | Nested group depth |
-| `MAX_GPU_OBJECTS` | 8 | `objectInfo` slots; scene render uses root slot `[0]` |
-| `MAX_PICK_OBJECTS` | 255 | Pick IDs fit in one byte (`1–255`) |
-| `MAX_PICK_INSTRUCTIONS` | 1024 | Separate pick CSG buffer |
+| `DATA_SLOTS` | 4096 | vec4f value slots (64 KiB uniform); `countDataSlots` stays far below it inside `MAX_INSTRUCTIONS` |
 | `MAX_IMAGES` | 8 | Distinct image SDFs per scene (texture array layers) |
 
 UI toasts exist for cap / cycle / depth. Do not raise a cap in one file and leave the others.
@@ -129,8 +129,8 @@ Pitfalls:
 ## Do not
 
 - Guess TypeGPU APIs or WGSL alignment.
-- Reorder / pad-strip `Instruction` or change opcodes without updating `useGpu.ts` in the same change.
-- Raise or bypass caps without updating packer, shader array sizes, UI toasts, and this file.
+- Put a per-scene number into generated code (recompiles on every drag) or change slot layout without changing the code string.
+- Raise or bypass caps without updating the compiler budget test, UI toasts, and this file.
 - Bump or skip `SCHEMA_VERSION` “just in case”.
 - Refactor `shader.ts` as a drive-by.
 - Delete `assertBakeParity` / `assertQualityInvariants`.
@@ -139,8 +139,8 @@ Pitfalls:
 ## After a change
 
 1. `npx tsc -b` (same check as `npm run build`).
-2. `npm test` (Vitest unit tests, `src/**/*.test.ts`). If you touched bake / quality / persist / instruction packing / shape registry: keep the import-time asserts (`assertBakeParity`, `assertQualityInvariants`) and add a test next to the module. Kitchen-sink fixtures live in `src/test/fixtures.ts`; codegen output is snapshot-tested (update snapshots only for intended output changes: `npx vitest run -u`).
-3. GPU files (`shader.ts`, `bake.ts`, `useGpu.ts`): `npm run inspect:gpu` (Chromium/WebGPU compiles the raymarch pipeline). `tsc` does not compile WGSL. MCP tool: `typegpu_inspector` → `inspect_typegpu` on `src/gpu/shader.inspect.ts`. Then confirm the canvas is not black.
+2. `npm test` (Vitest unit tests, `src/**/*.test.ts`). If you touched bake / quality / persist / scene compiler / shape registry: keep the import-time asserts (`assertBakeParity`, `assertQualityInvariants`) and add a test next to the module. Kitchen-sink fixtures live in `src/test/fixtures.ts`; codegen output is snapshot-tested (update snapshots only for intended output changes: `npx vitest run -u`).
+3. GPU files (`shader.ts`, `sceneCompiler.ts`, `bake.ts`, `useGpu.ts`): `npm run inspect:gpu`, then the e2e suite — it compiles real generated programs. `tsc` does not compile WGSL. MCP tool: `typegpu_inspector` → `inspect_typegpu` on `src/gpu/shader.inspect.ts` (compiles a kitchen-sink scene). Perf: `PW_TOOLS=1 npx playwright test tools/bench`; render parity vs a baseline branch: `tools/golden` + `tools/parity`.
 4. `npm run test:e2e` (Playwright, `e2e/`). Headless Chromium runs real WebGPU (Metal on macOS); helpers in `e2e/helpers.ts` load a scene through the hash, wait for `canvas[data-ready]`, and measure canvas pixels with the UI hidden. Exported WGSL/GLSL is compiled by the browser in `e2e/export.spec.ts`. Dev builds expose `window.__dstance` (store + scene) for tests.
 5. UI: exercise the changed flow in the browser (click/type/drag). Check the other surfaces that read the same store (tree, inspector, gizmo, code export, hash after reload).
 6. New persist field: load an old `v: 4` blob and a blob missing the field.

@@ -9,6 +9,8 @@ const PORT = 5174;
 
 export default defineConfig({
   testDir: "e2e",
+  // Perf / golden-image tools run on demand: PW_TOOLS=1 npx playwright test tools
+  testIgnore: process.env.PW_TOOLS ? [] : ["**/tools/**"],
   timeout: 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,
