@@ -3,7 +3,7 @@
  * export so both make the same decisions (neighbor cells, Lipschitz factors,
  * bounds). Spheres are (center, radius) in the space a modifier list acts in.
  */
-import type { Axis, Modifier, Vec3 } from "../store/modifiers";
+import { scatterActive, type Axis, type Modifier, type Scatter, type Vec3 } from "../store/modifiers";
 
 /** Bound radius standing in for "unbounded" (infinite repetition). */
 export const UNBOUNDED = 1e5;
@@ -33,6 +33,7 @@ export function planeAxes(kind: "polar" | "twist" | "bend", a: Axis): [Axis, Axi
 export function expandThrough(m: Modifier, c: Vec3, r: number): { c: Vec3; r: number } {
   switch (m.kind) {
     case "repeat": {
+      ({ c, r } = scatterSphere(m, c, r));
       if (m.count.some((n) => n === 0)) return { c, r: UNBOUNDED };
       const half = m.spacing.map((s, a) => (s * Math.max(0, m.count[a] - 1)) / 2);
       return { c, r: r + Math.hypot(half[0], half[1], half[2]) };
@@ -86,6 +87,50 @@ export function deformLipschitz(m: Modifier, c: Vec3, r: number): number {
  * result is a true distance wherever it matters, so soft shadows see no
  * phantom occluders, and usually one copy is evaluated.
  */
+
+/**
+ * A repeat's copy sphere (c, r in its output space) once scattered: each
+ * copy may move by up to the jitter, and turn and grow about its cell's
+ * center.
+ */
+export function scatterSphere(m: Extract<Modifier, { kind: "repeat" }>, c: Vec3, r: number): { c: Vec3; r: number } {
+  if (!scatterActive(m.scatter) || r >= UNBOUNDED) return { c, r };
+  const s = m.scatter;
+  return { c: [0, 0, 0], r: (Math.hypot(c[0], c[1], c[2]) + r) * (1 + s.size) + Math.hypot(s.jitter[0], s.jitter[1], s.jitter[2]) };
+}
+
+/** PCG hash (u32), bit-identical to the shaders' scatterHash. */
+function pcgHash(v: number): number {
+  const s = (Math.imul(v >>> 0, 747796405) + 2891336453) >>> 0;
+  const w = Math.imul(((s >>> ((s >>> 28) + 4)) ^ s) >>> 0, 277803737) >>> 0;
+  return ((w >>> 22) ^ w) >>> 0;
+}
+
+/** A copy's hash, like the shaders' scatterBase. */
+function scatterBase(id: Readonly<Vec3>, seed: number): number {
+  const [x, y, z] = id.map((v) => Math.round(v * 2) >>> 0);
+  return pcgHash(x ^ pcgHash(y ^ pcgHash(z ^ pcgHash(seed >>> 0))));
+}
+
+/** Value k of a copy's sequence in [−1, 1] (0–2 move, 3–5 turn, 6 size), like scatterValue. */
+function scatterValue(base: number, k: number): number {
+  return ((pcgHash((base + k) >>> 0) >>> 8) / 16777215) * 2 - 1;
+}
+
+/**
+ * The copy in cell `id` (copy indices, as repeatCell gives them) of a
+ * scattered repeat, as the shaders place it: moved by `offset`, turned by
+ * `rotation` (degrees, Euler XYZ) about its cell's center, scaled by
+ * `size`. For tests and tools; the shaders compute the same per point.
+ */
+export function scatterCopy(s: Scatter, id: Readonly<Vec3>): { offset: Vec3; rotation: Vec3; size: number } {
+  const b = scatterBase(id, s.seed);
+  return {
+    offset: [0, 1, 2].map((k) => scatterValue(b, k) * s.jitter[k]) as Vec3,
+    rotation: [0, 1, 2].map((k) => scatterValue(b, 3 + k) * s.spin[k]) as Vec3,
+    size: 1 + scatterValue(b, 6) * s.size,
+  };
+}
 
 /** Per axis, how far a repeat's copies stay inside their cell (sphere c, r in its output space). */
 export function repeatGap(m: Extract<Modifier, { kind: "repeat" }>, c: Vec3, r: number): Vec3 {
@@ -147,6 +192,15 @@ export interface ModifierPlan {
   polar: (PolarReach | null)[];
   /** Per modifier (same order): repeatGap / polarGap, else null. */
   gap: (Vec3 | [number, number] | null)[];
+  /**
+   * Per modifier (same order), for a repeat whose copies leave their cells
+   * on a repeated axis (negative gap): the cells around a point it checks,
+   * per axis 1 (one copy: stay), 2 (stay, toward the point) or 3 (also away);
+   * null when the cells toward the point are enough (repeatStep).
+   */
+  ring: (Vec3 | null)[];
+  /** Per modifier (same order): a scattered repeat's unscattered copy reach (|center| + radius), else null. */
+  reach: (number | null)[];
   /** Per modifier (same order): a repeat's / polar's copy's bounding sphere in its output space, else null. */
   copy: ({ c: Vec3; r: number } | null)[];
   /** Combined 1 / Lipschitz of the deformations (twist, bend). */
@@ -164,12 +218,18 @@ export function planPointModifiers(point: Modifier[], c: Vec3, r: number): Modif
   const polar: ModifierPlan["polar"] = point.map(() => null);
   const gap: ModifierPlan["gap"] = point.map(() => null);
   const copy: ModifierPlan["copy"] = point.map(() => null);
+  const ring: ModifierPlan["ring"] = point.map(() => null);
+  const reach: ModifierPlan["reach"] = point.map(() => null);
   let invL = 1;
   for (let i = point.length - 1; i >= 0; i--) {
     const m = point[i];
     if (m.kind === "repeat") {
-      copy[i] = { c: [...c] as Vec3, r };
-      gap[i] = repeatGap(m, c, r);
+      const scattered = scatterSphere(m, c, r);
+      copy[i] = { c: [...scattered.c] as Vec3, r: scattered.r };
+      const g = repeatGap(m, scattered.c, scattered.r);
+      gap[i] = g;
+      if (g.some((v, a) => m.count[a] !== 1 && v < 0)) ring[i] = m.count.map((n, a) => (n === 1 ? 1 : g[a] < 0 ? 3 : 2)) as Vec3;
+      if (scatterActive(m.scatter)) reach[i] = Math.hypot(c[0], c[1], c[2]) + r;
     }
     if (m.kind === "polar") {
       // Polar bounds work in the sector's frame, before the radius shift.
@@ -181,5 +241,5 @@ export function planPointModifiers(point: Modifier[], c: Vec3, r: number): Modif
     invL /= deformLipschitz(m, c, r);
     ({ c, r } = expandThrough(m, c, r));
   }
-  return { polar, gap, copy, invL, c, r };
+  return { polar, gap, copy, ring, reach, invL, c, r };
 }

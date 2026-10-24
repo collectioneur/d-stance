@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { MAX_MODIFIERS, activeModifiers, createModifier, sanitizeModifier, sanitizeModifiers } from "./modifiers";
+import { MAX_MODIFIERS, activeModifiers, createModifier, sanitizeModifier, sanitizeModifiers, scatterActive } from "./modifiers";
 
 describe("modifiers", () => {
   test("every kind has a default that survives sanitizing", () => {
@@ -48,6 +48,20 @@ describe("modifiers", () => {
   test("a new mirror puts the item and its reflection just apart", () => {
     const m = createModifier("mirror", 0.4);
     expect(m.kind === "mirror" && m.offset[0]).toBe(0.4);
+  });
+
+  test("scatter is clamped like the rest; repeats without it do not vary", () => {
+    expect(
+      sanitizeModifier({ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1], scatter: { jitter: [-1, 0.2, "x"], spin: [400, 30, 0], size: 2, seed: 3.7 } }),
+    ).toEqual({
+      kind: "repeat",
+      spacing: [1, 1, 1],
+      count: [3, 1, 1],
+      scatter: { jitter: [0, 0.2, 0], spin: [180, 30, 0], size: 0.9, seed: 4 },
+    });
+    expect(sanitizeModifier({ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 1], scatter: "lots" })).not.toHaveProperty("scatter");
+    expect(scatterActive({ jitter: [0, 0, 0], spin: [0, 0, 0], size: 0, seed: 9 })).toBe(false);
+    expect(scatterActive({ jitter: [0, 0, 0], spin: [0, 5, 0], size: 0, seed: 0 })).toBe(true);
   });
 
   test("lists are capped and empty lists vanish", () => {

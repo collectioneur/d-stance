@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { expandThrough, planPointModifiers, polarGap, polarReach, repeatGap } from "./modifierMath";
+import { expandThrough, planPointModifiers, polarGap, polarReach, repeatGap, scatterCopy, scatterSphere } from "./modifierMath";
 
 const polar = (count: number, axis: 0 | 1 | 2 = 1, radius = 0) => ({ kind: "polar" as const, count, axis, radius });
 
@@ -49,6 +49,40 @@ describe("polar radius", () => {
   test("copies moved off the axis need only the nearest three", () => {
     expect(planPointModifiers([polar(6)], [0, 0, 0], 0.5).polar).toEqual(["all"]);
     expect(planPointModifiers([polar(6, 1, 2)], [0, 0, 0], 0.5).polar).toEqual(["near"]);
+  });
+});
+
+describe("scatter", () => {
+  const sc = { jitter: [0.2, 0.1, 0] as [number, number, number], spin: [30, 0, 10] as [number, number, number], size: 0.25, seed: 7 };
+  const rep = { kind: "repeat" as const, spacing: [2, 2, 2] as [number, number, number], count: [4, 1, 1] as [number, number, number], scatter: sc };
+
+  test("a scattered copy's sphere covers every move, turn and size about its cell", () => {
+    const out = scatterSphere(rep, [0.1, 0, 0], 0.4);
+    expect(out.c).toEqual([0, 0, 0]);
+    expect(out.r).toBeCloseTo(0.5 * 1.25 + Math.hypot(0.2, 0.1));
+    expect(scatterSphere({ ...rep, scatter: undefined }, [0.1, 0, 0], 0.4)).toEqual({ c: [0.1, 0, 0], r: 0.4 });
+  });
+
+  test("copies scattered out of their cells check the whole ring of cells", () => {
+    expect(planPointModifiers([{ ...rep, scatter: undefined }], [0, 0, 0], 0.4).ring).toEqual([null]);
+    // Out on x (stay, toward, away); y and z have one copy each (stay).
+    expect(planPointModifiers([{ ...rep, scatter: { ...sc, jitter: [0.9, 0, 0] } }], [0, 0, 0], 0.4).ring).toEqual([[3, 1, 1]]);
+    // Only repeated axes count.
+    expect(planPointModifiers([{ ...rep, scatter: undefined }], [0, 0, 0], 0.9).ring).toEqual([null]);
+  });
+
+  test("each cell gets its own copy, the same every time, within the limits", () => {
+    const ids: [number, number, number][] = [[-1.5, 0, 0], [-0.5, 0, 0], [0.5, 0, 0], [1.5, 0, 0]];
+    const copies = ids.map((id) => scatterCopy(sc, id));
+    expect(scatterCopy(sc, [0.5, 0, 0])).toEqual(copies[2]);
+    // Half-integer cells (even counts) do not collide.
+    expect(new Set(copies.map((c) => c.size)).size).toBe(4);
+    for (const c of copies) {
+      c.offset.forEach((v, i) => expect(Math.abs(v)).toBeLessThanOrEqual(sc.jitter[i]));
+      c.rotation.forEach((v, i) => expect(Math.abs(v)).toBeLessThanOrEqual(sc.spin[i]));
+      expect(Math.abs(c.size - 1)).toBeLessThanOrEqual(sc.size);
+    }
+    expect(scatterCopy({ ...sc, seed: 8 }, [0.5, 0, 0])).not.toEqual(copies[2]);
   });
 });
 

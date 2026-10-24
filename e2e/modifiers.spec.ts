@@ -133,6 +133,25 @@ test.describe("modifiers", () => {
     expect((await imageDiff(page, ring, byHand)).over16).toBeLessThan(0.002);
   });
 
+  test("a scattered repeat matches copies moved, turned and scaled by hand", async ({ page }) => {
+    // The CPU mirror of the shaders' hash (scatterCopy) places the copies by
+    // hand: same cells, same moves, same turns (Euler XYZ), same sizes.
+    const cone = (extra: Record<string, unknown>) => sphere({ shapeType: "cone", name: "Cone", params: [0.3, 0.5, 0, 0], ...extra });
+    const scatter = { jitter: [0.2, 0.2, 0.2], spin: [30, 60, 20], size: 0.3, seed: 7 };
+    const scattered = await shot(page, [cone({ id: "c", modifiers: [{ kind: "repeat", spacing: [1.5, 1.5, 1.5], count: [3, 1, 1], scatter }] })]);
+    const copies = await page.evaluate(async (sc) => {
+      const { scatterCopy } = await import("/src/sdf/modifierMath.ts");
+      return [-1, 0, 1].map((i) => ({ i, ...scatterCopy(sc as never, [i, 0, 0]) }));
+    }, scatter);
+    const byHand = await shot(
+      page,
+      copies.map(({ i, offset, rotation, size }) =>
+        cone({ id: `c${i + 1}`, position: [1.5 * i + offset[0], offset[1], offset[2]], rotation, scale: [size, size, size] }),
+      ),
+    );
+    expect((await imageDiff(page, scattered, byHand)).over16).toBeLessThan(0.002);
+  });
+
   test("an infinite grid renders to the horizon", async ({ page }) => {
     const errors = await openEditor(page, infiniteScene() as never);
     await waitForProgram(page);

@@ -18,7 +18,7 @@ import {
   WGSL_HELPERS,
   primitiveCall,
 } from "../sdf/primitives";
-import { POINT_MODIFIERS, activeModifiers, type Modifier } from "../store/modifiers";
+import { POINT_MODIFIERS, activeModifiers, scatterActive, type Modifier } from "../store/modifiers";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { polarShift, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 
@@ -92,7 +92,7 @@ type PolarMod = Extract<Modifier, { kind: "polar" }>;
 /** The copies a repeat / polar repeat loops over (see withMods). */
 type CopySphere = { c: V3; r: number };
 type Copies =
-  | { kind: "repeat"; mod: RepeatMod; gap: V3; copy: CopySphere }
+  | { kind: "repeat"; mod: RepeatMod; gap: V3; copy: CopySphere; ring: V3 | null; reach: number | null }
   | { kind: "polar"; mod: PolarMod; reach: PolarReach; gap: [number, number]; copy: CopySphere };
 
 type Stmt =
@@ -210,7 +210,7 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
     // Same loops as the viewport's withSteps (branch and bound over copies).
     const copies: Copies | null =
       m.kind === "repeat"
-        ? { kind: "repeat", mod: m, gap: plan.gap[i] as V3, copy: plan.copy[i]! }
+        ? { kind: "repeat", mod: m, gap: plan.gap[i] as V3, copy: plan.copy[i]!, ring: plan.ring[i], reach: plan.reach[i] }
         : m.kind === "polar"
           ? { kind: "polar", mod: m, reach: plan.polar[i]!, gap: plan.gap[i] as [number, number], copy: plan.copy[i]! }
           : null;
@@ -220,7 +220,9 @@ function buildIr(root: SceneRoot, selectedItemId: string | null): Ir {
       const outer = sink;
       const loopBody: Stmt[] = [];
       sink = loopBody;
-      const result = withMods(point, plan, i + 1, inner, unit, body);
+      // Scattered copies can shrink: nested bounds use the smallest they get.
+      const innerUnit = m.kind === "repeat" && scatterActive(m.scatter) ? unit * (1 - m.scatter.size) : unit;
+      const result = withMods(point, plan, i + 1, inner, innerUnit, body);
       sink = outer;
       if (!result) return null;
       emit({ t: "loop", acc, from: q, point: inner, copies, unit, body: loopBody, result });
@@ -457,6 +459,8 @@ interface Syntax {
   vec3Expr(c: readonly string[]): string;
   uint(n: number): string;
   loopOpen(n: string, count: number): string;
+  /** Small per-axis counts, as the repeatRing radix argument. */
+  radix3(v: Readonly<V3>): string;
   helpers: {
     shapes: Record<ShapeType, string>;
     rot: string;
@@ -579,19 +583,38 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         const lo = `lo${k}`;
         let count: number;
         let copy: string;
+        // A repeat candidate's step, computed once per candidate.
+        let step: string | null = null;
         // Nearest copy first; see the viewport's SceneCompiler.nearest.
         let near: { others: string; bound: string; far: string } | null = null;
+        // Scatter: a copy's own sphere, its frame and the factor its distance takes.
+        let scatter: { bound: (q: string) => string; point: (q: string) => string; size: string } | null = null;
         if (c.kind === "repeat") {
           const [sp, cnt, gap] = [c.mod.spacing, c.mod.count, c.gap].map((v) => syn.vec3(v));
           const sphere = syn.vec4(c.copy.c, c.copy.r);
           const cell = `cell${k}`;
           push(syn.pointStmt(cell, `repeatCell(${stmt.from}, ${sp}, ${cnt})`));
-          count = 8;
-          copy = `opRepeatNear(${stmt.from}, ${sp}, ${cell}, ${n})`;
+          // Candidates: the cells toward q (repeatStep), or the ring of cells
+          // around it, ring[k] choices per axis (repeatRing).
+          const st = `st${k}`;
+          count = c.ring ? c.ring[0] * c.ring[1] * c.ring[2] : 8;
+          step = c.ring ? `repeatRing(${n}, ${syn.radix3(c.ring)})` : `repeatStep(${n})`;
+          copy = `opRepeatNear(${stmt.from}, ${sp}, ${cell}, ${st})`;
+          const sc = c.mod.scatter;
+          if (scatterActive(sc)) {
+            const id = `opRepeatNearId(${stmt.from}, ${sp}, ${cell}, ${st})`;
+            const jitter = syn.vec4(sc.jitter, sc.size);
+            const spin = syn.vec4(sc.spin.map((deg) => (deg * Math.PI) / 180) as unknown as V3, sc.seed);
+            scatter = {
+              bound: (q) => `opScatterBound(${q}, ${id}, ${jitter}, ${spin}, ${fmt(c.reach!)})`,
+              point: (q) => `opScatterPoint(${q}, ${id}, ${jitter}, ${spin})`,
+              size: `opScatterSize(${id}, ${jitter}, ${spin})`,
+            };
+          }
           near = {
             others: `opRepeatOthers(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${sphere})`,
-            bound: `opRepeatNearBound(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${sphere}, ${n})`,
-            far: `opRepeatFar(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${gap})`,
+            bound: `opRepeatNearBound(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${sphere}, ${st})`,
+            far: `${c.ring ? "opRepeatFarRing" : "opRepeatFar"}(${stmt.from}, ${sp}, ${cnt}, ${cell}, ${gap})`,
           };
         } else {
           const sector = fmt((2 * Math.PI) / c.mod.count);
@@ -620,16 +643,29 @@ function emitStmts(stmts: Stmt[], syn: Syntax, msyn: MaterialSyntax | null, dept
         push(syn.defStmt(stmt.acc, fmt(1e10)));
         if (msyn) push(msyn.defMat(matName(stmt.acc), msyn.lit(DEFAULT_MATERIAL)));
         push(`  ${syn.loopOpen(n, count)}`);
+        if (step) out.push(pad + "  " + syn.pointStmt(`st${k}`, step));
         if (near) {
           push(`    if (${n} > ${syn.uint(0)}) {`);
           push(`      if (${stmt.acc} <= ${lo}) { break; }`);
           push(`      if (${near.bound} * ${unit} >= ${stmt.acc}) { continue; }`);
           push(`    }`);
         }
-        out.push(pad + "  " + syn.pointStmt(stmt.point, copy));
+        let result = stmt.result;
+        if (scatter) {
+          const cq = `cq${k}`;
+          const size = `size${k}`;
+          out.push(pad + "  " + syn.pointStmt(cq, copy));
+          // A scattered copy's own sphere first: most candidates stop here.
+          push(`    if (${n} > ${syn.uint(0)}) { if (${scatter.bound(cq)} * ${unit} >= ${stmt.acc}) { continue; } }`);
+          out.push(pad + "  " + syn.pointStmt(stmt.point, scatter.point(cq)));
+          out.push(pad + "  " + syn.defStmt(size, scatter.size));
+          result = `${stmt.result} * ${size}`;
+        } else {
+          out.push(pad + "  " + syn.pointStmt(stmt.point, copy));
+        }
         emitStmts(stmt.body, syn, msyn, depth + 1, out);
-        if (msyn) push(`    if (${stmt.result} < ${stmt.acc}) { ${matName(stmt.acc)} = ${matName(stmt.result)}; }`);
-        out.push(pad + "  " + syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${stmt.result})`));
+        if (msyn) push(`    if (${result} < ${stmt.acc}) { ${matName(stmt.acc)} = ${matName(stmt.result)}; }`);
+        out.push(pad + "  " + syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${result})`));
         push("  }");
         if (near) push(`  if (${stmt.acc} > ${lo}) { ${syn.assignStmt(stmt.acc, `${syn.minFn}(${stmt.acc}, ${near.far} * ${unit})`).trim()} }`);
         break;
@@ -798,6 +834,7 @@ const TG_SYNTAX: Syntax = {
   vec3Expr: (c) => `d.vec3f(${c.join(", ")})`,
   uint: (n) => `${n}`,
   loopOpen: (n, count) => `for (let ${n} = d.u32(0); ${n} < ${count}; ${n}++) {`,
+  radix3: (v) => `d.vec3u(${v.join(", ")})`,
   helpers: { shapes: TG_HELPERS, rot: TG_ROT, smin: TG_SMIN, modifiers: MODIFIER_TG, imageSampler: TG_IMAGE_SAMPLER, image: TG_IMAGE },
 };
 
@@ -818,6 +855,7 @@ const WGSL_SYNTAX: Syntax = {
   vec3Expr: (c) => `vec3f(${c.join(", ")})`,
   uint: (n) => `${n}u`,
   loopOpen: (n, count) => `for (var ${n} = 0u; ${n} < ${count}u; ${n}++) {`,
+  radix3: (v) => `vec3u(${v.map((x) => `${x}u`).join(", ")})`,
   helpers: { shapes: WGSL_HELPERS, rot: WGSL_ROT, smin: WGSL_SMIN, modifiers: MODIFIER_WGSL, imageSampler: WGSL_IMAGE_SAMPLER, image: WGSL_IMAGE },
 };
 
@@ -838,6 +876,7 @@ const GLSL_SYNTAX: Syntax = {
   vec3Expr: (c) => `vec3(${c.join(", ")})`,
   uint: (n) => `${n}`,
   loopOpen: (n, count) => `for (int ${n} = 0; ${n} < ${count}; ${n}++) {`,
+  radix3: (v) => `ivec3(${v.join(", ")})`,
   helpers: { shapes: GLSL_HELPERS, rot: GLSL_ROT, smin: GLSL_SMIN, modifiers: MODIFIER_GLSL, imageSampler: "", image: GLSL_IMAGE },
 };
 
@@ -857,7 +896,18 @@ const RESERVED = new Set([
   "opRepeatNearBound",
   "opRepeatOthers",
   "opRepeatFar",
+  "opRepeatFarRing",
   "rot2",
+  "scatterHash",
+  "scatterBase",
+  "scatterValue",
+  "scatterMove",
+  "scatterSize",
+  "opScatterBound",
+  "repeatRing",
+  "opRepeatNearId",
+  "opScatterPoint",
+  "opScatterSize",
   "polarUv",
   "polarSet",
   "opPolarNear",

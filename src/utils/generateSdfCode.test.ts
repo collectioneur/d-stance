@@ -133,6 +133,17 @@ describe("generateSdfCode modifiers", () => {
     expect(out.typegpu).toMatch(/opPolarNear\(.*\) - d\.vec3f\(1\.5, 0\.0, 0\.0\)/);
   });
 
+  test("a scattered repeat moves, turns and scales each copy, in every language", () => {
+    const out = generateSdfCode(
+      scene([shape("cone", { modifiers: [{ kind: "repeat", spacing: [1.5, 1.5, 1.5], count: [3, 1, 1], scatter: { jitter: [0.1, 0, 0], spin: [0, 90, 0], size: 0.2, seed: 3 } }] })]),
+      null,
+    );
+    for (const code of [out.wgsl, out.glsl, out.typegpu]) {
+      expect(code).toMatch(/opScatterPoint\(cq\d+, opRepeatNearId\(/);
+      expect(code).toMatch(/min\(d\d+, d\d+ \* size\d+\)/);
+    }
+  });
+
   test("modifier output is stable", () => {
     const root = scene([
       group([shape("capsule")], { modifiers: [{ kind: "polar", count: 6, axis: 1, radius: 0 }, { kind: "elongate", size: [0.1, 0, 0] }] }),

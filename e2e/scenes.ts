@@ -158,7 +158,7 @@ export function modifiersScene() {
     items: [
       group([layer("sphere", [0.09, 0, 0, 0])], {
         position: at(-1, -0.6),
-        modifiers: [{ kind: "repeat", spacing: [0.25, 0.25, 0.25], count: [3, 1, 3] }],
+        modifiers: [{ kind: "repeat", spacing: [0.25, 0.25, 0.25], count: [3, 1, 3], scatter: { jitter: [0.02, 0.02, 0.02], spin: [20, 30, 0], size: 0.15, seed: 2 } }],
       }),
       layer("box", [0.12, 0.3, 0.12, 0], { position: at(0, -0.6), modifiers: [{ kind: "twist", amount: 4, axis: 1 }] }),
       group([layer("capsule", [0.04, 0.12, 0, 0], { position: [0.25, 0, 0] as V3, rotation: [0, 0, 90] as V3 })], {

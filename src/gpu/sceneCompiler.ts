@@ -30,7 +30,7 @@ import {
 } from "../store/sceneStore";
 import { bakeShape, composeGroupCtx, identityCtx, type BakeCtx } from "./bake";
 import { DEFAULT_MATERIAL, type Material } from "../store/material";
-import { POINT_MODIFIERS, activeModifiers, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
+import { POINT_MODIFIERS, activeModifiers, scatterActive, type Axis, type Modifier, type Vec3 } from "../store/modifiers";
 import { UNBOUNDED, polarShift, polarTurned, type ModifierPlan, type PolarReach } from "../sdf/modifierMath";
 import { groupPlan, shapePlan } from "../sdf/itemBounds";
 import { maxAbsScale } from "./bounds";
@@ -78,7 +78,11 @@ export interface CompileOptions {
 
 /** A point-modifier step as emitted (structure only; numbers live in slots). */
 type PointStep =
-  | { kind: "repeat"; slot: number }
+  /**
+   * `scatter`: copies vary (3 more slots: jitter + size, spin + seed, reach).
+   * `ring`: copies leave their cells; the cells checked per axis (plan.ring).
+   */
+  | { kind: "repeat"; slot: number; scatter: boolean; ring: Vec3 | null }
   | { kind: "mirror"; slot: number; axes: [boolean, boolean, boolean] }
   | { kind: "polar"; slot: number; axis: Axis; reach: PolarReach }
   | { kind: "twist" | "bend"; slot: number; axis: Axis }
@@ -216,13 +220,20 @@ class Builder {
     const steps = point.map((m, i): PointStep => {
       switch (m.kind) {
         case "repeat": {
-          const slot = this.alloc(4);
+          const scatter = scatterActive(m.scatter);
+          const slot = this.alloc(scatter ? 7 : 4);
           const copy = plan.copy[i]!;
           this.set(slot, ...m.spacing, 0);
           this.set(slot + 1, ...m.count, 0);
           this.set(slot + 2, ...(plan.gap[i] as Vec3), 0);
           this.set(slot + 3, ...copy.c, copy.r);
-          return { kind: "repeat", slot };
+          if (scatter) {
+            const sc = m.scatter!;
+            this.set(slot + 4, ...sc.jitter, sc.size);
+            this.set(slot + 5, ...(sc.spin.map((deg) => (deg * Math.PI) / 180) as Vec3), sc.seed);
+            this.set(slot + 6, plan.reach[i]!, 0, 0, 0);
+          }
+          return { kind: "repeat", slot, scatter, ring: plan.ring[i]! };
         }
         case "mirror": {
           const slot = this.alloc(1);
@@ -740,12 +751,37 @@ class Emitter {
         const sphere = slot(s.slot + 3);
         const id = this.fresh("c");
         this.push(depth, `let ${id} = ds_repeatCell(${q}, ${sp}, ${cnt});`);
+        // Candidates: the cells toward q (repeatStep), or the ring of cells
+        // around it, ring[k] choices per axis (repeatRing).
+        const ring = s.ring;
+        const radix = ring && `vec3u(${ring.map((v) => `${v}u`).join(", ")})`;
+        let warp: CopyLoop["warp"];
+        if (s.scatter) {
+          // Each copy moves, turns and grows by its cell's share; nested
+          // bounds use the smallest it can be.
+          const [jitter, spin] = [slot(s.slot + 4), slot(s.slot + 5)];
+          const cell = (st: string) => `ds_opRepeatNearId(${q}, ${sp}, ${id}, ${st})`;
+          warp = {
+            point: (p, st) => `ds_opScatterPoint(${p}, ${cell(st)}, ${jitter}, ${spin})`,
+            size: (st) => `ds_opScatterSize(${cell(st)}, ${jitter}, ${spin})`,
+            bound: (p, st) => `ds_opScatterBound(${p}, ${cell(st)}, ${jitter}, ${spin}, ${slot(s.slot + 6)}.x)`,
+            unit: `${unit} * (1.0 - ${jitter}.w)`,
+          };
+        }
         return this.nearest(
-          { count: "8u", rest, unit, depth, body },
+          {
+            count: ring ? `${ring[0] * ring[1] * ring[2]}u` : "8u",
+            step: (n) => (radix ? `ds_repeatRing(${n}, ${radix})` : `ds_repeatStep(${n})`),
+            rest,
+            unit,
+            depth,
+            body,
+            warp,
+          },
           `ds_opRepeatOthers(${q}, ${sp}, ${cnt}, ${id}, ${sphere})`,
-          (n) => `ds_opRepeatNearBound(${q}, ${sp}, ${cnt}, ${id}, ${sphere}, ${n})`,
-          (n) => `ds_opRepeatNear(${q}, ${sp}, ${id}, ${n})`,
-          `ds_opRepeatFar(${q}, ${sp}, ${cnt}, ${id}, ${gap})`,
+          (st) => `ds_opRepeatNearBound(${q}, ${sp}, ${cnt}, ${id}, ${sphere}, ${st})`,
+          (st) => `ds_opRepeatNear(${q}, ${sp}, ${id}, ${st})`,
+          `ds_${ring ? "opRepeatFarRing" : "opRepeatFar"}(${q}, ${sp}, ${cnt}, ${id}, ${gap})`,
         );
       }
       if (s.kind === "polar") {
@@ -776,44 +812,60 @@ class Emitter {
   /**
    * Union over candidate copies, nearest first (n = 0). Stops when no other
    * copy can be nearer than the result (`others`), skips a candidate whose
-   * `bound(n)` cannot beat it, and caps the result by `far` (the copies no
-   * candidate covers) when that is not settled.
+   * `bound` cannot beat it, and caps the result by `far` (the copies no
+   * candidate covers) when that is not settled. `bound` / `copy` take the
+   * candidate's key: its step (loop.step) or its number.
    */
-  nearest(
-    loop: CopyLoop,
-    others: string,
-    bound: (n: string) => string,
-    copy: (n: string) => string,
-    far: string,
-  ): Val {
+  nearest(loop: CopyLoop, others: string, bound: (key: string) => string, copy: (key: string) => string, far: string): Val {
     const { unit, depth } = loop;
     const lo = this.fresh("t");
     this.push(depth, `let ${lo} = ${others} * ${unit};`);
-    const acc = this.copyLoop(loop, copy, (n, r) => [
+    const acc = this.copyLoop(loop, copy, (n, key, r) => [
       `if (${n} > 0u) {`,
       `  if (${r} <= ${lo}) { break; }`,
-      `  if (${bound(n)} * ${unit} >= ${r}) { continue; }`,
+      `  if (${bound(key)} * ${unit} >= ${r}) { continue; }`,
       `}`,
     ]);
     this.push(depth, `if (${acc.d} > ${lo}) { ${acc.d} = min(${acc.d}, ${far} * ${unit}); }`);
     return acc;
   }
 
-  /** Union over `count` copies: `copy(n)` is copy n's point, `rest` then `body` run on it after `guard`'s lines. */
-  copyLoop(loop: CopyLoop, copy: (n: string) => string, guard?: (n: string, acc: string) => string[]): Val {
-    const { count, rest, unit, depth, body } = loop;
+  /**
+   * Union over `count` copies: `copy(key)` is a copy's point (key: its step
+   * when loop.step is given, else its number), `guard`'s lines run first,
+   * then `rest` and `body` on the point.
+   */
+  copyLoop(loop: CopyLoop, copy: (key: string) => string, guard?: (n: string, key: string, acc: string) => string[]): Val {
+    const { count, rest, unit, depth, body, warp } = loop;
     const id = this.n++;
     const acc = { d: `r${id}`, m: `rm${id}` };
     const n = `n${id}`;
     this.push(depth, `var ${acc.d} = 1e10;`);
     if (this.info) this.push(depth, `var ${acc.m} = ds_defaultMat();`);
     this.push(depth, `for (var ${n} = 0u; ${n} < ${count}; ${n}++) {`);
-    for (const line of guard?.(n, acc.d) ?? []) this.push(depth + 1, line);
+    let key = n;
+    if (loop.step) {
+      key = this.fresh("s");
+      this.push(depth + 1, `let ${key} = ${loop.step(n)};`);
+    }
+    for (const line of guard?.(n, key, acc.d) ?? []) this.push(depth + 1, line);
     const qn = this.fresh("q");
-    this.push(depth + 1, `let ${qn} = ${copy(n)};`);
-    const inner = this.withSteps(rest, qn, unit, depth + 1, body);
+    this.push(depth + 1, `let ${qn} = ${copy(key)};`);
+    let inner: Val;
     const t = this.fresh("t");
-    this.push(depth + 1, `let ${t} = ${inner.d};`);
+    if (warp) {
+      // A scattered copy's own sphere first: most candidates stop here.
+      this.push(depth + 1, `if (${n} > 0u && ${warp.bound(qn, key)} * ${unit} >= ${acc.d}) { continue; }`);
+      const qw = this.fresh("q");
+      const k = this.fresh("t");
+      this.push(depth + 1, `let ${qw} = ${warp.point(qn, key)};`);
+      this.push(depth + 1, `let ${k} = ${warp.size(key)};`);
+      inner = this.withSteps(rest, qw, warp.unit, depth + 1, body);
+      this.push(depth + 1, `let ${t} = ${inner.d} * ${k};`);
+    } else {
+      inner = this.withSteps(rest, qn, unit, depth + 1, body);
+      this.push(depth + 1, `let ${t} = ${inner.d};`);
+    }
     if (this.info) this.push(depth + 1, `if (${t} < ${acc.d}) { ${acc.m} = ${inner.m}; }`);
     this.push(depth + 1, `${acc.d} = min(${acc.d}, ${t});`);
     this.push(depth, `}`);
@@ -824,10 +876,23 @@ class Emitter {
 /** What a copy loop runs: `count` copies, then the remaining steps and the body in `unit`s. */
 interface CopyLoop {
   count: string;
+  /** A candidate's step from its number (repeats), computed once per candidate. */
+  step?: (n: string) => string;
   rest: PointStep[];
   unit: string;
   depth: number;
   body: (q: string, depth: number) => Val;
+  /**
+   * Scatter: a lower bound of a copy's distance (`bound`, before its frame
+   * is built), its own frame (`point`), the factor its distance takes
+   * (`size`), and `unit` inside it.
+   */
+  warp?: {
+    bound: (q: string, key: string) => string;
+    point: (q: string, key: string) => string;
+    size: (key: string) => string;
+    unit: string;
+  };
 }
 
 const RUNTIME_WGSL = `fn ds_xf(p: vec3f, i: u32) -> vec3f {

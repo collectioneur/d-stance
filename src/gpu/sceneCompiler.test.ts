@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { compileScene, countDataSlots, DATA_SLOTS } from "./sceneCompiler";
 import { group, kitchenSink, scene, shape } from "../test/fixtures";
 import type { SceneRoot } from "../store/sceneStore";
+import type { Scatter } from "../store/modifiers";
 
 const OPTS = { imageLayer: () => 3 };
 const compile = (root: SceneRoot) => compileScene(root, OPTS);
@@ -192,7 +193,9 @@ describe("scene compiler modifiers", () => {
     const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
     const out = compile(scene([shape("cone", { modifiers: [rep([3, 3, 3], 1.8)] })]));
     const code = body(out.code);
-    expect(code).toMatch(/let (t\d+) = ds_opRepeatOthers\(.*\n.*\n\s+for \(var (n\d+) = 0u; \2 < 8u; \2\+\+\) \{\n\s+if \(\2 > 0u\) \{\n\s+if \((r\d+) <= \1\) \{ break; \}\n\s+if \(ds_opRepeatNearBound\(.* >= \3\) \{ continue; \}/);
+    expect(code).toMatch(
+      /let (t\d+) = ds_opRepeatOthers\(.*\n.*\n\s+for \(var (n\d+) = 0u; \2 < 8u; \2\+\+\) \{\n\s+let (s\d+) = ds_repeatStep\(\2\);\n\s+if \(\2 > 0u\) \{\n\s+if \((r\d+) <= \1\) \{ break; \}\n\s+if \(ds_opRepeatNearBound\(.*, \3\) \* .* >= \4\) \{ continue; \}/,
+    );
     expect(code).toContain("ds_opRepeatFar(");
     // Spacing, counts and the gap are values: a drag never recompiles.
     expect(compile(scene([shape("cone", { modifiers: [rep([5, 1, 0], 3)] })])).code).toBe(out.code);
@@ -231,6 +234,26 @@ describe("scene compiler modifiers", () => {
       compile(scene([shape("cone", { modifiers: [{ kind: "polar", count: 6, axis: 1, radius }] })])).code;
     expect(ring(1.5)).toBe(ring(2));
     expect(ring(1.5)).toMatch(/ds_opPolarNear\(.*, n\d+\) - dsData\[\d+\]\.xyz/);
+  });
+
+  test("scatter adds code once it varies anything; its numbers are values", () => {
+    const grid = (scatter?: Scatter) =>
+      compile(scene([shape("cone", { modifiers: [{ kind: "repeat", spacing: [1.5, 1.5, 1.5], count: [3, 1, 3], ...(scatter && { scatter }) }] })])).code;
+    const body = (code: string) => code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    expect(body(grid())).not.toContain("ds_opScatterPoint(");
+    expect(grid({ jitter: [0, 0, 0], spin: [0, 0, 0], size: 0, seed: 5 })).toBe(grid());
+    const a = grid({ jitter: [0.1, 0, 0.1], spin: [0, 45, 0], size: 0.2, seed: 1 });
+    expect(a).toMatch(/let (q\d+) = ds_opScatterPoint\(q\d+, ds_opRepeatNearId\(/);
+    expect(a).toMatch(/let t\d+ = ds_sdCone\(.*\) \* dsData\[\d+\]\.x \* t\d+;/);
+    expect(grid({ jitter: [0.3, 0.2, 0], spin: [10, 0, 90], size: 0.5, seed: 42 })).toBe(a);
+  });
+
+  test("a repeat whose copies leave their cells checks the whole ring", () => {
+    const code = compile(scene([shape("sphere", { params: [0.6, 0, 0, 0], modifiers: [{ kind: "repeat", spacing: [1, 1, 1], count: [3, 1, 3] }] })])).code;
+    const body = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    // x and z: stay, toward or away; y has one copy.
+    expect(body).toMatch(/for \(var (n\d+) = 0u; \1 < 9u; \1\+\+\) \{\n\s+let s\d+ = ds_repeatRing\(\1, vec3u\(3u, 1u, 3u\)\);/);
+    expect(body).toContain("ds_opRepeatFarRing(");
   });
 
   test("twist and bend scale the result by 1 / Lipschitz", () => {

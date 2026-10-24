@@ -14,6 +14,22 @@
 export type Axis = 0 | 1 | 2;
 export type Vec3 = [number, number, number];
 
+/**
+ * Per-copy variation of a repeat, from an integer hash of each copy's cell
+ * (the same on every GPU): each copy moves, turns about its cell's center
+ * and grows or shrinks by its own random share of these.
+ */
+export interface Scatter {
+  /** Most a copy moves, per axis (local units). */
+  jitter: Vec3;
+  /** Most a copy turns, per axis (degrees, Euler XYZ like an item's rotation). */
+  spin: Vec3;
+  /** Most a copy grows or shrinks, as a fraction (≤ MAX_SCATTER_SIZE). */
+  size: number;
+  /** Picks another random layout. */
+  seed: number;
+}
+
 export type Modifier = (
   | {
       kind: "repeat";
@@ -21,6 +37,7 @@ export type Modifier = (
       spacing: Vec3;
       /** Copies per axis: 1 = not repeated, 0 = infinite, n ≥ 2 = n copies centered on the origin. */
       count: Vec3;
+      scatter?: Scatter;
     }
   | {
       kind: "mirror";
@@ -64,6 +81,15 @@ export const MIN_SPACING = 0.01;
 export const MAX_REPEAT_COUNT = 64;
 export const MAX_POLAR_COUNT = 64;
 export const MAX_DEFORM = 50;
+export const MAX_SCATTER_SIZE = 0.9;
+export const MAX_SCATTER_SEED = 9999;
+
+export const NO_SCATTER: Scatter = { jitter: [0, 0, 0], spin: [0, 0, 0], size: 0, seed: 0 };
+
+/** Whether a repeat's copies vary at all (the seed alone changes nothing). */
+export function scatterActive(s: Scatter | undefined): s is Scatter {
+  return !!s && (s.size > 0 || s.jitter.some((v) => v > 0) || s.spin.some((v) => v > 0));
+}
 
 export const MODIFIER_LABEL: Record<ModifierKind, string> = {
   repeat: "Repeat",
@@ -134,10 +160,19 @@ export function sanitizeModifier(m: unknown): Modifier | undefined {
   switch (raw.kind) {
     case "repeat": {
       const c = Array.isArray(raw.count) ? raw.count : [];
+      const sc = typeof raw.scatter === "object" && raw.scatter !== null ? (raw.scatter as Record<string, unknown>) : null;
       return {
         kind: "repeat",
         spacing: vec(raw.spacing, [1, 1, 1], MIN_SPACING, 100),
         count: [int(c[0], 1, 0, MAX_REPEAT_COUNT), int(c[1], 1, 0, MAX_REPEAT_COUNT), int(c[2], 1, 0, MAX_REPEAT_COUNT)],
+        ...(sc && {
+          scatter: {
+            jitter: vec(sc.jitter, [0, 0, 0], 0, 100),
+            spin: vec(sc.spin, [0, 0, 0], 0, 180),
+            size: num(sc.size, 0, 0, MAX_SCATTER_SIZE),
+            seed: int(sc.seed, 0, 0, MAX_SCATTER_SEED),
+          },
+        }),
         ...off,
       };
     }

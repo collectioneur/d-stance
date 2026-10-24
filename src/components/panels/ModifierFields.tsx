@@ -5,14 +5,18 @@ import {
   MAX_MODIFIERS,
   MAX_POLAR_COUNT,
   MAX_REPEAT_COUNT,
+  MAX_SCATTER_SEED,
+  MAX_SCATTER_SIZE,
   MIN_SPACING,
   MODIFIER_HINT,
   MODIFIER_LABEL,
+  NO_SCATTER,
   POINT_MODIFIERS,
   createModifier,
   type Axis,
   type Modifier,
   type ModifierKind,
+  type Scatter,
   type Vec3,
 } from "../../store/modifiers";
 import { shapeBoundRadius } from "../../gpu/bounds";
@@ -135,6 +139,35 @@ function ScalarRow({
   );
 }
 
+/** Per-copy variation of a repeat: each copy moves, turns and grows by its own random share. */
+function ScatterFields({ value, onChange }: { value: Scatter; onChange: (s: Scatter) => void }) {
+  return (
+    <>
+      <Vec3Row label="Jitter" value={value.jitter} min={0} max={100} step={0.05} onChange={(jitter) => onChange({ ...value, jitter })} />
+      <Vec3Row label="Spin" value={value.spin} min={0} max={180} step={5} onChange={(spin) => onChange({ ...value, spin })} />
+      <ScalarRow
+        label="Size ±"
+        ariaLabel="Scatter size"
+        value={value.size}
+        min={0}
+        max={MAX_SCATTER_SIZE}
+        step={0.05}
+        onChange={(size) => onChange({ ...value, size })}
+      />
+      <ScalarRow
+        label="Seed"
+        ariaLabel="Scatter seed"
+        value={value.seed}
+        min={0}
+        max={MAX_SCATTER_SEED}
+        step={1}
+        integer
+        onChange={(seed) => onChange({ ...value, seed })}
+      />
+    </>
+  );
+}
+
 function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) => void }) {
   switch (m.kind) {
     case "repeat":
@@ -142,6 +175,7 @@ function ModifierBody({ m, onChange }: { m: Modifier; onChange: (m: Modifier) =>
         <>
           <Vec3Row label="Spacing" value={m.spacing} min={MIN_SPACING} max={100} step={0.05} onChange={(spacing) => onChange({ ...m, spacing })} />
           <Vec3Row label="Count" value={m.count} min={0} max={MAX_REPEAT_COUNT} step={1} integer onChange={(count) => onChange({ ...m, count })} />
+          <ScatterFields value={m.scatter ?? NO_SCATTER} onChange={(scatter) => onChange({ ...m, scatter })} />
         </>
       );
     case "mirror":
