@@ -9,7 +9,8 @@
  * which useGpu.ts compiles in the background (see ProgramCache there).
  *
  * Two functions are generated from the same walk:
- *   ds_sdScene(p)   → f32        hot path: march, normals, AO, reflections
+ *   ds_sdScene(p, standIn) → f32 hot path: march, normals, AO, reflections,
+ *                                 soft shadows (standIn: see Emitter.node)
  *   ds_sceneInfo(p) → vec4f      once per pixel at the hit:
  *                                 x = highlight glow (selection / hover)
  *                                 y = pick id (leaf index + 1, 0 = none)
@@ -648,8 +649,10 @@ class Emitter {
 
   /**
    * One node's value. `cull`: every op from here to the root is hard union,
-   * so beyond CULL_DIST the sphere distance itself may stand in (used for
-   * the first child of a list, which has no running result to gate on).
+   * so beyond `standIn` (ds_sdScene's argument: CULL_DIST for marches; huge
+   * where the distance is read as "how near is geometry", like soft shadows)
+   * the sphere distance itself may stand in (used for the first child of a
+   * list, which has no running result to gate on).
    */
   node(node: LeafNode | GroupNode, depth: number, cull: boolean, frame: Frame): Val {
     const id = this.n++;
@@ -657,7 +660,7 @@ class Emitter {
     if (cull) {
       this.push(depth, `var ${out.d} = ${this.bound(node, frame)};`);
       if (this.info) this.push(depth, `var ${out.m} = ds_defaultMat();`);
-      this.push(depth, `if (${out.d} <= ${f(CULL_DIST)}) {`);
+      this.push(depth, `if (${out.d} <= ${this.info ? f(CULL_DIST) : "standIn"}) {`);
       const val = this.value(node, depth + 1, frame);
       this.push(depth + 1, `${out.d} = ${val.d};`);
       if (this.info) this.push(depth + 1, `${out.m} = ${val.m};`);
@@ -911,7 +914,7 @@ export function compileScene(root: SceneRoot, opts: CompileOptions): CompiledSce
 
   const code = [
     HELPERS_WGSL,
-    `fn ds_sdScene(p: vec3f) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc};\n}`,
+    `fn ds_sdScene(p: vec3f, standIn: f32) -> f32 {\n${sdf.lines.join("\n")}\n  return ${sdfAcc};\n}`,
     `fn ds_sceneInfo(p: vec3f) -> DsInfo {
   var info = vec4f(0.0, 0.0, 1e9, 0.0);
 ${info.lines.join("\n")}

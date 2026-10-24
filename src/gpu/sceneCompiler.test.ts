@@ -59,7 +59,7 @@ describe("scene compiler", () => {
     const code = compile(kitchenSink()).code;
     expect(code).not.toMatch(/(?<!ds_)\bsd[A-Z]\w*\(/);
     expect(code).toContain("fn ds_sdSphere(");
-    expect(code).toContain("fn ds_sdScene(p: vec3f) -> f32");
+    expect(code).toContain("fn ds_sdScene(p: vec3f, standIn: f32) -> f32");
     expect(code).toContain("fn ds_sceneInfo(p: vec3f) -> DsInfo");
   });
 
@@ -113,9 +113,12 @@ describe("scene compiler", () => {
 
   test("the head of a hard-union scene may stand in its sphere far away", () => {
     const code = compile(scene([shape("box"), shape("sphere")])).code;
-    expect(code).toMatch(/var v\d+ = ds_bound\(p, 5u\);\n\s+if \(v\d+ <= 0\.15\)/);
+    const sdf = code.slice(code.indexOf("fn ds_sdScene"), code.indexOf("fn ds_sceneInfo"));
+    // How far is the caller's: marches pass CULL_DIST, soft shadows never let it stand in.
+    expect(sdf).toMatch(/var v\d+ = ds_bound\(p, 5u\);\n\s+if \(v\d+ <= standIn\)/);
+    expect(code.slice(code.indexOf("fn ds_sceneInfo"))).toMatch(/if \(v\d+ <= 0\.15\)/);
     const notUnion = compile(scene([shape("box"), shape("sphere", { op: "subtract" })])).code;
-    expect(notUnion).not.toMatch(/<= 0\.15/);
+    expect(notUnion).not.toMatch(/<= (0\.15|standIn)/);
   });
 
   test("slot budget fits the uniform binding for a capped scene", () => {
