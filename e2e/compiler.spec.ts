@@ -147,3 +147,70 @@ test.describe("grow-in after a compile", () => {
     expect(r.progress!).toBeLessThan(0.15);
   });
 });
+
+test.describe("compile indicator", () => {
+  const setSince = (page: Page, since: "now" | null) =>
+    page.evaluate(async (s) => {
+      const { useCompileStore } = await import("/src/store/compileStore.ts");
+      useCompileStore.setState({ since: s === "now" ? performance.now() : null });
+    }, since);
+
+  test("a quick structural edit never shows it", async ({ page }) => {
+    await openEditor(page, { id: "r", name: "Scene", items: [sphere()] });
+    await waitForProgram(page);
+    await page.evaluate(() => {
+      const el = document.querySelector(".compile-indicator")!;
+      (window as unknown as { __shown: boolean }).__shown = false;
+      new MutationObserver(() => {
+        if (el.getAttribute("data-open") === "true") (window as unknown as { __shown: boolean }).__shown = true;
+      }).observe(el, { attributes: true });
+    });
+    await page.getByTitle("Add Box (1)").click();
+    await waitForProgram(page);
+    await page.waitForTimeout(600);
+    expect(await page.evaluate(() => (window as unknown as { __shown: boolean }).__shown)).toBe(false);
+  });
+
+  test("shows after 250 ms and stays at least 400 ms", async ({ page }) => {
+    await openEditor(page, { id: "r", name: "Scene", items: [sphere()] });
+    await waitForProgram(page);
+    const indicator = page.locator(".compile-indicator");
+    await setSince(page, "now");
+    await page.waitForTimeout(120);
+    await expect(indicator).toHaveAttribute("data-open", "false");
+    await expect(indicator).toHaveAttribute("data-open", "true", { timeout: 1000 });
+    // Done the moment it appeared: it stays a little, then goes.
+    await setSince(page, null);
+    await page.waitForTimeout(150);
+    await expect(indicator).toHaveAttribute("data-open", "true");
+    await expect(indicator).toHaveAttribute("data-open", "false", { timeout: 1000 });
+  });
+
+  test("a long compile counts the seconds", async ({ page }) => {
+    await openEditor(page, { id: "r", name: "Scene", items: [sphere()] });
+    await waitForProgram(page);
+    const indicator = page.locator(".compile-indicator");
+    await setSince(page, "now");
+    await expect(indicator).not.toContainText(/\d\.\d s/);
+    await expect(indicator).toContainText(/\d\.\d s/, { timeout: 2000 });
+    await setSince(page, null);
+    await expect(indicator).toHaveAttribute("data-open", "false", { timeout: 1000 });
+  });
+
+  test("the renderer reports a compile from start to finish", async ({ page }) => {
+    await openEditor(page, crowdScene(40) as never);
+    await waitForProgram(page);
+    await page.evaluate(async () => {
+      const { useCompileStore } = await import("/src/store/compileStore.ts");
+      const w = window as unknown as { __since: (number | null)[] };
+      w.__since = [];
+      useCompileStore.subscribe((s) => w.__since.push(s.since));
+    });
+    await page.getByTitle("Add Box (1)").click();
+    await waitForProgram(page);
+    const seen = await page.evaluate(() => (window as unknown as { __since: (number | null)[] }).__since);
+    expect(seen.length).toBe(2);
+    expect(typeof seen[0]).toBe("number");
+    expect(seen[1]).toBeNull();
+  });
+});

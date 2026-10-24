@@ -18,6 +18,7 @@ import {
   type ObjectGroup,
   type SceneRoot,
 } from "../store/sceneStore";
+import { useCompileStore } from "../store/compileStore";
 import { useGizmoStore } from "../store/gizmoStore";
 import { useRenderStore, type RenderMode } from "../store/renderStore";
 import { QUALITY_PRESETS, dprForPreset } from "../utils/quality";
@@ -231,6 +232,8 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
        * Compile the drawn root when it changed, promote a ready program, and
        * upload values that match the active program's layout.
        */
+      let compilePending = false;
+
       function syncSceneProgram(drawnRoot: SceneRoot, renderMode: RenderMode): boolean {
         if (drawnRoot !== latestRoot) {
           uploadImageSlots(drawnRoot);
@@ -248,6 +251,12 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
         } else if (latest && active && active.scene !== latest) {
           active = { program: active.program, scene: latest };
           pickItemIds = latest.leafIds;
+        }
+        // The compile indicator: the screen lags while the scene's program compiles.
+        const pending = !!latest && latest.code !== active?.program.code && !programs.get(latest.code)?.failed;
+        if (pending !== compilePending) {
+          compilePending = pending;
+          useCompileStore.setState({ since: pending ? performance.now() : null });
         }
         if (!active || !dataDirty) return false;
         const scene = active.scene;
@@ -1279,6 +1288,7 @@ export function useGpu(canvasRef: RefObject<HTMLCanvasElement | null>) {
       }
 
       registeredCleanup = () => {
+        useCompileStore.setState({ since: null });
         unsubGizmoMode();
         observer.disconnect();
         cancelAnimationFrame(animFrameId);
